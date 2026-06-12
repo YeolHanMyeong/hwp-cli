@@ -23,8 +23,8 @@ pub mod units;
 pub use control::{Cell, Control, GenericControl, PageDef, ParagraphList, SectionDef, Table};
 pub use document::{DocMeta, Document, Section};
 pub use header::{
-    BinDataItem, CharShape, DocHeader, DocumentProperties, FaceName, LANG_COUNT, ParaShape,
-    RawEntry, Style,
+    BinDataItem, BorderFill, BorderLine, CharShape, DocHeader, DocumentProperties, FaceName,
+    LANG_COUNT, ParaShape, RawEntry, Style,
 };
 pub use ids::{BinDataId, BorderFillId, CharShapeId, FaceNameId, ParaShapeId, StyleId};
 pub use opaque::OpaqueRecord;

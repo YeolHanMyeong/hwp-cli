@@ -70,6 +70,34 @@ fn hwpx_폴백_렌더() {
 }
 
 #[test]
+fn 표_렌더() {
+    let doc = hwp5::read_document(&fixture("hwp5/work_report.hwp"))
+        .unwrap()
+        .document;
+    let out = render_document(&doc, &RenderOptions::default()).unwrap();
+    assert_eq!(out.pages.len(), 1);
+    let page = &out.pages[0];
+
+    // 표 테두리 + 셀 텍스트로 어두운 픽셀이 충분해야 한다
+    assert!(
+        dark_pixels(page) > 5_000,
+        "표 선·텍스트: {}",
+        dark_pixels(page)
+    );
+
+    // 표는 더 이상 미지원으로 집계되지 않는다 (꼬리말·글상자 2개만 남음)
+    let skipped: Vec<_> = out
+        .report
+        .iter()
+        .filter(|w| w.contains("미지원 컨트롤"))
+        .collect();
+    assert!(
+        skipped.iter().all(|w| w.contains("2개")),
+        "표가 미지원으로 집계됨: {skipped:?}"
+    );
+}
+
+#[test]
 fn 빈_문서_렌더() {
     let doc = hwp5::read_document(&fixture("hwp5/bookmark.hwp"))
         .unwrap()

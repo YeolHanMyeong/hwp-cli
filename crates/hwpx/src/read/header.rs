@@ -4,13 +4,55 @@
 //! 스타일(style). 테두리/번호 등은 추후 마일스톤에서 채운다.
 
 use hwp_model::{
-    CharShape, CharShapeId, DocHeader, FaceName, LANG_COUNT, ParaShape, ParaShapeId, Style,
+    BorderFill, BorderLine, CharShape, CharShapeId, DocHeader, FaceName, LANG_COUNT, ParaShape,
+    ParaShapeId, Style,
 };
 use quick_xml::Reader;
-use quick_xml::events::Event;
+use quick_xml::events::{BytesStart, Event};
 
 use crate::error::{HwpxError, Result};
 use crate::read::xml::{attr, attr_i32, attr_u16, attr_u32, parse_color};
+
+/// OWPML 테두리선 종류 → hwp5 코드.
+fn line_type_code(s: &str) -> u8 {
+    match s {
+        "NONE" => 0,
+        "SOLID" => 1,
+        "DASH" => 2,
+        "DOT" => 3,
+        "DASH_DOT" => 4,
+        "DASH_DOT_DOT" => 5,
+        "LONG_DASH" => 6,
+        "CIRCLE" => 7,
+        "DOUBLE_SLIM" => 8,
+        "SLIM_THICK" => 9,
+        "THICK_SLIM" => 10,
+        "SLIM_THICK_SLIM" => 11,
+        _ => 1,
+    }
+}
+
+/// "0.12 mm" → 굵기 인덱스 (가장 가까운 값).
+fn width_index(s: &str) -> u8 {
+    const TABLE: [f32; 16] = [
+        0.1, 0.12, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0,
+    ];
+    let mm: f32 = s.trim_end_matches("mm").trim().parse().unwrap_or(0.12);
+    TABLE
+        .iter()
+        .enumerate()
+        .min_by(|a, b| (a.1 - mm).abs().total_cmp(&(b.1 - mm).abs()))
+        .map(|(i, _)| i as u8)
+        .unwrap_or(1)
+}
+
+fn parse_border_line(e: &BytesStart<'_>) -> BorderLine {
+    BorderLine {
+        line_type: attr(e, "type").map_or(1, |t| line_type_code(&t)),
+        width: attr(e, "width").map_or(1, |w| width_index(&w)),
+        color: attr(e, "color").map_or(0, |c| parse_color(&c)),
+    }
+}
 
 /// OWPML 언어 이름 → 7언어 슬롯 인덱스.
 fn lang_slot(name: &str) -> Option<usize> {
@@ -48,6 +90,7 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
     let mut current_lang: Option<usize> = None;
     let mut current_char: Option<CharShape> = None;
     let mut current_para: Option<ParaShape> = None;
+    let mut current_border: Option<BorderFill> = None;
 
     loop {
         let event = reader.read_event().map_err(|e| HwpxError::Xml {
@@ -127,6 +170,38 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
                             ps.attr1 |= alignment_code(&h) << 2;
                         }
                     }
+                    b"borderFill" => {
+                        current_border = Some(BorderFill::default());
+                        if empty {
+                            header
+                                .border_fills
+                                .push(current_border.take().expect("방금 생성"));
+                        }
+                    }
+                    b"leftBorder" | b"rightBorder" | b"topBorder" | b"bottomBorder" => {
+                        if let Some(bf) = &mut current_border {
+                            let idx = match e.local_name().as_ref() {
+                                b"leftBorder" => 0,
+                                b"rightBorder" => 1,
+                                b"topBorder" => 2,
+                                _ => 3,
+                            };
+                            bf.sides[idx] = parse_border_line(e);
+                        }
+                    }
+                    b"diagonal" => {
+                        if let Some(bf) = &mut current_border {
+                            bf.diagonal = parse_border_line(e);
+                        }
+                    }
+                    b"winBrush" => {
+                        if let Some(bf) = &mut current_border
+                            && let Some(c) = attr(e, "faceColor")
+                        {
+                            bf.fill_type |= 0x1;
+                            bf.bg_color = Some(parse_color(&c));
+                        }
+                    }
                     b"style" => {
                         header.styles.push(Style {
                             name: attr(e, "name").unwrap_or_default(),
@@ -146,6 +221,11 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
                 b"charPr" => {
                     if let Some(cs) = current_char.take() {
                         header.char_shapes.push(cs);
+                    }
+                }
+                b"borderFill" => {
+                    if let Some(bf) = current_border.take() {
+                        header.border_fills.push(bf);
                     }
                 }
                 b"paraPr" => {

@@ -91,6 +91,8 @@ pub struct Cell {
     pub row_span: u16,
     pub width: HwpUnit,
     pub height: HwpUnit,
+    /// 셀 안쪽 여백 (왼/오른/위/아래, HWPUNIT)
+    pub margins: [u16; 4],
     pub border_fill: BorderFillId,
     /// LIST_HEADER 페이로드 중 미해석 부분
     #[serde(with = "hex_bytes")]

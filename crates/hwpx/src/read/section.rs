@@ -347,7 +347,7 @@ fn parse_table(
         match next_event(reader)? {
             Event::Start(e) => match e.local_name().as_ref() {
                 b"tc" => {
-                    let cell = parse_cell(reader, warnings)?;
+                    let cell = parse_cell(reader, &e, warnings)?;
                     table.cells.push(cell);
                 }
                 b"tr" => {} // 행은 cellAddr로 복원되므로 컨테이너로만 취급
@@ -373,7 +373,11 @@ fn parse_table(
 }
 
 /// `<hp:tc>` — 셀 하나.
-fn parse_cell(reader: &mut XmlReader<'_>, warnings: &mut Vec<String>) -> Result<Cell> {
+fn parse_cell(
+    reader: &mut XmlReader<'_>,
+    start: &BytesStart<'_>,
+    warnings: &mut Vec<String>,
+) -> Result<Cell> {
     let mut cell = Cell {
         col: 0,
         row: 0,
@@ -381,7 +385,8 @@ fn parse_cell(reader: &mut XmlReader<'_>, warnings: &mut Vec<String>) -> Result<
         row_span: 1,
         width: HwpUnit(0),
         height: HwpUnit(0),
-        border_fill: hwp_model::BorderFillId(0),
+        margins: [0; 4],
+        border_fill: hwp_model::BorderFillId(attr_u16(start, "borderFillIDRef").unwrap_or(0)),
         header_tail: Vec::new(),
         paragraphs: Vec::new(),
     };
@@ -399,6 +404,14 @@ fn parse_cell(reader: &mut XmlReader<'_>, warnings: &mut Vec<String>) -> Result<
                 b"cellSz" => {
                     cell.width = HwpUnit(attr_i32(&e, "width").unwrap_or(0));
                     cell.height = HwpUnit(attr_i32(&e, "height").unwrap_or(0));
+                }
+                b"cellMargin" => {
+                    cell.margins = [
+                        attr_u16(&e, "left").unwrap_or(0),
+                        attr_u16(&e, "right").unwrap_or(0),
+                        attr_u16(&e, "top").unwrap_or(0),
+                        attr_u16(&e, "bottom").unwrap_or(0),
+                    ];
                 }
                 b"p" => {
                     cell.paragraphs.push(parse_paragraph(reader, &e, warnings)?);

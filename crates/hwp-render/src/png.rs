@@ -26,6 +26,54 @@ fn render_page(page: &PageList, dpi: f32) -> Result<Pixmap, RenderError> {
 
     for item in &page.items {
         match item {
+            Item::Rect {
+                x,
+                y,
+                w: rw,
+                h: rh,
+                fill,
+            } => {
+                if let Some(rect) = tiny_skia::Rect::from_xywh(
+                    *x * px_scale,
+                    *y * px_scale,
+                    rw * px_scale,
+                    rh * px_scale,
+                ) {
+                    let mut paint = Paint::default();
+                    let (r, g, b) = colorref_rgb(*fill);
+                    paint.set_color_rgba8(r, g, b, 255);
+                    pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+                }
+            }
+            Item::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                color,
+                width,
+            } => {
+                let mut pb = PathBuilder::new();
+                pb.move_to(*x1, *y1);
+                pb.line_to(*x2, *y2);
+                if let Some(path) = pb.finish() {
+                    let mut paint = Paint::default();
+                    let (r, g, b) = colorref_rgb(*color);
+                    paint.set_color_rgba8(r, g, b, 255);
+                    paint.anti_alias = true;
+                    let stroke = Stroke {
+                        width: width.max(0.2),
+                        ..Stroke::default()
+                    };
+                    pixmap.stroke_path(
+                        &path,
+                        &paint,
+                        &stroke,
+                        Transform::from_scale(px_scale, px_scale),
+                        None,
+                    );
+                }
+            }
             Item::Glyphs { x, y, run } => {
                 let face = match ttf_parser::Face::parse(&run.font.data, run.font.index) {
                     Ok(f) => f,

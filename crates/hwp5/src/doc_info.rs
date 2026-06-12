@@ -92,7 +92,14 @@ fn parse_id_mapping_child(
                 }
             }
         }
-        tag::BORDER_FILL => header.border_fills.push(raw_entry(node)),
+        tag::BORDER_FILL => match parse_border_fill(&node.data) {
+            Ok(bf) => header.border_fills.push(bf),
+            Err(e) => {
+                warnings.push(format!("BORDER_FILL 파싱 실패: {e}"));
+                header.border_fills.push(hwp_model::BorderFill::default());
+                header.extras.push(to_opaque(node));
+            }
+        },
         tag::CHAR_SHAPE => match parse_char_shape(&node.data) {
             Ok(cs) => header.char_shapes.push(cs),
             Err(e) => {
@@ -270,6 +277,40 @@ fn parse_style(data: &[u8]) -> Result<Style> {
         lang_id,
         para_shape,
         char_shape,
+        tail: r.take_rest().to_vec(),
+    })
+}
+
+/// BORDER_FILL (실측 레이아웃): attr u16 + 4변×(종류 u8, 굵기 u8, 색 u32)
+/// + 대각선 6B + 채우기 종류 u32 + [단색이면 배경색 u32 …].
+fn parse_border_fill(data: &[u8]) -> Result<hwp_model::BorderFill> {
+    use hwp_model::BorderLine;
+    let mut r = ByteReader::new(data);
+    let attr = r.read_u16()?;
+    let read_line = |r: &mut ByteReader<'_>| -> Result<BorderLine> {
+        Ok(BorderLine {
+            line_type: r.read_u8()?,
+            width: r.read_u8()?,
+            color: r.read_u32()?,
+        })
+    };
+    let mut sides = [BorderLine::default(); 4];
+    for side in &mut sides {
+        *side = read_line(&mut r)?;
+    }
+    let diagonal = read_line(&mut r)?;
+    let fill_type = r.read_u32()?;
+    let bg_color = if fill_type & 0x1 != 0 {
+        Some(r.read_u32()?)
+    } else {
+        None
+    };
+    Ok(hwp_model::BorderFill {
+        attr,
+        sides,
+        diagonal,
+        fill_type,
+        bg_color,
         tail: r.take_rest().to_vec(),
     })
 }

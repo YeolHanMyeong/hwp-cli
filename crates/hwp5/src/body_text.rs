@@ -394,7 +394,7 @@ fn parse_cell_header(data: &[u8]) -> Result<Cell> {
     let row_span = r.read_u16()?;
     let width = HwpUnit(r.read_i32()?);
     let height = HwpUnit(r.read_i32()?);
-    let _margins = r.read_u16_array::<4>()?;
+    let margins = r.read_u16_array::<4>()?;
     let border_fill = hwp_model::BorderFillId(r.read_u16()?);
     Ok(Cell {
         col,
@@ -403,6 +403,7 @@ fn parse_cell_header(data: &[u8]) -> Result<Cell> {
         row_span,
         width,
         height,
+        margins,
         border_fill,
         header_tail: r.take_rest().to_vec(),
         paragraphs: Vec::new(),

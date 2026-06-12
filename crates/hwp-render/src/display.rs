@@ -18,4 +18,21 @@ pub struct PageList {
 pub enum Item {
     /// 베이스라인 원점 (x, y)에 배치된 글리프 런
     Glyphs { x: f32, y: f32, run: ShapedRun },
+    /// 채움 사각형 (셀 배경 등) — COLORREF
+    Rect {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        fill: u32,
+    },
+    /// 선분 (테두리 등) — COLORREF, 굵기 pt
+    Line {
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        color: u32,
+        width: f32,
+    },
 }

@@ -14,8 +14,8 @@ pub struct DocHeader {
     /// 언어 슬롯별 글꼴 목록
     pub fonts: [Vec<FaceName>; LANG_COUNT],
     pub bin_data: Vec<BinDataItem>,
-    /// 테두리/배경 — M1에서는 원시 보존 (M5 렌더링에서 파싱)
-    pub border_fills: Vec<RawEntry>,
+    /// 테두리/배경. 참조는 1-기반(BorderFillId 1 = 첫 항목) 관례.
+    pub border_fills: Vec<BorderFill>,
     pub char_shapes: Vec<CharShape>,
     pub tab_defs: Vec<RawEntry>,
     pub numberings: Vec<RawEntry>,
@@ -162,4 +162,50 @@ pub struct RawEntry {
     #[serde(with = "hex_bytes")]
     pub data: Vec<u8>,
     pub children: Vec<OpaqueRecord>,
+}
+
+/// 테두리선 하나. 굵기는 mm 테이블 인덱스 (0=0.1mm, 1=0.12mm, … 15=5.0mm).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BorderLine {
+    /// 0 = 없음, 1 = 실선, 2+ = 점선/이중선 등
+    pub line_type: u8,
+    pub width: u8,
+    /// COLORREF (0x00BBGGRR)
+    pub color: u32,
+}
+
+impl BorderLine {
+    /// 굵기 인덱스 → mm (한글문서파일형식 5.0 굵기 표).
+    pub fn width_mm(&self) -> f32 {
+        const TABLE: [f32; 16] = [
+            0.1, 0.12, 0.15, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0,
+        ];
+        TABLE.get(self.width as usize).copied().unwrap_or(0.12)
+    }
+
+    pub fn is_visible(&self) -> bool {
+        self.line_type != 0
+    }
+}
+
+/// BORDER_FILL — 테두리/배경 (실측으로 확정한 레이아웃).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BorderFill {
+    pub attr: u16,
+    /// 왼/오른/위/아래
+    pub sides: [BorderLine; 4],
+    pub diagonal: BorderLine,
+    /// 채우기 종류 비트 (bit0 = 단색)
+    pub fill_type: u32,
+    /// 단색 배경 (COLORREF, 0xFFFFFFFF = 없음)
+    pub bg_color: Option<u32>,
+    #[serde(with = "hex_bytes")]
+    pub tail: Vec<u8>,
+}
+
+impl BorderFill {
+    /// 그릴 배경색 (없음 표식 제외).
+    pub fn visible_bg(&self) -> Option<u32> {
+        self.bg_color.filter(|&c| c != 0xFFFF_FFFF)
+    }
 }
