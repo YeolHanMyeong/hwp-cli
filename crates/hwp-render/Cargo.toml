@@ -1,0 +1,10 @@
+[package]
+name = "hwp-render"
+description = "IR → PNG/SVG/PDF 페이지 렌더러"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hwp-model = { workspace = true }

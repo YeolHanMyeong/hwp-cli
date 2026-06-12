@@ -1,0 +1,17 @@
+[package]
+name = "hwp5"
+description = "HWP 5.0 바이너리 포맷 reader/writer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hwp-model = { workspace = true }
+cfb = { workspace = true }
+flate2 = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

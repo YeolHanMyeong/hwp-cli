@@ -1,0 +1,11 @@
+[package]
+name = "hwp-convert"
+description = "IR ↔ markdown/JSON 변환"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hwp-model = { workspace = true }
+serde_json = { workspace = true }

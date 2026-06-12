@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+.DS_Store
+
+# 대형 corpus는 커밋하지 않음 (HWP_CORPUS_DIR 외부 디렉터리 사용)
+/corpus
