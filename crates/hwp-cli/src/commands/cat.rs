@@ -1,30 +1,45 @@
 //! `hwp cat` — 텍스트 추출.
 //!
-//! 본문 파싱 기반 추출(.hwp)과 `--preview`(PrvText 미리보기)를 지원한다.
-//! 미리보기는 컨테이너 계층만 사용하므로 본문 파싱이 실패하는 파일의
-//! 폴백으로도 쓰인다. .hwpx 본문 추출은 M2에서 구현한다.
+//! 본문 파싱 기반 추출(plain/markdown/json)과 `--preview`(PrvText)를
+//! 지원한다. 미리보기는 컨테이너 계층만 사용하므로 본문 파싱이 실패하는
+//! 파일의 폴백으로도 쓰인다.
 
 use std::path::Path;
 
+use hwp_model::Document;
+
+use crate::TextFormat;
 use crate::format::{FileFormat, detect};
 
-/// 본문 텍스트 추출.
-pub fn run(path: &Path) -> anyhow::Result<()> {
+/// 포맷을 감지해 IR로 읽는다 (cat/convert 공용).
+pub fn load_document(path: &Path) -> anyhow::Result<Document> {
     match detect(path)? {
         FileFormat::Hwp5 => {
             let result = hwp5::read_document(path)?;
             for w in &result.warnings {
                 eprintln!("경고: {w}");
             }
-            print!("{}", result.document.plain_text());
-            Ok(())
+            Ok(result.document)
         }
         FileFormat::Hwpx => {
-            anyhow::bail!(
-                "hwpx 본문 추출은 아직 구현되지 않았습니다 (M2 예정, --preview는 사용 가능)"
-            )
+            let result = hwpx::read_document(path)?;
+            for w in &result.warnings {
+                eprintln!("경고: {w}");
+            }
+            Ok(result.document)
         }
     }
+}
+
+/// 본문 텍스트 추출.
+pub fn run(path: &Path, format: TextFormat) -> anyhow::Result<()> {
+    let doc = load_document(path)?;
+    match format {
+        TextFormat::Plain => print!("{}", doc.plain_text()),
+        TextFormat::Markdown => print!("{}", hwp_convert::to_markdown(&doc)),
+        TextFormat::Json => println!("{}", hwp_convert::to_json(&doc, true)?),
+    }
+    Ok(())
 }
 
 pub fn preview(path: &Path) -> anyhow::Result<()> {

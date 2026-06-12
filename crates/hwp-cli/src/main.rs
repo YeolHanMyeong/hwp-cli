@@ -113,15 +113,13 @@ fn main() -> anyhow::Result<()> {
             preview: true,
             ..
         } => commands::cat::preview(&file),
-        Cmd::Cat {
-            file,
-            format: TextFormat::Plain,
-            ..
-        } => commands::cat::run(&file),
-        Cmd::Cat { .. } => {
-            anyhow::bail!("`hwp cat`의 markdown/json 출력은 아직 구현되지 않았습니다 (M2 예정)")
-        }
-        Cmd::Convert { .. } => anyhow::bail!("`hwp convert`는 아직 구현되지 않았습니다 (M2 예정)"),
+        Cmd::Cat { file, format, .. } => commands::cat::run(&file, format),
+        Cmd::Convert {
+            input,
+            output,
+            to,
+            strict,
+        } => commands::convert::run(&input, &output, to, strict),
         Cmd::Render { .. } => anyhow::bail!("`hwp render`는 아직 구현되지 않았습니다 (M3 예정)"),
         Cmd::New { .. } => anyhow::bail!("`hwp new`는 아직 구현되지 않았습니다 (M4 예정)"),
     }

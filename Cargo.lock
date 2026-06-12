@@ -455,6 +455,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "hwp-convert",
  "hwp-model",
  "hwp5",
  "hwpx",
