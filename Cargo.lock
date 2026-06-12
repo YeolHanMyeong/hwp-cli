@@ -549,6 +549,7 @@ name = "hwp-convert"
 version = "0.1.0"
 dependencies = [
  "hwp-model",
+ "pulldown-cmark",
  "serde_json",
 ]
 
@@ -590,6 +591,7 @@ dependencies = [
 name = "hwpx"
 version = "0.1.0"
 dependencies = [
+ "hwp-convert",
  "hwp-model",
  "quick-xml",
  "serde",
@@ -895,6 +897,17 @@ dependencies = [
  "rusty-fork",
  "tempfile",
  "unarray",
+]
+
+[[package]]
+name = "pulldown-cmark"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+dependencies = [
+ "bitflags",
+ "memchr",
+ "unicase",
 ]
 
 [[package]]
@@ -1291,6 +1304,12 @@ name = "unarray"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
+
+[[package]]
+name = "unicase"
+version = "2.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
 
 [[package]]
 name = "unicode-bidi-mirroring"

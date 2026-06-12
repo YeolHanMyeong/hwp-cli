@@ -12,3 +12,6 @@ zip = { workspace = true }
 quick-xml = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+hwp-convert = { workspace = true }

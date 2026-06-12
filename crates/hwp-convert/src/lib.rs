@@ -1,9 +1,11 @@
-//! IR → markdown/JSON 변환.
+//! IR ↔ markdown/JSON 변환.
 
+pub mod from_markdown;
 pub mod markdown;
 
 use hwp_model::Document;
 
+pub use from_markdown::{default_header, from_markdown};
 pub use markdown::to_markdown;
 
 /// IR 전체를 JSON으로 직렬화 (구조 검사·디버깅·기계 소비용).

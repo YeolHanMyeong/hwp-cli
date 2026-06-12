@@ -140,6 +140,6 @@ fn main() -> anyhow::Result<()> {
             format,
             font_dir,
         } => commands::render::run(&input, &output, &pages, dpi, format, font_dir),
-        Cmd::New { .. } => anyhow::bail!("`hwp new`는 아직 구현되지 않았습니다 (M4 예정)"),
+        Cmd::New { output, from } => commands::new::run(&output, from.as_deref()),
     }
 }

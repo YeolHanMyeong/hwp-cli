@@ -26,6 +26,7 @@ cfb = "0.14"
 flate2 = "1"
 quick-xml = "0.40"
 zip = "8"
+pulldown-cmark = { version = "0.13", default-features = false }
 
 # 렌더링
 tiny-skia = "0.12"

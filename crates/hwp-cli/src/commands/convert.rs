@@ -29,7 +29,11 @@ pub fn run(
             std::fs::write(output, hwp_convert::to_json(&doc, true)?)?;
         }
         ConvertFormat::Hwpx => {
-            anyhow::bail!("hwpx 쓰기는 아직 구현되지 않았습니다 (M4 예정)")
+            let doc = load_document(input)?;
+            let warnings = hwpx::write_document(&doc, output)?;
+            for w in &warnings {
+                eprintln!("경고: {w}");
+            }
         }
         ConvertFormat::Hwp => {
             anyhow::bail!("hwp 쓰기는 아직 구현되지 않았습니다 (M6 예정)")
