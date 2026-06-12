@@ -45,6 +45,10 @@ enum Cmd {
         /// 변환 중 보존 불가능한(opaque) 데이터 발견 시 실패 처리
         #[arg(long)]
         strict: bool,
+        /// 줄 배치 캐시 보존 (무수정 왕복 전용 — 한글은 내용과 어긋난
+        /// 줄 배치를 변조로 판정하므로 기본은 제거)
+        #[arg(long)]
+        preserve_layout: bool,
     },
 
     /// 페이지 렌더링 (M3에서 구현)
@@ -131,7 +135,8 @@ fn main() -> anyhow::Result<()> {
             output,
             to,
             strict,
-        } => commands::convert::run(&input, &output, to, strict),
+            preserve_layout,
+        } => commands::convert::run(&input, &output, to, strict, preserve_layout),
         Cmd::Render {
             input,
             output,

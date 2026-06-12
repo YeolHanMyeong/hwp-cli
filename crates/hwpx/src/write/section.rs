@@ -50,6 +50,7 @@ fn sniff(data: &[u8]) -> (&'static str, &'static str) {
 pub fn write_section(
     doc: &Document,
     section: &Section,
+    preserve_linesegs: bool,
     bins: &mut BinCollector,
     warnings: &mut Vec<String>,
 ) -> String {
@@ -65,7 +66,16 @@ pub fn write_section(
                 .controls
                 .iter()
                 .any(|c| matches!(c, Control::SectionDef(_)));
-        write_paragraph(&mut out, doc, para, &mut ids, bins, inject, warnings);
+        write_paragraph(
+            &mut out,
+            doc,
+            para,
+            &mut ids,
+            bins,
+            inject,
+            preserve_linesegs,
+            warnings,
+        );
     }
     out.push_str("</hs:sec>");
     out
@@ -90,6 +100,7 @@ fn write_paragraph(
     ids: &mut IdSeq,
     bins: &mut BinCollector,
     inject_secpr: bool,
+    preserve_linesegs: bool,
     warnings: &mut Vec<String>,
 ) {
     let _ = write!(
@@ -174,12 +185,12 @@ fn write_paragraph(
                     Control::Generic(g) if g.ctrl_id == *b"head" || g.ctrl_id == *b"foot" => {
                         open_run!(cur_shape);
                         flush_text(out, &mut text_buf);
-                        write_header_footer(out, doc, g, ids, bins, warnings);
+                        write_header_footer(out, doc, g, ids, bins, preserve_linesegs, warnings);
                     }
                     Control::Table(table) => {
                         open_run!(cur_shape);
                         flush_text(out, &mut text_buf);
-                        write_table(out, doc, table, ids, bins, warnings);
+                        write_table(out, doc, table, ids, bins, preserve_linesegs, warnings);
                     }
                     Control::Picture(pic) => {
                         open_run!(cur_shape);
@@ -202,8 +213,8 @@ fn write_paragraph(
         flush_text(out, &mut text_buf);
         out.push_str("</hp:run>");
     }
-    // 줄 배치 정보 보존 (왕복 시 페이지 분할·위치 충실도)
-    if !para.line_segs.is_empty() {
+    // 줄 배치 정보 보존 (무수정 왕복 전용 — 기본은 제거, 한글이 재계산)
+    if preserve_linesegs && !para.line_segs.is_empty() {
         out.push_str("<hp:linesegarray>");
         for seg in &para.line_segs {
             let _ = write!(
@@ -293,12 +304,14 @@ fn write_col_ctrl(out: &mut String) {
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_header_footer(
     out: &mut String,
     doc: &Document,
     g: &GenericControl,
     ids: &mut IdSeq,
     bins: &mut BinCollector,
+    preserve_linesegs: bool,
     warnings: &mut Vec<String>,
 ) {
     let el = if g.ctrl_id == *b"head" {
@@ -316,19 +329,30 @@ fn write_header_footer(
             r##"<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">"##,
         );
         for para in &list.paragraphs {
-            write_paragraph(out, doc, para, ids, bins, false, warnings);
+            write_paragraph(
+                out,
+                doc,
+                para,
+                ids,
+                bins,
+                false,
+                preserve_linesegs,
+                warnings,
+            );
         }
         out.push_str("</hp:subList>");
     }
     let _ = write!(out, "</hp:{el}></hp:ctrl>");
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_table(
     out: &mut String,
     doc: &Document,
     table: &Table,
     ids: &mut IdSeq,
     bins: &mut BinCollector,
+    preserve_linesegs: bool,
     warnings: &mut Vec<String>,
 ) {
     let cols = table.cols.max(1) as usize;
@@ -377,7 +401,16 @@ fn write_table(
                 cell.border_fill.0.max(1),
             );
             for para in &cell.paragraphs {
-                write_paragraph(out, doc, para, ids, bins, false, warnings);
+                write_paragraph(
+                    out,
+                    doc,
+                    para,
+                    ids,
+                    bins,
+                    false,
+                    preserve_linesegs,
+                    warnings,
+                );
             }
             let cm = cell.margins;
             let _ = write!(

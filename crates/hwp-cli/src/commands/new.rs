@@ -16,7 +16,7 @@ pub fn run(output: &Path, from: Option<&Path>) -> anyhow::Result<()> {
     };
 
     if ext.as_deref() == Some("hwp") {
-        crate::commands::convert::write_hwp(&doc, output)?;
+        crate::commands::convert::write_hwp(&doc, output, false)?;
     } else {
         let warnings = hwpx::write_document(&doc, output)?;
         for w in &warnings {

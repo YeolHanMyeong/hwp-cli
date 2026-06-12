@@ -13,6 +13,7 @@ pub fn run(
     output: &Path,
     to: Option<ConvertFormat>,
     _strict: bool,
+    preserve_layout: bool,
 ) -> anyhow::Result<()> {
     let target = match to {
         Some(t) => t,
@@ -30,14 +31,20 @@ pub fn run(
         }
         ConvertFormat::Hwpx => {
             let doc = load_document(input)?;
-            let warnings = hwpx::write_document(&doc, output)?;
+            let warnings = hwpx::write::write_document_with(
+                &doc,
+                output,
+                &hwpx::write::HwpxWriteOptions {
+                    preserve_linesegs: preserve_layout,
+                },
+            )?;
             for w in &warnings {
                 eprintln!("경고: {w}");
             }
         }
         ConvertFormat::Hwp => {
             let doc = load_document(input)?;
-            write_hwp(&doc, output)?;
+            write_hwp(&doc, output, preserve_layout)?;
         }
     }
     eprintln!("변환 완료: {} → {}", input.display(), output.display());
@@ -62,7 +69,11 @@ fn infer_format(output: &Path) -> anyhow::Result<ConvertFormat> {
 }
 
 /// hwp 바이너리 저장 (1쪽 렌더를 PrvImage로 동봉).
-pub fn write_hwp(doc: &hwp_model::Document, output: &std::path::Path) -> anyhow::Result<()> {
+pub fn write_hwp(
+    doc: &hwp_model::Document,
+    output: &std::path::Path,
+    preserve_layout: bool,
+) -> anyhow::Result<()> {
     let prv_image = hwp_render::render_document(
         doc,
         &hwp_render::RenderOptions {
@@ -73,7 +84,14 @@ pub fn write_hwp(doc: &hwp_model::Document, output: &std::path::Path) -> anyhow:
     .ok()
     .and_then(|out| out.pages.first().and_then(|p| p.encode_png().ok()));
 
-    let warnings = hwp5::write_document(doc, output, &hwp5::WriteOptions { prv_image })?;
+    let warnings = hwp5::write_document(
+        doc,
+        output,
+        &hwp5::WriteOptions {
+            prv_image,
+            preserve_linesegs: preserve_layout,
+        },
+    )?;
     for w in &warnings {
         eprintln!("경고: {w}");
     }

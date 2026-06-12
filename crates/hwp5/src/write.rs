@@ -23,6 +23,12 @@ use crate::record::{RecordNode, tag};
 pub struct WriteOptions {
     /// PrvImage 스트림 내용 (PNG 권장 — 없으면 스트림 생략)
     pub prv_image: Option<Vec<u8>>,
+    /// 줄 배치(PARA_LINE_SEG) 보존 여부.
+    ///
+    /// 한글은 줄 배치 캐시가 내용과 정합하지 않으면 "변조" 보안 경고를
+    /// 띄운다 (한컴 공식: 내용 수정 시 제거 권장). 기본 false — 한글이
+    /// 열 때 재계산한다. 무수정 바이트 왕복에만 true를 쓸 것.
+    pub preserve_linesegs: bool,
 }
 
 /// 문서를 HWP 5.0 파일로 저장한다. 경고(평탄화/드롭) 목록을 반환한다.
@@ -51,7 +57,9 @@ pub fn write_document(doc: &Document, path: &Path, opts: &WriteOptions) -> Resul
     let sections: Vec<Vec<u8>> = doc
         .sections
         .iter()
-        .map(|s| RecordNode::serialize_forest(&emit_section(s, &mut warnings)))
+        .map(|s| {
+            RecordNode::serialize_forest(&emit_section(s, opts.preserve_linesegs, &mut warnings))
+        })
         .collect();
 
     // FileHeader
@@ -127,14 +135,16 @@ pub fn write_document(doc: &Document, path: &Path, opts: &WriteOptions) -> Resul
     cfb.create_new_stream("/DocOptions/_LinkDoc")?
         .write_all(&[0u8; 524])?;
     cfb.create_storage("/Scripts")?;
-    // JScriptVersion: 해제 시 01 00 00 00 00 00 00 00 (표본값)
+    // 표본(한글 빈 문서) 원시 바이트 그대로 — 해제 시 버전 마커/빈 스크립트
     cfb.create_new_stream("/Scripts/JScriptVersion")?
-        .write_all(&compress(&[1, 0, 0, 0, 0, 0, 0, 0]))?;
-    // DefaultJScript: 해제 시 16×00 + FF FF FF FF (표본값)
-    let mut default_jscript = vec![0u8; 16];
-    default_jscript.extend_from_slice(&[0xFF; 4]);
+        .write_all(&[
+            0x63, 0x64, 0x80, 0x00, 0x00, 0xF7, 0xDF, 0x88, 0xA9, 0x08, 0x00, 0x00, 0x00,
+        ])?;
     cfb.create_new_stream("/Scripts/DefaultJScript")?
-        .write_all(&compress(&default_jscript))?;
+        .write_all(&[
+            0x63, 0x60, 0x40, 0x05, 0xFF, 0x81, 0x00, 0x00, 0x6E, 0xBB, 0x6E, 0xD1, 0x14, 0x00,
+            0x00, 0x00,
+        ])?;
     // 요약 정보 (표본과 동일한 14개 속성 구조, 값은 비움)
     cfb.create_new_stream("/\u{5}HwpSummaryInformation")?
         .write_all(&hwp_summary_information())?;
@@ -646,17 +656,25 @@ fn emit_style(st: &Style) -> RecordNode {
 
 // ─────────────────────────── BodyText ───────────────────────────
 
-fn emit_section(section: &Section, warnings: &mut Vec<String>) -> Vec<RecordNode> {
+fn emit_section(
+    section: &Section,
+    preserve_linesegs: bool,
+    warnings: &mut Vec<String>,
+) -> Vec<RecordNode> {
     let mut roots: Vec<RecordNode> = section
         .paragraphs
         .iter()
-        .map(|p| emit_paragraph(p, warnings))
+        .map(|p| emit_paragraph(p, preserve_linesegs, warnings))
         .collect();
     roots.extend(section.extras.iter().map(opaque_to_node));
     roots
 }
 
-fn emit_paragraph(para: &Paragraph, warnings: &mut Vec<String>) -> RecordNode {
+fn emit_paragraph(
+    para: &Paragraph,
+    preserve_linesegs: bool,
+    warnings: &mut Vec<String>,
+) -> RecordNode {
     // PARA_HEADER
     let mut w = ByteWriter::new();
     let nchars = para.wchar_len() | (u32::from(para.header.chars_flags) << 24);
@@ -686,7 +704,12 @@ fn emit_paragraph(para: &Paragraph, warnings: &mut Vec<String>) -> RecordNode {
         .filter(|e| e.tag == tag::PARA_RANGE_TAG)
         .count() as u16;
     w.write_u16(range_tags);
-    w.write_u16(para.line_segs.len() as u16);
+    let seg_count = if preserve_linesegs {
+        para.line_segs.len()
+    } else {
+        0
+    };
+    w.write_u16(seg_count as u16);
     w.write_u32(para.header.instance_id);
     w.write_bytes(&para.header.tail);
 
@@ -710,7 +733,7 @@ fn emit_paragraph(para: &Paragraph, warnings: &mut Vec<String>) -> RecordNode {
             children: Vec::new(),
         });
     }
-    if !para.line_segs.is_empty() {
+    if preserve_linesegs && !para.line_segs.is_empty() {
         let mut lw = ByteWriter::new();
         for seg in &para.line_segs {
             lw.write_u32(seg.text_start);
@@ -731,7 +754,7 @@ fn emit_paragraph(para: &Paragraph, warnings: &mut Vec<String>) -> RecordNode {
     }
     children.extend(para.extras.iter().map(opaque_to_node));
     for control in &para.controls {
-        children.push(emit_control(control, warnings));
+        children.push(emit_control(control, preserve_linesegs, warnings));
     }
 
     RecordNode {
@@ -770,10 +793,14 @@ fn reversed(id: [u8; 4]) -> [u8; 4] {
     r
 }
 
-fn emit_control(control: &Control, warnings: &mut Vec<String>) -> RecordNode {
+fn emit_control(
+    control: &Control,
+    preserve_linesegs: bool,
+    warnings: &mut Vec<String>,
+) -> RecordNode {
     match control {
         Control::SectionDef(def) => emit_section_def(def),
-        Control::Table(table) => emit_table(table),
+        Control::Table(table) => emit_table(table, preserve_linesegs),
         Control::Picture(pic) => emit_picture(pic, warnings),
         Control::Generic(g) => {
             let mut w = ByteWriter::new();
@@ -791,7 +818,7 @@ fn emit_control(control: &Control, warnings: &mut Vec<String>) -> RecordNode {
                     children: Vec::new(),
                 });
                 for p in &list.paragraphs {
-                    children.push(emit_paragraph(p, warnings));
+                    children.push(emit_paragraph(p, preserve_linesegs, warnings));
                 }
             }
             if !g.extras.is_empty() && !g.paragraph_lists.is_empty() {
@@ -845,7 +872,7 @@ fn emit_section_def(def: &SectionDef) -> RecordNode {
     }
 }
 
-fn emit_table(table: &Table) -> RecordNode {
+fn emit_table(table: &Table, preserve_linesegs: bool) -> RecordNode {
     let mut w = ByteWriter::new();
     w.write_bytes(b" lbt");
     if table.common_data.is_empty() {
@@ -903,7 +930,7 @@ fn emit_table(table: &Table) -> RecordNode {
     for cell in &table.cells {
         children.push(emit_cell_header(cell));
         for p in &cell.paragraphs {
-            children.push(emit_paragraph(p, &mut cell_warnings));
+            children.push(emit_paragraph(p, preserve_linesegs, &mut cell_warnings));
         }
     }
     children.extend(table.extras.iter().map(opaque_to_node));

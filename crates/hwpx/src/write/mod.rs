@@ -18,8 +18,25 @@ use zip::write::SimpleFileOptions;
 use crate::error::Result;
 use section::BinCollector;
 
-/// 문서를 HWPX 파일로 저장한다. 드롭된 항목 경고 목록을 반환한다.
+#[derive(Default)]
+pub struct HwpxWriteOptions {
+    /// 줄 배치(linesegarray) 보존 여부. 한글은 줄 배치가 내용과 정합하지
+    /// 않으면 "변조" 보안 경고를 띄우므로(한컴 공식: 수정 시 제거 권장)
+    /// 기본 false. 무수정 왕복에만 true.
+    pub preserve_linesegs: bool,
+}
+
+/// 문서를 HWPX 파일로 저장한다 (줄 배치 제거 — 한글이 재계산).
 pub fn write_document(doc: &Document, path: &Path) -> Result<Vec<String>> {
+    write_document_with(doc, path, &HwpxWriteOptions::default())
+}
+
+/// 옵션 지정 저장.
+pub fn write_document_with(
+    doc: &Document,
+    path: &Path,
+    opts: &HwpxWriteOptions,
+) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
 
     // 본문 먼저 직렬화 (BinData 수집 포함)
@@ -27,7 +44,7 @@ pub fn write_document(doc: &Document, path: &Path) -> Result<Vec<String>> {
     let sections: Vec<String> = doc
         .sections
         .iter()
-        .map(|s| section::write_section(doc, s, &mut bins, &mut warnings))
+        .map(|s| section::write_section(doc, s, opts.preserve_linesegs, &mut bins, &mut warnings))
         .collect();
     let header_xml = header::write_header(&doc.header, doc.sections.len().max(1));
 

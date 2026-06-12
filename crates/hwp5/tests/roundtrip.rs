@@ -24,7 +24,11 @@ fn hello_world_바이트_동일_왕복() {
     let src = fixture("hello_world.hwp");
     let doc = hwp5::read_document(&src).unwrap().document;
     let out = tmp("hello_rt.hwp");
-    let warnings = hwp5::write_document(&doc, &out, &hwp5::WriteOptions::default()).unwrap();
+    let opts = hwp5::WriteOptions {
+        preserve_linesegs: true,
+        ..Default::default()
+    };
+    let warnings = hwp5::write_document(&doc, &out, &opts).unwrap();
     assert!(warnings.is_empty(), "{warnings:?}");
 
     let mut orig = hwp5::Hwp5Container::open(&src).unwrap();
@@ -57,7 +61,11 @@ fn 전체_fixture_의미_왕복() {
     ] {
         let doc = hwp5::read_document(&fixture(name)).unwrap().document;
         let out = tmp(&format!("rt_{name}"));
-        hwp5::write_document(&doc, &out, &hwp5::WriteOptions::default()).unwrap();
+        let opts = hwp5::WriteOptions {
+            preserve_linesegs: true,
+            ..Default::default()
+        };
+        hwp5::write_document(&doc, &out, &opts).unwrap();
 
         let reread = hwp5::read_document(&out).unwrap_or_else(|e| panic!("{name}: {e}"));
         for w in &reread.warnings {
