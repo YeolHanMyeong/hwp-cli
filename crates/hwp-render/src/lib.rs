@@ -13,6 +13,7 @@ pub mod fonts;
 pub mod layout;
 pub mod png;
 pub mod shape;
+pub mod svg;
 
 use hwp_model::Document;
 
@@ -41,18 +42,35 @@ pub struct RenderOutput {
     pub report: Vec<String>,
 }
 
-/// 문서 전체를 렌더링한다.
-pub fn render_document(doc: &Document, opts: &RenderOptions) -> Result<RenderOutput, RenderError> {
+pub struct SvgOutput {
+    /// 페이지별 SVG 문서
+    pub pages: Vec<String>,
+    pub report: Vec<String>,
+}
+
+fn build_display_list(doc: &Document, opts: &RenderOptions) -> (display::DisplayList, Vec<String>) {
     let mut store = FontStore::new();
     for dir in &opts.font_dirs {
         store.load_dir(dir);
     }
     let mut warnings = Vec::new();
     let list = layout::layout_document(doc, &mut store, &mut warnings);
-    let pages = png::render_png(&list, opts.dpi)?;
     warnings.append(&mut store.report);
-    Ok(RenderOutput {
-        pages,
-        report: warnings,
-    })
+    (list, warnings)
+}
+
+/// 문서 전체를 PNG(래스터)로 렌더링한다.
+pub fn render_document(doc: &Document, opts: &RenderOptions) -> Result<RenderOutput, RenderError> {
+    let (list, report) = build_display_list(doc, opts);
+    let pages = png::render_png(&list, opts.dpi)?;
+    Ok(RenderOutput { pages, report })
+}
+
+/// 문서 전체를 SVG로 렌더링한다.
+pub fn render_document_svg(doc: &Document, opts: &RenderOptions) -> SvgOutput {
+    let (list, report) = build_display_list(doc, opts);
+    SvgOutput {
+        pages: svg::render_svg(&list),
+        report,
+    }
 }

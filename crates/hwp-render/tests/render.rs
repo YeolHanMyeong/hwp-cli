@@ -85,15 +85,15 @@ fn 표_렌더() {
         dark_pixels(page)
     );
 
-    // 표는 더 이상 미지원으로 집계되지 않는다 (꼬리말·글상자 2개만 남음)
+    // 표·머리말·꼬리말은 더 이상 미지원으로 집계되지 않는다 (글상자 1개만 남음)
     let skipped: Vec<_> = out
         .report
         .iter()
         .filter(|w| w.contains("미지원 컨트롤"))
         .collect();
     assert!(
-        skipped.iter().all(|w| w.contains("2개")),
-        "표가 미지원으로 집계됨: {skipped:?}"
+        skipped.iter().all(|w| w.contains("1개")),
+        "표/머리말이 미지원으로 집계됨: {skipped:?}"
     );
 }
 

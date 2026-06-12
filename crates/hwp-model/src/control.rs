@@ -17,6 +17,8 @@ pub enum Control {
     SectionDef(SectionDef),
     /// `tbl ` — 표
     Table(Table),
+    /// `gso `(그림) / `hp:pic` — 이미지 개체
+    Picture(Picture),
     /// 그 외 — ctrl_id와 원본을 보존, 문단 리스트는 수집
     Generic(GenericControl),
 }
@@ -27,9 +29,34 @@ impl Control {
         match self {
             Control::SectionDef(_) => *b"secd",
             Control::Table(_) => *b"tbl ",
+            Control::Picture(_) => *b"gso ",
             Control::Generic(g) => g.ctrl_id,
         }
     }
+}
+
+/// 이미지 개체.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Picture {
+    /// 개체 공통 속성 원본 (hwp5: CTRL_HEADER 페이로드, hwpx: 비어 있음)
+    #[serde(with = "hex_bytes")]
+    pub common_data: Vec<u8>,
+    pub width: HwpUnit,
+    pub height: HwpUnit,
+    /// 글자처럼 취급 여부 (배치 힌트)
+    pub treat_as_char: bool,
+    /// 바이너리 데이터 참조
+    pub bin_ref: BinRef,
+    pub extras: Vec<OpaqueRecord>,
+}
+
+/// BinData 참조 방식.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BinRef {
+    /// hwp5: BIN_DATA 테이블 ID (1-기반)
+    Id(crate::ids::BinDataId),
+    /// hwpx: manifest 항목 ID (binaryItemIDRef)
+    ItemRef(String),
 }
 
 /// 구역 정의 컨트롤.

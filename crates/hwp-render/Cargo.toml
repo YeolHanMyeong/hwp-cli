@@ -11,6 +11,7 @@ hwp-model = { workspace = true }
 tiny-skia = { workspace = true }
 rustybuzz = { workspace = true }
 fontdb = { workspace = true }
+image = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

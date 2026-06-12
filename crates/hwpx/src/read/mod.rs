@@ -42,6 +42,18 @@ pub fn read_document(path: &Path) -> Result<ReadResult> {
     }
     doc_header.properties.section_count = sections.len() as u16;
 
+    // 첨부 바이너리 (이미지 등) — BinRef::ItemRef는 항목 이름 휴리스틱으로 해석
+    let mut bin_streams = Vec::new();
+    for entry in pkg.entries()? {
+        if entry.name.starts_with("BinData/") {
+            let data = pkg.read_entry(&entry.name)?;
+            bin_streams.push(hwp_model::BinStream {
+                name: entry.name,
+                data,
+            });
+        }
+    }
+
     let version = pkg
         .version_info()?
         .into_iter()
@@ -58,6 +70,7 @@ pub fn read_document(path: &Path) -> Result<ReadResult> {
             },
             header: doc_header,
             sections,
+            bin_streams,
         },
         warnings,
     })

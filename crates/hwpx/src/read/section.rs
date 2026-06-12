@@ -77,6 +77,13 @@ fn parse_paragraph(
         style: StyleId(attr_u16(start, "styleIDRef").unwrap_or(0)),
         ..Paragraph::default()
     };
+    // hwp5 break_type 비트와 동일 인코딩 (bit2 쪽, bit3 단)
+    if attr(start, "pageBreak").as_deref() == Some("1") {
+        para.header.break_type |= 0x04;
+    }
+    if attr(start, "columnBreak").as_deref() == Some("1") {
+        para.header.break_type |= 0x08;
+    }
     let mut wchar_pos = 0u32;
     let mut last_shape: Option<u16> = None;
 
@@ -128,7 +135,7 @@ fn parse_paragraph(
                     }
                     b"ctrl" => {
                         if !empty {
-                            parse_ctrl(reader, &mut para, &mut wchar_pos)?;
+                            parse_ctrl(reader, &mut para, &mut wchar_pos, warnings)?;
                         }
                     }
                     b"tbl" => {
@@ -141,7 +148,16 @@ fn parse_paragraph(
                             parse_linesegs(reader, &mut para)?;
                         }
                     }
-                    // 그 외 개체 (pic, rect, ellipse, equation, container...)
+                    b"pic" => {
+                        let picture = if empty {
+                            default_picture()
+                        } else {
+                            parse_picture(reader)?
+                        };
+                        push_ext_ctrl(&mut para, &mut wchar_pos, 11, *b"gso ");
+                        para.controls.push(Control::Picture(picture));
+                    }
+                    // 그 외 개체 (rect, ellipse, equation, container...)
                     _ => {
                         let mut ctrl_id = [b' '; 4];
                         for (i, b) in name.iter().take(4).enumerate() {
@@ -291,29 +307,48 @@ fn parse_sec_pr(reader: &mut XmlReader<'_>) -> Result<SectionDef> {
     Ok(def)
 }
 
-/// `<hp:ctrl>` — colPr 등 컨트롤 묶음.
-fn parse_ctrl(reader: &mut XmlReader<'_>, para: &mut Paragraph, wchar_pos: &mut u32) -> Result<()> {
+/// `<hp:ctrl>` — colPr/머리말/꼬리말/각주 등 컨트롤 묶음.
+///
+/// 각 자식 컨트롤의 서브트리를 끝까지 소비하고, 문단 리스트(`hp:subList`)는
+/// 재귀 수집한다 — 머리말 안의 텍스트·이미지가 여기로 들어온다.
+fn parse_ctrl(
+    reader: &mut XmlReader<'_>,
+    para: &mut Paragraph,
+    wchar_pos: &mut u32,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
     loop {
-        match next_event(reader)? {
+        let event = next_event(reader)?;
+        match &event {
             Event::Start(e) | Event::Empty(e) => {
                 let name = e.local_name().as_ref().to_vec();
-                let ctrl_id: [u8; 4] = match name.as_slice() {
-                    b"colPr" => *b"cold",
+                // hwp5와 동일한 ctrl_id/컨트롤 문자 코드 매핑
+                let (ctrl_id, code): ([u8; 4], u16) = match name.as_slice() {
+                    b"colPr" => (*b"cold", 2),
+                    b"header" => (*b"head", 16),
+                    b"footer" => (*b"foot", 16),
+                    b"footNote" => (*b"fn  ", 17),
+                    b"endNote" => (*b"en  ", 17),
+                    b"autoNum" | b"newNum" => (*b"atno", 18),
                     other => {
                         let mut id = [b' '; 4];
                         for (i, b) in other.iter().take(4).enumerate() {
                             id[i] = *b;
                         }
-                        id
+                        (id, 21)
                     }
                 };
-                push_ext_ctrl(para, wchar_pos, 2, ctrl_id);
-                para.controls.push(Control::Generic(GenericControl {
+                let mut generic = GenericControl {
                     ctrl_id,
                     data: Vec::new(),
                     paragraph_lists: Vec::new(),
                     extras: Vec::new(),
-                }));
+                };
+                if matches!(event, Event::Start(_)) {
+                    collect_sub_lists(reader, &name, &mut generic, warnings)?;
+                }
+                push_ext_ctrl(para, wchar_pos, code, ctrl_id);
+                para.controls.push(Control::Generic(generic));
             }
             Event::End(e) if e.local_name().as_ref() == b"ctrl" => break,
             Event::Eof => break,
@@ -424,6 +459,56 @@ fn parse_cell(
         }
     }
     Ok(cell)
+}
+
+fn default_picture() -> hwp_model::Picture {
+    hwp_model::Picture {
+        common_data: Vec::new(),
+        width: HwpUnit(0),
+        height: HwpUnit(0),
+        treat_as_char: false,
+        bin_ref: hwp_model::BinRef::ItemRef(String::new()),
+        extras: Vec::new(),
+    }
+}
+
+/// `<hp:pic>` — 이미지 개체. 크기(hp:sz)/배치(hp:pos)/참조(hc:img)만 의미 파싱.
+fn parse_picture(reader: &mut XmlReader<'_>) -> Result<hwp_model::Picture> {
+    let mut pic = default_picture();
+    let mut depth = 1u32;
+    loop {
+        let event = next_event(reader)?;
+        match &event {
+            Event::Start(e) | Event::Empty(e) => {
+                match e.local_name().as_ref() {
+                    b"sz" => {
+                        pic.width = HwpUnit(attr_i32(e, "width").unwrap_or(0));
+                        pic.height = HwpUnit(attr_i32(e, "height").unwrap_or(0));
+                    }
+                    b"pos" => {
+                        pic.treat_as_char = attr(e, "treatAsChar").as_deref() == Some("1");
+                    }
+                    b"img" => {
+                        if let Some(item) = attr(e, "binaryItemIDRef") {
+                            pic.bin_ref = hwp_model::BinRef::ItemRef(item);
+                        }
+                    }
+                    // 중첩 pic은 여는 태그만 깊이 증가 (Empty는 닫는 태그가 없음)
+                    b"pic" if matches!(event, Event::Start(_)) => depth += 1,
+                    _ => {}
+                }
+            }
+            Event::End(e) if e.local_name().as_ref() == b"pic" => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(pic)
 }
 
 /// 일반 개체에서 `hp:subList`의 문단들을 재귀 수집 (글상자 텍스트).

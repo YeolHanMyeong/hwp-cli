@@ -55,6 +55,8 @@ fn 합성_헤더_굵게_기울임() {
       </hh:charPr>
       <hh:charPr id="1" height="1200">
         <hh:italic/>
+        <hh:underline type="BOTTOM" shape="SOLID" color="#0000FF"/>
+        <hh:strikeout shape="SOLID" color="#000000"/>
       </hh:charPr>
     </hh:charProperties>
     <hh:styles>
@@ -74,6 +76,8 @@ fn 합성_헤더_굵게_기울임() {
     assert_eq!(cs0.face_ids[1], 2);
     let cs1 = &header.char_shapes[1];
     assert!(cs1.is_italic() && !cs1.is_bold());
+    assert!(cs1.has_underline() && cs1.has_strike());
+    assert_eq!(cs1.underline_color, 0x00FF_0000); // #0000FF → BGR
 
     assert_eq!(header.styles[0].name, "개요 1");
 }

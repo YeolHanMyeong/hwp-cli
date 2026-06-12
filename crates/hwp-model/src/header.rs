@@ -88,6 +88,20 @@ impl CharShape {
     pub fn is_italic(&self) -> bool {
         self.attr & 1 != 0
     }
+
+    /// 밑줄 종류 (bits 2~3): 0 없음, 1 글자 아래, 3 글자 위.
+    pub fn underline_kind(&self) -> u8 {
+        ((self.attr >> 2) & 0x3) as u8
+    }
+
+    pub fn has_underline(&self) -> bool {
+        self.underline_kind() == 1
+    }
+
+    /// 취소선 (bits 18~20).
+    pub fn has_strike(&self) -> bool {
+        (self.attr >> 18) & 0x7 != 0
+    }
 }
 
 /// PARA_SHAPE — 문단 모양. 알려진 prefix + tail 보존.

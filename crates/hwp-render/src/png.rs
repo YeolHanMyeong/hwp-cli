@@ -74,6 +74,43 @@ fn render_page(page: &PageList, dpi: f32) -> Result<Pixmap, RenderError> {
                     );
                 }
             }
+            Item::Image {
+                x,
+                y,
+                w: iw,
+                h: ih,
+                data,
+            } => {
+                match decode_image(data) {
+                    Some(src) => {
+                        let sx = (iw * px_scale) / src.width() as f32;
+                        let sy = (ih * px_scale) / src.height() as f32;
+                        let t = Transform::from_scale(sx, sy)
+                            .post_translate(*x * px_scale, *y * px_scale);
+                        pixmap.draw_pixmap(
+                            0,
+                            0,
+                            src.as_ref(),
+                            &tiny_skia::PixmapPaint::default(),
+                            t,
+                            None,
+                        );
+                    }
+                    None => {
+                        // 디코드 실패: 자홍색 placeholder (조용한 누락 금지)
+                        if let Some(rect) = tiny_skia::Rect::from_xywh(
+                            *x * px_scale,
+                            *y * px_scale,
+                            iw * px_scale,
+                            ih * px_scale,
+                        ) {
+                            let mut paint = Paint::default();
+                            paint.set_color_rgba8(255, 0, 255, 120);
+                            pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+                        }
+                    }
+                }
+            }
             Item::Glyphs { x, y, run } => {
                 let face = match ttf_parser::Face::parse(&run.font.data, run.font.index) {
                     Ok(f) => f,
@@ -120,6 +157,23 @@ fn render_page(page: &PageList, dpi: f32) -> Result<Pixmap, RenderError> {
         }
     }
     Ok(pixmap)
+}
+
+/// 인코딩된 이미지를 tiny-skia Pixmap으로 디코드한다 (premultiplied RGBA).
+fn decode_image(data: &[u8]) -> Option<Pixmap> {
+    let img = image::load_from_memory(data).ok()?.to_rgba8();
+    let (w, h) = img.dimensions();
+    let mut pixmap = Pixmap::new(w, h)?;
+    for (dst, src) in pixmap.pixels_mut().iter_mut().zip(img.pixels()) {
+        let [r, g, b, a] = src.0;
+        *dst = tiny_skia::PremultipliedColorU8::from_rgba(
+            (u16::from(r) * u16::from(a) / 255) as u8,
+            (u16::from(g) * u16::from(a) / 255) as u8,
+            (u16::from(b) * u16::from(a) / 255) as u8,
+            a,
+        )?;
+    }
+    Some(pixmap)
 }
 
 /// COLORREF(0x00BBGGRR) → (r, g, b). 0xFFFFFFFF(없음)는 검정 취급.

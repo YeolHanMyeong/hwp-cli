@@ -57,6 +57,12 @@ enum Cmd {
         pages: String,
         #[arg(long, default_value_t = 96.0)]
         dpi: f64,
+        /// 출력 포맷 (생략 시 확장자에서 추론)
+        #[arg(long, value_enum)]
+        format: Option<RenderFormat>,
+        /// 추가 폰트 디렉터리 (반복 가능)
+        #[arg(long)]
+        font_dir: Vec<PathBuf>,
     },
 
     /// 새 문서 생성 (M4부터 구현)
@@ -98,6 +104,12 @@ enum ConvertFormat {
     Json,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum RenderFormat {
+    Png,
+    Svg,
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
@@ -125,7 +137,9 @@ fn main() -> anyhow::Result<()> {
             output,
             pages,
             dpi,
-        } => commands::render::run(&input, &output, &pages, dpi),
+            format,
+            font_dir,
+        } => commands::render::run(&input, &output, &pages, dpi, format, font_dir),
         Cmd::New { .. } => anyhow::bail!("`hwp new`는 아직 구현되지 않았습니다 (M4 예정)"),
     }
 }

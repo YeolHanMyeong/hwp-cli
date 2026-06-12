@@ -267,8 +267,64 @@ fn parse_control(node: &RecordNode, warnings: &mut Vec<String>) -> Control {
     match &ctrl_id {
         b"secd" => Control::SectionDef(parse_section_def(rest, &node.children, warnings)),
         b"tbl " => Control::Table(parse_table(rest, &node.children, warnings)),
+        // 그리기 개체: 문단(글상자)이 없고 그림 레코드가 있으면 이미지로 해석
+        b"gso "
+            if !node.children.iter().any(subtree_has_paragraphs)
+                && find_picture_record(&node.children).is_some() =>
+        {
+            match parse_picture_gso(&rest, &node.children) {
+                Ok(p) => Control::Picture(p),
+                Err(e) => {
+                    warnings.push(format!("그림 개체 파싱 실패: {e}"));
+                    Control::Generic(parse_generic(ctrl_id, rest, &node.children, warnings))
+                }
+            }
+        }
         _ => Control::Generic(parse_generic(ctrl_id, rest, &node.children, warnings)),
     }
+}
+
+/// 서브트리에서 SHAPE_COMPONENT_PICTURE 레코드를 찾는다.
+fn find_picture_record(children: &[RecordNode]) -> Option<&RecordNode> {
+    for child in children {
+        if child.tag == tag::SHAPE_COMPONENT_PICTURE {
+            return Some(child);
+        }
+        if let Some(found) = find_picture_record(&child.children) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// gso 그림 개체: 개체 공통 속성(크기)과 그림 레코드의 BinItem ID를 추출한다.
+///
+/// 그림 개체 속성 레이아웃 (스펙 §표 91): 테두리 색(4)+굵기(4)+속성(4)
+/// + 꼭지점 4점(32) + 자르기(16) + 안쪽 여백(8) + 밝기(1)+명암(1)+효과(1)
+/// + **BinItem ID(2)** — 오프셋 71.
+fn parse_picture_gso(common: &[u8], children: &[RecordNode]) -> Result<hwp_model::Picture> {
+    // 개체 공통 속성: 속성(4) 세로(4) 가로(4) 폭(4) 높이(4)
+    let mut r = ByteReader::new(common);
+    let attr = r.read_u32()?;
+    let _v_offset = r.read_u32()?;
+    let _h_offset = r.read_u32()?;
+    let width = HwpUnit(r.read_i32()?);
+    let height = HwpUnit(r.read_i32()?);
+
+    let pic_node = find_picture_record(children)
+        .ok_or_else(|| crate::error::Hwp5Error::MalformedRecord("그림 레코드 없음".into()))?;
+    let mut pr = ByteReader::new(&pic_node.data);
+    pr.read_bytes(71)?;
+    let bin_id = pr.read_u16()?;
+
+    Ok(hwp_model::Picture {
+        common_data: common.to_vec(),
+        width,
+        height,
+        treat_as_char: attr & 1 != 0,
+        bin_ref: hwp_model::BinRef::Id(hwp_model::BinDataId(bin_id)),
+        extras: children.iter().map(to_opaque).collect(),
+    })
 }
 
 fn parse_section_def(

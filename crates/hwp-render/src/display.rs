@@ -3,6 +3,8 @@
 //! HWP 도메인 지식이 제거된 순수 그리기 명령. 좌표는 pt(f32),
 //! 페이지 원점 좌상단, y축 아래 방향.
 
+use std::sync::Arc;
+
 use crate::shape::ShapedRun;
 
 pub struct DisplayList {
@@ -34,5 +36,13 @@ pub enum Item {
         y2: f32,
         color: u32,
         width: f32,
+    },
+    /// 이미지 — 인코딩된 원본 바이트 (PNG/JPEG/BMP/GIF)
+    Image {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        data: Arc<Vec<u8>>,
     },
 }

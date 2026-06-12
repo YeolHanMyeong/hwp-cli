@@ -20,8 +20,10 @@ pub mod paragraph;
 pub mod text;
 pub mod units;
 
-pub use control::{Cell, Control, GenericControl, PageDef, ParagraphList, SectionDef, Table};
-pub use document::{DocMeta, Document, Section};
+pub use control::{
+    BinRef, Cell, Control, GenericControl, PageDef, ParagraphList, Picture, SectionDef, Table,
+};
+pub use document::{BinStream, DocMeta, Document, Section};
 pub use header::{
     BinDataItem, BorderFill, BorderLine, CharShape, DocHeader, DocumentProperties, FaceName,
     LANG_COUNT, ParaShape, RawEntry, Style,

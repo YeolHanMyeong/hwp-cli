@@ -1,42 +1,84 @@
-//! `hwp render` — 페이지 렌더링 (M3: PNG).
+//! `hwp render` — 페이지 렌더링 (PNG/SVG).
 
 use std::path::{Path, PathBuf};
 
+use crate::RenderFormat;
 use crate::commands::cat::load_document;
 
-pub fn run(input: &Path, output: &Path, pages_spec: &str, dpi: f64) -> anyhow::Result<()> {
+pub fn run(
+    input: &Path,
+    output: &Path,
+    pages_spec: &str,
+    dpi: f64,
+    format: Option<RenderFormat>,
+    font_dirs: Vec<PathBuf>,
+) -> anyhow::Result<()> {
+    let format = format.unwrap_or_else(|| infer_format(output));
     let doc = load_document(input)?;
-    let result = hwp_render::render_document(
-        &doc,
-        &hwp_render::RenderOptions {
-            dpi: dpi as f32,
-            ..Default::default()
-        },
-    )?;
-    for line in &result.report {
-        eprintln!("렌더: {line}");
-    }
+    let opts = hwp_render::RenderOptions {
+        dpi: dpi as f32,
+        font_dirs,
+    };
 
-    let selected = parse_pages(pages_spec, result.pages.len())?;
-    let multi = selected.len() > 1;
-    for &page_no in &selected {
-        let pixmap = &result.pages[page_no - 1];
-        let path = if multi {
-            numbered_path(output, page_no)
-        } else {
-            output.to_path_buf()
-        };
-        pixmap
-            .save_png(&path)
-            .map_err(|e| anyhow::anyhow!("PNG 저장 실패 ({}): {e}", path.display()))?;
-        eprintln!(
-            "저장: {} ({}×{}px)",
-            path.display(),
-            pixmap.width(),
-            pixmap.height()
-        );
+    match format {
+        RenderFormat::Png => {
+            let result = hwp_render::render_document(&doc, &opts)?;
+            report(&result.report);
+            let selected = parse_pages(pages_spec, result.pages.len())?;
+            let multi = selected.len() > 1;
+            for &page_no in &selected {
+                let pixmap = &result.pages[page_no - 1];
+                let path = page_path(output, page_no, multi);
+                pixmap
+                    .save_png(&path)
+                    .map_err(|e| anyhow::anyhow!("PNG 저장 실패 ({}): {e}", path.display()))?;
+                eprintln!(
+                    "저장: {} ({}×{}px)",
+                    path.display(),
+                    pixmap.width(),
+                    pixmap.height()
+                );
+            }
+        }
+        RenderFormat::Svg => {
+            let result = hwp_render::render_document_svg(&doc, &opts);
+            report(&result.report);
+            let selected = parse_pages(pages_spec, result.pages.len())?;
+            let multi = selected.len() > 1;
+            for &page_no in &selected {
+                let path = page_path(output, page_no, multi);
+                std::fs::write(&path, &result.pages[page_no - 1])?;
+                eprintln!("저장: {}", path.display());
+            }
+        }
     }
     Ok(())
+}
+
+fn report(lines: &[String]) {
+    for line in lines {
+        eprintln!("렌더: {line}");
+    }
+}
+
+fn infer_format(output: &Path) -> RenderFormat {
+    match output
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("svg") => RenderFormat::Svg,
+        _ => RenderFormat::Png,
+    }
+}
+
+fn page_path(base: &Path, page: usize, multi: bool) -> PathBuf {
+    if multi {
+        numbered_path(base, page)
+    } else {
+        base.to_path_buf()
+    }
 }
 
 /// "all" | "3" | "1-5" → 1-기반 페이지 번호 목록.

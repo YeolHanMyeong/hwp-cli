@@ -27,6 +27,12 @@ pub struct ShapedRun {
     pub color: u32,
     pub bold: bool,
     pub italic: bool,
+    /// 밑줄 (글자 아래)
+    pub underline: bool,
+    /// 취소선
+    pub strike: bool,
+    /// 밑줄 색 (COLORREF, 0xFFFFFFFF = 글자색 따름)
+    pub underline_color: u32,
     pub glyphs: Vec<Glyph>,
     pub width_pt: f32,
     pub text: String,
@@ -45,6 +51,9 @@ impl ShapedRun {
             color: self.color,
             bold: self.bold,
             italic: self.italic,
+            underline: self.underline,
+            strike: self.strike,
+            underline_color: self.underline_color,
             glyphs,
             width_pt,
             text: String::new(), // 부분 런의 원문 추적은 PDF 백엔드(M7)에서
@@ -214,6 +223,9 @@ fn shape_piece(
         color: cs.text_color,
         bold: cs.is_bold(),
         italic: cs.is_italic(),
+        underline: cs.has_underline(),
+        strike: cs.has_strike(),
+        underline_color: cs.underline_color,
         glyphs,
         width_pt: width,
         text: text.to_string(),

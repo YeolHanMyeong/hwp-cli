@@ -155,6 +155,27 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
                             cs.attr |= 1;
                         }
                     }
+                    b"underline" => {
+                        if let Some(cs) = &mut current_char {
+                            // BOTTOM→1, TOP→3 (hwp5 bits 2~3과 동일 인코딩)
+                            let kind = match attr(e, "type").as_deref() {
+                                Some("NONE") | None => 0u32,
+                                Some("TOP") => 3,
+                                _ => 1,
+                            };
+                            cs.attr |= kind << 2;
+                            if let Some(c) = attr(e, "color") {
+                                cs.underline_color = parse_color(&c);
+                            }
+                        }
+                    }
+                    b"strikeout" => {
+                        if let Some(cs) = &mut current_char
+                            && attr(e, "shape").as_deref() != Some("NONE")
+                        {
+                            cs.attr |= 1 << 18;
+                        }
+                    }
                     b"paraPr" => {
                         current_para = Some(ParaShape::default());
                         if empty {

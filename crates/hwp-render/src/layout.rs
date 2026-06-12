@@ -73,16 +73,59 @@ pub fn layout_document(
         // 흐름 커서: 이 페이지에 실제 배치된 콘텐츠의 하단 y (page 좌표)
         let mut content_bottom = body_top;
         let mut skipped_controls = 0usize;
+        let mut paras_on_page = 0usize;
+
+        // 머리말/꼬리말: 구역에서 처음 정의된 것을 모든 페이지에 반복
+        let mut header_ctrl = None;
+        let mut footer_ctrl = None;
+        for para in &section.paragraphs {
+            for c in &para.controls {
+                if let Control::Generic(g) = c {
+                    match &g.ctrl_id {
+                        b"head" if header_ctrl.is_none() => header_ctrl = Some(g),
+                        b"foot" if footer_ctrl.is_none() => footer_ctrl = Some(g),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let furniture = Furniture {
+            header: header_ctrl,
+            footer: footer_ctrl,
+            page_def: &page_def,
+            body_left,
+            body_width,
+        };
 
         for para in &section.paragraphs {
             skipped_controls += para
                 .controls
                 .iter()
                 .filter(|c| {
-                    !matches!(c, Control::SectionDef(_) | Control::Table(_))
-                        && c.ctrl_id() != *b"cold"
+                    !matches!(
+                        c,
+                        Control::SectionDef(_) | Control::Table(_) | Control::Picture(_)
+                    ) && ![*b"cold", *b"head", *b"foot"].contains(&c.ctrl_id())
                 })
                 .count();
+
+            // 쪽 나누기 (PARA_HEADER break_type bit2 / hp:p pageBreak)
+            // — 글상자만 있어 items가 비어도 문단을 거쳤으면 분할한다
+            if para.header.break_type & 0x04 != 0 && paras_on_page > 0 {
+                furniture.render(doc, store, &mut page, warnings);
+                pages.push(std::mem::replace(
+                    &mut page,
+                    PageList {
+                        width_pt: w,
+                        height_pt: h,
+                        items: Vec::new(),
+                    },
+                ));
+                content_bottom = body_top;
+                prev_v_pos = -1;
+                paras_on_page = 0;
+            }
+            paras_on_page += 1;
 
             // 이 문단의 첫 줄 상단 (표 앵커 위치)
             let mut para_top: Option<f32> = None;
@@ -107,7 +150,7 @@ pub fn layout_document(
                     );
                     content_bottom = last_y + max_size * 0.4;
                 }
-                content_bottom = layout_para_tables(
+                content_bottom = layout_para_objects(
                     doc,
                     store,
                     &mut page,
@@ -123,6 +166,7 @@ pub fn layout_document(
             for (i, seg) in para.line_segs.iter().enumerate() {
                 // 페이지 경계: v_pos 리셋 감지
                 if seg.v_pos < prev_v_pos && !page.items.is_empty() {
+                    furniture.render(doc, store, &mut page, warnings);
                     pages.push(std::mem::replace(
                         &mut page,
                         PageList {
@@ -132,6 +176,7 @@ pub fn layout_document(
                         },
                     ));
                     content_bottom = body_top;
+                    paras_on_page = 0;
                 }
                 prev_v_pos = seg.v_pos;
 
@@ -186,7 +231,7 @@ pub fn layout_document(
                 content_bottom = last_y + (line_height_pt - baseline_gap_pt).max(0.0);
             }
 
-            content_bottom = layout_para_tables(
+            content_bottom = layout_para_objects(
                 doc,
                 store,
                 &mut page,
@@ -199,9 +244,10 @@ pub fn layout_document(
         }
         if skipped_controls > 0 {
             warnings.push(format!(
-                "렌더 미지원 컨트롤 {skipped_controls}개 생략 (그림/글상자/머리말 등 — 후속 마일스톤)"
+                "렌더 미지원 컨트롤 {skipped_controls}개 생략 (글상자/도형 등 — 후속 마일스톤)"
             ));
         }
+        furniture.render(doc, store, &mut page, warnings);
         pages.push(page);
     }
 
@@ -211,9 +257,61 @@ pub fn layout_document(
 /// 기본 셀 안쪽 여백 (HWPUNIT — 한글 기본값).
 const DEFAULT_CELL_MARGINS: [u16; 4] = [510, 510, 141, 141];
 
-/// 문단에 달린 표 컨트롤들을 배치한다. 갱신된 콘텐츠 하단을 반환.
+/// 페이지 가구 (머리말/꼬리말) — 페이지 마감 시마다 그린다.
+struct Furniture<'a> {
+    header: Option<&'a hwp_model::GenericControl>,
+    footer: Option<&'a hwp_model::GenericControl>,
+    page_def: &'a PageDef,
+    body_left: f32,
+    body_width: f32,
+}
+
+impl Furniture<'_> {
+    fn render(
+        &self,
+        doc: &Document,
+        store: &mut FontStore,
+        page: &mut PageList,
+        warnings: &mut Vec<String>,
+    ) {
+        if let Some(h) = self.header {
+            let top = self.page_def.margin_top.to_pt() as f32;
+            for list in &h.paragraph_lists {
+                layout_box_paragraphs(
+                    doc,
+                    store,
+                    page,
+                    &list.paragraphs,
+                    self.body_left,
+                    top,
+                    self.body_width,
+                    warnings,
+                );
+            }
+        }
+        if let Some(f) = self.footer {
+            let top = page.height_pt
+                - self.page_def.margin_bottom.to_pt() as f32
+                - self.page_def.margin_footer.to_pt() as f32;
+            for list in &f.paragraph_lists {
+                layout_box_paragraphs(
+                    doc,
+                    store,
+                    page,
+                    &list.paragraphs,
+                    self.body_left,
+                    top,
+                    self.body_width,
+                    warnings,
+                );
+            }
+        }
+    }
+}
+
+/// 문단에 달린 블록 개체(표/이미지)를 배치한다. 갱신된 콘텐츠 하단을 반환.
 #[allow(clippy::too_many_arguments)]
-fn layout_para_tables(
+fn layout_para_objects(
     doc: &Document,
     store: &mut FontStore,
     page: &mut PageList,
@@ -224,12 +322,36 @@ fn layout_para_tables(
     warnings: &mut Vec<String>,
 ) -> f32 {
     let mut bottom = content_bottom;
-    let mut table_y = anchor_top;
+    let mut object_y = anchor_top;
     for control in &para.controls {
-        if let Control::Table(table) = control {
-            let h = layout_table(doc, store, page, table, x, table_y, warnings);
-            bottom = bottom.max(table_y + h);
-            table_y += h; // 한 문단에 표가 여럿이면 세로로 이어 배치
+        match control {
+            Control::Table(table) => {
+                let h = layout_table(doc, store, page, table, x, object_y, warnings);
+                bottom = bottom.max(object_y + h);
+                object_y += h; // 한 문단에 개체가 여럿이면 세로로 이어 배치
+            }
+            Control::Picture(pic) => {
+                let (w, h) = (pic.width.to_pt() as f32, pic.height.to_pt() as f32);
+                if w <= 0.0 || h <= 0.0 {
+                    warnings.push("이미지 크기 정보 없음 — 생략".to_string());
+                    continue;
+                }
+                match doc.resolve_bin(&pic.bin_ref) {
+                    Some(bytes) => {
+                        page.items.push(Item::Image {
+                            x,
+                            y: object_y,
+                            w,
+                            h,
+                            data: std::sync::Arc::new(bytes.to_vec()),
+                        });
+                        bottom = bottom.max(object_y + h);
+                        object_y += h;
+                    }
+                    None => warnings.push(format!("이미지 데이터를 찾지 못함: {:?}", pic.bin_ref)),
+                }
+            }
+            _ => {}
         }
     }
     bottom
@@ -434,7 +556,7 @@ fn layout_box_paragraphs(
         }
 
         // 셀 안의 중첩 표
-        content_bottom = layout_para_tables(
+        content_bottom = layout_para_objects(
             doc,
             store,
             page,
@@ -496,6 +618,33 @@ fn items_max_size(items: &[InlineItem]) -> Option<f32> {
         .reduce(f32::max)
 }
 
+/// 글리프 런과 그 장식(밑줄/취소선)을 함께 배치한다.
+/// 장식 상수(0.10em/0.25em/0.05em)는 U5 실측 전 초기값.
+fn push_run(page: &mut PageList, x: f32, y: f32, run: crate::shape::ShapedRun) {
+    let w = run.width_pt;
+    let em = run.size_pt;
+    let underline = run.underline.then(|| {
+        let color = if run.underline_color == 0xFFFF_FFFF {
+            run.color
+        } else {
+            run.underline_color
+        };
+        (y + em * 0.10, color)
+    });
+    let strike = run.strike.then_some((y - em * 0.25, run.color));
+    page.items.push(Item::Glyphs { x, y, run });
+    for (ly, color) in underline.into_iter().chain(strike) {
+        page.items.push(Item::Line {
+            x1: x,
+            y1: ly,
+            x2: x + w,
+            y2: ly,
+            color,
+            width: em * 0.05,
+        });
+    }
+}
+
 /// 인라인 항목들을 배치한다. `max_width`를 넘으면 글리프 단위 그리디
 /// 줄바꿈(`f32::INFINITY`면 비활성). 마지막 베이스라인 y를 반환한다.
 fn place_wrapped(
@@ -529,7 +678,7 @@ fn place_wrapped(
             InlineItem::Run(run) => {
                 if max_width.is_infinite() || x + run.width_pt <= limit {
                     let w = run.width_pt;
-                    page.items.push(Item::Glyphs { x, y, run });
+                    push_run(page, x, y, run);
                     x += w;
                     continue;
                 }
@@ -543,11 +692,7 @@ fn place_wrapped(
                     if over && line_has_content {
                         if i > start {
                             let piece = run.slice(start, i);
-                            page.items.push(Item::Glyphs {
-                                x: piece_x,
-                                y,
-                                run: piece,
-                            });
+                            push_run(page, piece_x, y, piece);
                         }
                         y += line_advance;
                         piece_x = x0;
@@ -559,11 +704,7 @@ fn place_wrapped(
                 if start < run.glyphs.len() {
                     let piece = run.slice(start, run.glyphs.len());
                     let w = piece.width_pt;
-                    page.items.push(Item::Glyphs {
-                        x: piece_x,
-                        y,
-                        run: piece,
-                    });
+                    push_run(page, piece_x, y, piece);
                     x = piece_x + w;
                 } else {
                     x = piece_x;

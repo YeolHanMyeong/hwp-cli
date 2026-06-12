@@ -127,6 +127,7 @@ fn render_control(
 ) {
     match control {
         Control::SectionDef(_) => {}
+        Control::Picture(_) => body.push_str("![image]()"),
         Control::Table(table) => {
             // 표는 블록 요소로 out에 직접
             let cols = table.cols.max(1) as usize;

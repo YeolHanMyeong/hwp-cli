@@ -87,7 +87,7 @@ impl Paragraph {
 
 fn extract_control(control: &Control, out: &mut String, opts: &TextOptions) {
     match control {
-        Control::SectionDef(_) => {}
+        Control::SectionDef(_) | Control::Picture(_) => {}
         Control::Table(table) => {
             // 셀 사이는 탭, 행 사이는 개행 — hwp5txt와 유사한 평문 표현
             push_newline(out);

@@ -41,6 +41,25 @@ pub fn read_document(path: &Path) -> Result<ReadResult> {
         sections.push(section);
     }
 
+    // 첨부 바이너리: 압축 플래그가 있으면 해제 시도, 실패 시 원본 사용
+    // (BIN_DATA 레코드의 개별 압축 모드는 보수적으로 시도-폴백으로 흡수)
+    let compressed = container.file_header().is_compressed();
+    let mut bin_streams = Vec::new();
+    for info in container.list_streams() {
+        if let Some(name) = info.path.strip_prefix("/BinData/") {
+            let raw = container.read_stream_raw(&info.path)?;
+            let data = if compressed {
+                crate::codec::decompress(&raw, &info.path).unwrap_or(raw)
+            } else {
+                raw
+            };
+            bin_streams.push(hwp_model::BinStream {
+                name: name.to_string(),
+                data,
+            });
+        }
+    }
+
     let document = Document {
         meta: DocMeta {
             source_format: "hwp5".to_string(),
@@ -48,6 +67,7 @@ pub fn read_document(path: &Path) -> Result<ReadResult> {
         },
         header,
         sections,
+        bin_streams,
     };
     Ok(ReadResult { document, warnings })
 }
