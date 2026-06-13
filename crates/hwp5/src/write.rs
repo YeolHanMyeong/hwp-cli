@@ -69,8 +69,13 @@ pub fn write_document(doc: &Document, path: &Path, opts: &WriteOptions) -> Resul
         .sections
         .iter()
         .map(|s| {
-            let mut roots =
-                emit_section(s, opts.preserve_linesegs, add_tracking_tail, &mut warnings);
+            let mut roots = emit_section(
+                s,
+                synthesize,
+                opts.preserve_linesegs,
+                add_tracking_tail,
+                &mut warnings,
+            );
             if synthesize {
                 assign_instance_ids(&mut roots, &mut inst_counter);
             }
@@ -305,14 +310,19 @@ const DEFAULT_ENDNOTE_SHAPE: [u8; 28] = [
     0x52, 0x03, 0x37, 0x02, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00,
 ];
 
-/// secd 자식: 쪽 테두리/배경(PAGE_BORDER_FILL, 14B) BOTH/EVEN/ODD 3종 —
-/// hello_world 표본 실측. 끝 2B=borderFillID=1(합성 DocInfo에 항상 존재).
+/// secd 자식: 쪽 테두리/배경(PAGE_BORDER_FILL, 14B) BOTH/EVEN/ODD 3종.
+/// 레이아웃: properties(u32) + 여백 4×HWPUNIT16(left/right/top/bottom=1417) +
+/// borderFillID(u16)=1(합성 DocInfo에 항상 존재).
+/// properties 첫 u32 = 1(flags=1). 정품 한글 저장 파일(가나다.hwp 5.1.1.0) 및
+/// work_report.hwp(5.0.2.4) 모두 3종 전부 0x00000001. hello_world 표본의
+/// BOTH/EVEN 값(0x0978f9c1·0x271b0b81)은 미초기화로 보이는 이상값이라 채택하지
+/// 않는다 — pyhwp가 그 flags를 0x0978f9c1 등으로 파싱(잘못된 속성).
 const DEFAULT_PAGE_BORDER_FILLS: [[u8; 14]; 3] = [
     [
-        0xc1, 0xf9, 0x78, 0x09, 0x89, 0x05, 0x89, 0x05, 0x89, 0x05, 0x89, 0x05, 0x01, 0x00,
+        0x01, 0x00, 0x00, 0x00, 0x89, 0x05, 0x89, 0x05, 0x89, 0x05, 0x89, 0x05, 0x01, 0x00,
     ],
     [
-        0x81, 0x0b, 0x1b, 0x27, 0x89, 0x05, 0x89, 0x05, 0x89, 0x05, 0x89, 0x05, 0x01, 0x00,
+        0x01, 0x00, 0x00, 0x00, 0x89, 0x05, 0x89, 0x05, 0x89, 0x05, 0x89, 0x05, 0x01, 0x00,
     ],
     [
         0x01, 0x00, 0x00, 0x00, 0x89, 0x05, 0x89, 0x05, 0x89, 0x05, 0x89, 0x05, 0x01, 0x00,
@@ -847,6 +857,7 @@ fn emit_style(st: &Style) -> RecordNode {
 
 fn emit_section(
     section: &Section,
+    synthesize: bool,
     preserve_linesegs: bool,
     add_tracking_tail: bool,
     warnings: &mut Vec<String>,
@@ -854,7 +865,7 @@ fn emit_section(
     let mut roots: Vec<RecordNode> = section
         .paragraphs
         .iter()
-        .map(|p| emit_paragraph(p, preserve_linesegs, add_tracking_tail, warnings))
+        .map(|p| emit_paragraph(p, synthesize, preserve_linesegs, add_tracking_tail, warnings))
         .collect();
     roots.extend(section.extras.iter().map(opaque_to_node));
     roots
@@ -862,10 +873,34 @@ fn emit_section(
 
 fn emit_paragraph(
     para: &Paragraph,
+    synthesize: bool,
     preserve_linesegs: bool,
     add_tracking_tail: bool,
     warnings: &mut Vec<String>,
 ) -> RecordNode {
+    // 합성 경로(md/hwpx 출신)는 한글 문단 불변식을 직렬화 시 보정한다. 모든
+    // 합성 문단(본문·표 셀·글상자)이 이 단일 지점을 거치므로 누락이 없다.
+    // from_markdown뿐 아니라 hwpx→hwp 변환 경로도 함께 커버하기 위해 IR/변환기가
+    // 아니라 writer에서 일원화한다.
+    // (hwp5 무수정 왕복은 synthesize=false — 원본 보존, 바이트 동일 게이트.)
+    let patched;
+    let para = if synthesize {
+        let mut p = para.clone();
+        // 1. 모든 문단은 문단끝 문자(0x0d=13)로 닫혀야 한다 (정품 188문단 전수).
+        //    누락 시 한글이 '손상/변조'로 거부.
+        if p.chars.last() != Some(&HwpChar::CharCtrl(13)) {
+            p.chars.push(HwpChar::CharCtrl(13));
+        }
+        // 2. nchars 최상위 비트(0x80000000) — 한글 내부 '줄 배치 최신' 캐시 비트.
+        //    정품 단일 문단 표본 전수가 세팅(읽을 때 마스킹되어 글자 수 무영향).
+        p.header.chars_flags |= 0x80;
+        // 3. PARA_CHAR_SHAPE 연속 동일 id run 병합 (중복 run은 손상 판정).
+        p.char_shape_runs.dedup_by(|(_, b), (_, a)| a == b);
+        patched = p;
+        &patched
+    } else {
+        para
+    };
     // PARA_HEADER
     let mut w = ByteWriter::new();
     // 빈 문단도 한글은 글자 수를 1로 기록한다(암묵적 문단끝, PARA_TEXT는
@@ -906,6 +941,11 @@ fn emit_paragraph(
         .filter(|e| e.tag == tag::PARA_RANGE_TAG)
         .count() as u16;
     w.write_u16(range_tags);
+    // 줄 배치(PARA_LINE_SEG) 개수.
+    // - preserve_linesegs(=hwp5 무수정 왕복): 원본 그대로 보존(바이트 동일 게이트).
+    // - 그 외(합성: md/hwpx 출신): 0. 한글은 줄 배치 캐시가 내용과 어긋나면
+    //   '변조' 경고를 내므로(7f7f63d), 정확한 레이아웃을 계산하지 않는 한
+    //   합성하지 않는다. lineseg 부재 자체는 한글이 허용한다(work_rt 실기 통과).
     let seg_count = if preserve_linesegs {
         para.line_segs.len()
     } else {
@@ -969,6 +1009,7 @@ fn emit_paragraph(
     for control in &para.controls {
         children.push(emit_control(
             control,
+            synthesize,
             preserve_linesegs,
             add_tracking_tail,
             warnings,
@@ -1013,13 +1054,14 @@ fn reversed(id: [u8; 4]) -> [u8; 4] {
 
 fn emit_control(
     control: &Control,
+    synthesize: bool,
     preserve_linesegs: bool,
     add_tracking_tail: bool,
     warnings: &mut Vec<String>,
 ) -> RecordNode {
     match control {
         Control::SectionDef(def) => emit_section_def(def),
-        Control::Table(table) => emit_table(table, preserve_linesegs, add_tracking_tail),
+        Control::Table(table) => emit_table(table, synthesize, preserve_linesegs, add_tracking_tail),
         Control::Picture(pic) => emit_picture(pic, warnings),
         Control::Generic(g) => {
             let mut w = ByteWriter::new();
@@ -1048,6 +1090,7 @@ fn emit_control(
                 for p in &list.paragraphs {
                     children.push(emit_paragraph(
                         p,
+                        synthesize,
                         preserve_linesegs,
                         add_tracking_tail,
                         warnings,
@@ -1126,7 +1169,12 @@ fn emit_section_def(def: &SectionDef) -> RecordNode {
     }
 }
 
-fn emit_table(table: &Table, preserve_linesegs: bool, add_tracking_tail: bool) -> RecordNode {
+fn emit_table(
+    table: &Table,
+    synthesize: bool,
+    preserve_linesegs: bool,
+    add_tracking_tail: bool,
+) -> RecordNode {
     let mut w = ByteWriter::new();
     w.write_bytes(b" lbt");
     if table.common_data.is_empty() {
@@ -1186,6 +1234,7 @@ fn emit_table(table: &Table, preserve_linesegs: bool, add_tracking_tail: bool) -
         for p in &cell.paragraphs {
             children.push(emit_paragraph(
                 p,
+                synthesize,
                 preserve_linesegs,
                 add_tracking_tail,
                 &mut cell_warnings,

@@ -152,6 +152,7 @@ pub fn from_markdown(md: &str) -> Document {
     b.flush_paragraph();
 
     if b.paragraphs.is_empty() {
+        // 빈 문서도 문단 하나로 닫는다. 문단끝 문자는 writer가 보장한다.
         b.paragraphs.push(Paragraph::default());
     }
     // 첫 문단에 구역/단 정의 주입 — hwp5/한글 호환의 전제 조건
@@ -222,6 +223,8 @@ impl Builder {
         if self.chars.is_empty() && self.runs.is_empty() {
             return;
         }
+        // 문단끝 문자(0x0d)·nchars bit31·char_shape run 병합 등 한글 문단 불변식은
+        // hwp5 writer(emit_paragraph)가 합성 경로 전체(md+hwpx)에 일원 적용한다.
         let para = Paragraph {
             para_shape: ParaShapeId(if self.heading.is_some() { 1 } else { 0 }),
             style: StyleId(self.style),
@@ -366,6 +369,8 @@ fn inject_section_controls(para: &mut Paragraph) {
     if para.char_shape_runs.first().map(|(p, _)| *p) != Some(0) {
         para.char_shape_runs.insert(0, (0, first_shape));
     }
+    // 연속 동일 id run 병합(secd/cold 삽입으로 생기는 [(0,0),(16,0)] 중복 등)은
+    // writer가 합성 경로 전체에 적용한다.
 
     let page = PageDef {
         width: HwpUnit(59528),
@@ -411,6 +416,13 @@ fn inject_section_controls(para: &mut Paragraph) {
     };
     para.chars.insert(0, ext(*b"secd", 0));
     para.chars.insert(1, ext(*b"cold", 1));
+    // 구역 첫 문단의 break_type — 한글이 직접 저장한 단일 문단 표본 전수
+    // (가나다·hello_world·outline·bookmark)가 모두 0x03(bit0 구역나눔 +
+    // bit1 다단나눔)이다. secd/cold ExtCtrl를 품은 '구역 첫 문단'에 한글이
+    // 항상 쓰는 값으로, 0x00이면 헤더-컨트롤 정합이 깨져 손상 판정된다.
+    // (hwp5 왕복 경로는 body_text.rs에서 원본 break_type를 보존하며 이
+    // 함수를 거치지 않으므로 바이트동일 게이트에 영향 없음.)
+    para.header.break_type = 0x03;
 }
 
 /// 수집한 표를 앵커 문단(확장 컨트롤 1개)으로 만든다.

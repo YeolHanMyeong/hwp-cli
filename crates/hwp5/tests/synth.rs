@@ -73,6 +73,65 @@ fn 합성_문서_한글_규격_충족() {
     );
 }
 
+/// 합성 문단의 본문 구조가 정품 한글 문단(가나다.hwp 5.1.1.0)과 동형이어야 한다.
+/// 정품 대조로 확정한 5대 본문 결함의 회귀 방지 — 이 결함들이 합쳐져
+/// "보안 낮춤에도 손상" 경고를 냈다.
+#[test]
+fn 합성_문단_본문_구조_정품_동형() {
+    let doc = hwp_convert::from_markdown("가나다\n");
+    let out = tmp("synth_para.hwp");
+    hwp5::write_document(&doc, &out, &hwp5::WriteOptions::default()).unwrap();
+    let mut c = hwp5::Hwp5Container::open(&out).unwrap();
+    let bt = c.read_record_stream("/BodyText/Section0").unwrap();
+
+    // 1. PARA_TEXT는 문단끝 문자(0x0d=13)로 끝나야 한다 (정품 188문단 전수).
+    let pt = first_record(&bt, 0x43).expect("PARA_TEXT");
+    let last = u16::from_le_bytes([pt[pt.len() - 2], pt[pt.len() - 1]]);
+    assert_eq!(last, 13, "PARA_TEXT는 문단끝 0x0d로 종료해야");
+
+    // 2. PARA_HEADER nchars 최상위 비트(0x80000000) 세팅 (정품 단일 문단 전수).
+    let ph = first_record(&bt, 0x42).expect("PARA_HEADER");
+    let nchars = u32::from_le_bytes([ph[0], ph[1], ph[2], ph[3]]);
+    assert_ne!(nchars & 0x8000_0000, 0, "nchars bit31");
+
+    // 3. 구역 첫 문단 break_type=0x03 (offset 11) — 정품 동형.
+    assert_eq!(ph[11], 0x03, "구역 첫 문단 break_type");
+
+    // 4. PARA_CHAR_SHAPE run 수 = char_shape_cnt(offset 12, u16), 중복 병합으로 단일.
+    let cs = first_record(&bt, 0x44).expect("PARA_CHAR_SHAPE");
+    let cnt = u16::from_le_bytes([ph[12], ph[13]]);
+    assert_eq!(cs.len() / 8, cnt as usize, "char_shape run 수=char_shape_cnt");
+    assert_eq!(cnt, 1, "단일 문단은 단일 char_shape run (중복 없음)");
+
+    // 5. PAGE_BORDER_FILL attribute 첫 u32 = 1 (hello_world 표본 잔재 garbage 아님).
+    let pbf = first_record(&bt, 0x4B).expect("PAGE_BORDER_FILL");
+    assert_eq!(
+        u32::from_le_bytes([pbf[0], pbf[1], pbf[2], pbf[3]]),
+        1,
+        "PAGE_BORDER_FILL attribute"
+    );
+}
+
+/// 스트림에서 특정 태그의 첫 레코드 페이로드.
+fn first_record(data: &[u8], tag: u16) -> Option<Vec<u8>> {
+    let mut i = 0usize;
+    while i + 4 <= data.len() {
+        let h = u32::from_le_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
+        let t = (h & 0x3FF) as u16;
+        let mut sz = h >> 20;
+        let mut hl = 4;
+        if sz == 0xFFF {
+            sz = u32::from_le_bytes([data[i + 4], data[i + 5], data[i + 6], data[i + 7]]);
+            hl = 8;
+        }
+        if t == tag {
+            return Some(data[i + hl..i + hl + sz as usize].to_vec());
+        }
+        i += hl + sz as usize;
+    }
+    None
+}
+
 /// 레코드 스트림에서 특정 태그 레코드들의 페이로드 크기 목록.
 fn record_sizes(data: &[u8], tag: u16) -> Vec<u32> {
     let mut out = Vec::new();
