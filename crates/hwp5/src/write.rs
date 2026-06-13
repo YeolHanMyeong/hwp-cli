@@ -67,7 +67,10 @@ pub fn write_document(doc: &Document, path: &Path, opts: &WriteOptions) -> Resul
         version: parse_version(&doc.meta.source_version),
         attributes: 0x1, // 압축
         license: 0,
-        encrypt_version: 0,
+        // 비암호 문서라도 현대 한글(2010+)은 EncryptVersion=4(글 7.0+)를
+        // 무조건 쓴다. fixtures/hwp5 표본 6개 전부 attr1 암호화 bit(=bit1)는
+        // 0인데 encver=4. 0을 쓰면 한글이 '손상/변조'로 거부한다(실기 게이트).
+        encrypt_version: 4,
         kogl_country: 0,
         reserved: [0u8; FILE_HEADER_SIZE - 49],
     };
@@ -162,8 +165,11 @@ fn needs_normalize(doc: &Document) -> bool {
         para.controls.iter().any(|c| match c {
             Control::Picture(p) => p.extras.is_empty(),
             Control::Table(t) => t.cells.iter().flat_map(|c| &c.paragraphs).any(para_has),
+            // hwp5 출신(raw_children 보존)은 원본 트리를 그대로 방출하므로
+            // 정규화 불필요. raw_children가 없는데 data도 없는 컨트롤만
+            // (hwpx/md 출신 합성 불가) 드롭 대상.
             Control::Generic(g) => {
-                (g.data.is_empty() && g.ctrl_id != *b"cold")
+                (g.data.is_empty() && g.ctrl_id != *b"cold" && g.raw_children.is_empty())
                     || g.paragraph_lists
                         .iter()
                         .flat_map(|l| &l.paragraphs)
@@ -190,8 +196,11 @@ fn strip_unwritable_pictures(para: &mut Paragraph, warnings: &mut Vec<String>) {
                 removed.push(i as u32);
                 continue;
             }
-            // hwp5 페이로드를 합성할 수 없는 컨트롤(머리말/자동번호 등)은 생략
-            Control::Generic(g) if g.data.is_empty() && g.ctrl_id != *b"cold" => {
+            // hwp5 페이로드를 합성할 수 없는 컨트롤(hwpx/md 출신 머리말/자동번호
+            // 등)만 생략. raw_children가 있으면 hwp5 원본이므로 보존.
+            Control::Generic(g)
+                if g.data.is_empty() && g.ctrl_id != *b"cold" && g.raw_children.is_empty() =>
+            {
                 warnings.push(format!(
                     "hwp5 페이로드가 없는 {:?} 컨트롤을 생략 (hwpx 출신)",
                     String::from_utf8_lossy(&g.ctrl_id)
@@ -406,9 +415,28 @@ fn emit_doc_info(doc: &Document, _warnings: &mut Vec<String>) -> Vec<RecordNode>
     if h.id_mappings_counts.len() > counts.len() {
         counts.extend_from_slice(&h.id_mappings_counts[counts.len()..]);
     }
-    // 5.1.0.1 기준 카운트 18개(메모 5.0.2.1+, 변경추적×2 5.0.3.2+) —
-    // 부족하면 0으로 패딩 (pyhwp 실측: 버전 대비 짧으면 파싱 실패)
-    while counts.len() < 18 {
+    // ID_MAPPINGS 카운트 개수는 선언 버전과 일치해야 한다(스펙 표 16, 표 15
+    // "doc version 에 따라 가변적"). 인덱스 15=메모모양(5.0.2.1+),
+    // 16·17=변경추적(5.0.3.2+). 파생 기본은 15개(인덱스 0~14, 스타일까지).
+    //   - 원본을 왕복할 때는 h.id_mappings_counts 길이를 그대로 보존한다
+    //     (실제 한컴 저장본은 이미 버전에 맞는 길이라서).
+    //   - 합성 문서(원본 카운트 없음)는 선언 버전으로 목표 길이를 정한다.
+    // 무조건 18 패딩을 하면 5.0.2.x 문서(16개)를 18개로 부풀려 버전-레이아웃이
+    // 어긋나고 한글이 '손상'으로 거부한다(work_report 5.0.2.4 실증).
+    let ver = parse_version(&doc.meta.source_version);
+    let version_target = if ver.to_u32() >= 0x05_00_03_02 {
+        18 // 5.0.3.2 이상: 메모 + 변경추적 ×2
+    } else if ver.to_u32() >= 0x05_00_02_01 {
+        16 // 5.0.2.1 이상: 메모 모양
+    } else {
+        15 // 그 이전: 스타일까지
+    };
+    let target = h
+        .id_mappings_counts
+        .len()
+        .max(version_target)
+        .max(counts.len());
+    while counts.len() < target {
         counts.push(0);
     }
     let mut w = ByteWriter::new();
@@ -677,15 +705,26 @@ fn emit_paragraph(
 ) -> RecordNode {
     // PARA_HEADER
     let mut w = ByteWriter::new();
-    let nchars = para.wchar_len() | (u32::from(para.header.chars_flags) << 24);
+    // 빈 문단도 한글은 글자 수를 1로 기록한다(암묵적 문단끝, PARA_TEXT는
+    // 생략). 표본 실측: 빈 셀 문단 60개 전부 nchars 하위=1. 0을 쓰면
+    // 한글이 손상으로 판정.
+    let char_count = if para.chars.is_empty() {
+        1
+    } else {
+        para.wchar_len()
+    };
+    let nchars = char_count | (u32::from(para.header.chars_flags) << 24);
     w.write_u32(nchars);
+    // ctrl_mask는 확장/인라인 컨트롤만 표시한다. 문자형 컨트롤(문단끝 13,
+    // 줄나눔 10, 하이픈 등)은 포함하지 않는다 — 표본 실측: 텍스트만 있고
+    // 문단끝(13)으로 닫히는 문단의 원본 ctrl_mask=0. CharCtrl까지 비트를
+    // 켜면 한글이 'ctrl_mask에 있다는 컨트롤이 실제로 없다'고 손상 판정.
     let ctrl_mask = if para.header.ctrl_mask != 0 {
         para.header.ctrl_mask
     } else {
         para.chars
             .iter()
             .filter_map(|c| match c {
-                HwpChar::CharCtrl(code) if *code < 32 => Some(1u32 << code),
                 HwpChar::InlineCtrl { code, .. } | HwpChar::ExtCtrl { code, .. } => {
                     Some(1u32 << code)
                 }
@@ -809,6 +848,15 @@ fn emit_control(
                 w.write_bytes(&DEFAULT_COLD_DATA);
             } else {
                 w.write_bytes(&g.data);
+            }
+            // 원본 hwp5 자식 서브트리가 있으면 중첩 그대로 방출(무손실).
+            // paragraph_lists/extras는 텍스트 추출 전용이므로 평탄화하지 않는다.
+            if !g.raw_children.is_empty() {
+                return RecordNode {
+                    tag: tag::CTRL_HEADER,
+                    data: w.into_bytes(),
+                    children: g.raw_children.iter().map(opaque_to_node).collect(),
+                };
             }
             let mut children = Vec::new();
             for list in &g.paragraph_lists {

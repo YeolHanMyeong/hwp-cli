@@ -258,6 +258,7 @@ fn parse_control(node: &RecordNode, warnings: &mut Vec<String>) -> Control {
             data: node.data.clone(),
             paragraph_lists: Vec::new(),
             extras: node.children.iter().map(to_opaque).collect(),
+            raw_children: node.children.iter().map(to_opaque).collect(),
         });
     }
     let mut ctrl_id = [node.data[0], node.data[1], node.data[2], node.data[3]];
@@ -478,6 +479,8 @@ fn parse_generic(
         data,
         paragraph_lists: Vec::new(),
         extras: Vec::new(),
+        // 원본 자식 서브트리를 중첩 그대로 보존 → 무손실 재직렬화.
+        raw_children: children.iter().map(to_opaque).collect(),
     };
     collect_paragraph_lists(children, &mut g, warnings);
     g

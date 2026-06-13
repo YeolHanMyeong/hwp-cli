@@ -370,6 +370,7 @@ fn inject_section_controls(para: &mut Paragraph) {
             data: Vec::new(),
             paragraph_lists: Vec::new(),
             extras: Vec::new(),
+            raw_children: Vec::new(),
         }),
     );
     let ext = |ctrl_id: [u8; 4], idx: u32| {

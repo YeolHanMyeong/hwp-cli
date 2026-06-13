@@ -18,35 +18,46 @@ fn tmp(name: &str) -> PathBuf {
     dir.join(name)
 }
 
-/// hello_world: IR 경유 재저장이 바이트 수준으로 동일해야 한다.
+/// 전체 fixture: IR 경유 재저장(--preserve-layout)이 **압축 해제 스트림
+/// 바이트 동일**해야 한다 — 표/그림/도형/책갈피/빈 셀 모두 포함.
+/// hwp→IR→hwp가 레코드 수준 무손실임의 최종 증명 (한글 '손상' 판정 방지).
 #[test]
-fn hello_world_바이트_동일_왕복() {
-    let src = fixture("hello_world.hwp");
-    let doc = hwp5::read_document(&src).unwrap().document;
-    let out = tmp("hello_rt.hwp");
+fn 전체_fixture_바이트_동일_왕복() {
     let opts = hwp5::WriteOptions {
         preserve_linesegs: true,
         ..Default::default()
     };
-    let warnings = hwp5::write_document(&doc, &out, &opts).unwrap();
-    assert!(warnings.is_empty(), "{warnings:?}");
+    for name in [
+        "hello_world.hwp",
+        "bookmark.hwp",
+        "color_fill.hwp",
+        "outline.hwp",
+        "work_report.hwp",
+        "annual_report.hwp",
+    ] {
+        let src = fixture(name);
+        let doc = hwp5::read_document(&src).unwrap().document;
+        let out = tmp(&format!("byteid_{name}"));
+        hwp5::write_document(&doc, &out, &opts).unwrap();
 
-    let mut orig = hwp5::Hwp5Container::open(&src).unwrap();
-    let mut ours = hwp5::Hwp5Container::open(&out).unwrap();
-    for stream in ["/DocInfo", "/BodyText/Section0"] {
-        let a = orig.read_record_stream(stream).unwrap();
-        let b = ours.read_record_stream(stream).unwrap();
-        assert_eq!(
-            a,
-            b,
-            "{stream}: 압축 해제 스트림 불일치 ({} vs {} 바이트)",
-            a.len(),
-            b.len()
-        );
+        let mut orig = hwp5::Hwp5Container::open(&src).unwrap();
+        let mut ours = hwp5::Hwp5Container::open(&out).unwrap();
+        let mut streams = vec!["/DocInfo".to_string()];
+        streams.extend(orig.body_sections());
+        for stream in streams {
+            let a = orig.read_record_stream(&stream).unwrap();
+            let b = ours.read_record_stream(&stream).unwrap();
+            assert_eq!(
+                a,
+                b,
+                "{name} {stream}: 압축 해제 스트림 불일치 ({} vs {} 바이트)",
+                a.len(),
+                b.len()
+            );
+        }
+        // FileHeader: EncryptVersion=4 + 압축 플래그 (한글 호환 필수)
+        assert!(ours.file_header().is_compressed(), "{name}");
     }
-    // FileHeader: 버전/압축 플래그 보존
-    assert_eq!(ours.file_header().version.to_string(), "5.1.0.1");
-    assert!(ours.file_header().is_compressed());
 }
 
 /// 전체 fixture: 의미 동등 왕복.

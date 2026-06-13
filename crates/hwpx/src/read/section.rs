@@ -168,6 +168,7 @@ fn parse_paragraph(
                             data: Vec::new(),
                             paragraph_lists: Vec::new(),
                             extras: Vec::new(),
+                            raw_children: Vec::new(),
                         };
                         if !empty {
                             collect_sub_lists(reader, &name, &mut generic, warnings)?;
@@ -343,6 +344,7 @@ fn parse_ctrl(
                     data: Vec::new(),
                     paragraph_lists: Vec::new(),
                     extras: Vec::new(),
+                    raw_children: Vec::new(),
                 };
                 if matches!(event, Event::Start(_)) {
                     collect_sub_lists(reader, &name, &mut generic, warnings)?;

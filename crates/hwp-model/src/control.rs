@@ -141,6 +141,11 @@ pub struct GenericControl {
     /// LIST_HEADER 단위 문단 리스트 — 텍스트 추출용 재귀 수집
     pub paragraph_lists: Vec<ParagraphList>,
     pub extras: Vec<OpaqueRecord>,
+    /// hwp5 원본 CTRL_HEADER 자식 서브트리(중첩 포함) — 무손실 재직렬화용.
+    /// 존재하면 emit 시 이 트리를 그대로 방출하고 paragraph_lists/extras는
+    /// 텍스트 추출 전용으로만 쓴다(gso 등 중첩 구조 평탄화 방지).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub raw_children: Vec<OpaqueRecord>,
 }
 
 /// LIST_HEADER 하나가 여는 문단 리스트.
