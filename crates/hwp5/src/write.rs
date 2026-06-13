@@ -52,6 +52,17 @@ pub fn write_document(doc: &Document, path: &Path, opts: &WriteOptions) -> Resul
         // work_rt 5.0.2.4는 재계산하나 5.1.x 정품은 본문 문단 lineseg 100% 보유).
         if synthesize {
             synthesize_linesegs(&mut d);
+            // hwpx 경유 변환은 ParaShape.attr1(한글 줄나눔·줄격자 비트)·
+            // line_spacing_old·border_fill_id 와 구역 첫 문단 break_type=0x03 을
+            // 왕복에서 잃는다(hwpx writer/reader가 직렬화/복원하지 않음). 합성
+            // 경로에서만 정상 표본 기준값을 보정 주입한다 — hwp5 무수정 왕복
+            // (synthesize=false)은 거치지 않으므로 바이트 동일 게이트 무영향.
+            ensure_para_shape_defaults(&mut d.header);
+            for section in &mut d.sections {
+                if let Some(p) = section.paragraphs.first_mut() {
+                    p.header.break_type |= 0x03;
+                }
+            }
         }
         normalized = d;
         &normalized
@@ -264,6 +275,21 @@ fn synth_para_lineseg(
         flags: 0x0006_0000,
     }];
     *v_pos += base + line_spacing;
+}
+
+/// 합성(md/hwpx 출신) 문서의 ParaShape에 정상 표본 기준값을 보정 주입한다.
+/// attr1 의 0x180(bit7 한글 줄나눔=글자 + bit8 줄 격자 사용)은 정렬 비트와
+/// 무관하게 항상 OR 한다(== 0 게이트로 막으면 정렬을 가진 헤딩 PS가 누락됨).
+fn ensure_para_shape_defaults(header: &mut hwp_model::DocHeader) {
+    for ps in &mut header.para_shapes {
+        ps.attr1 |= 0x180;
+        if ps.line_spacing_old == 0 {
+            ps.line_spacing_old = 160;
+        }
+        if ps.border_fill_id == 0 {
+            ps.border_fill_id = 2;
+        }
+    }
 }
 
 /// hwp5로 쓸 수 없는 그림(SHAPE_COMPONENT 레코드 부재)이 있는지.
