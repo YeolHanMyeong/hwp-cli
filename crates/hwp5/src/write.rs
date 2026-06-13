@@ -892,19 +892,8 @@ fn emit_paragraph(
             p.chars.push(HwpChar::CharCtrl(13));
         }
         // 2. nchars 최상위 비트(0x80000000) — 한글 내부 '줄 배치 최신' 캐시 비트.
-        //    스펙 표 58/62: 이 property 비트는 "줄 배치(PARA_LINE_SEG) 캐시가
-        //    내용과 정합한다"는 선언이다. 정품 전수에서 bit31=1 ⟺ 그 문단에
-        //    PARA_LINE_SEG가 존재(work_report 73/73, 가나다·hello_world 1/1).
-        //    합성 경로는 줄 배치를 기본 제거(7f7f63d)하므로, bit31을 세팅하면
-        //    "캐시 최신"이라 선언하면서 캐시가 0개인 모순 → 한글이 '손상/변조'로
-        //    판정한다(M6-md생성 실기 손상의 직접 원인). 따라서 줄 배치를 실제로
-        //    방출할 때(preserve_linesegs)만 bit31을 세팅하고, 그 외에는 클리어해
-        //    "줄 배치 미계산"을 정직하게 알린다(한글이 열 때 재계산).
-        if preserve_linesegs && !p.line_segs.is_empty() {
-            p.header.chars_flags |= 0x80;
-        } else {
-            p.header.chars_flags &= !0x80;
-        }
+        //    정품 단일 문단 표본 전수가 세팅(읽을 때 마스킹되어 글자 수 무영향).
+        p.header.chars_flags |= 0x80;
         // 3. PARA_CHAR_SHAPE 연속 동일 id run 병합 (중복 run은 손상 판정).
         p.char_shape_runs.dedup_by(|(_, b), (_, a)| a == b);
         patched = p;

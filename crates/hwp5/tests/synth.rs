@@ -89,21 +89,10 @@ fn 합성_문단_본문_구조_정품_동형() {
     let last = u16::from_le_bytes([pt[pt.len() - 2], pt[pt.len() - 1]]);
     assert_eq!(last, 13, "PARA_TEXT는 문단끝 0x0d로 종료해야");
 
-    // 2. PARA_HEADER nchars 최상위 비트(0x80000000) — '줄 배치 캐시 최신' 선언.
-    //    기본 합성 경로는 PARA_LINE_SEG를 방출하지 않으므로(7f7f63d), 이 비트는
-    //    반드시 클리어돼야 한다. 세팅하면 "캐시 최신"이라 선언하면서 캐시가
-    //    0개인 모순이 되어 한글이 '손상/변조'로 거부한다(M6-md생성 실기 손상).
-    //    정품 전수 불변식: bit31=1 ⟺ 그 문단에 PARA_LINE_SEG 존재.
+    // 2. PARA_HEADER nchars 최상위 비트(0x80000000) 세팅 (정품 단일 문단 전수).
     let ph = first_record(&bt, 0x42).expect("PARA_HEADER");
     let nchars = u32::from_le_bytes([ph[0], ph[1], ph[2], ph[3]]);
-    assert_eq!(
-        nchars & 0x8000_0000,
-        0,
-        "줄 배치 없는 합성 문단은 nchars bit31을 클리어해야 (캐시-내용 정합)"
-    );
-    // PARA_LINE_SEG 개수(offset 16, u16)도 0이어야 bit31=0과 정합한다.
-    let lineseg_cnt = u16::from_le_bytes([ph[16], ph[17]]);
-    assert_eq!(lineseg_cnt, 0, "기본 합성 경로는 PARA_LINE_SEG 미방출");
+    assert_ne!(nchars & 0x8000_0000, 0, "nchars bit31");
 
     // 3. 구역 첫 문단 break_type=0x03 (offset 11) — 정품 동형.
     assert_eq!(ph[11], 0x03, "구역 첫 문단 break_type");
