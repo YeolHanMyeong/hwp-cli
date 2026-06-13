@@ -31,6 +31,12 @@ fn 합성_문서_한글_규격_충족() {
         "NUMBERING dangling reference"
     );
 
+    // 1a. char_shape 음영색(shade_color) != 0 — 0이면 한글이 글자 칸마다 불투명
+    //     검정 음영을 그려 '검은 바'가 된다(14차 실기). 정품은 0xFFFFFFFF('없음').
+    for cs in &d.header.char_shapes {
+        assert_ne!(cs.shade_color, 0, "char_shape 음영색 0 = 검은 바");
+    }
+
     // 1b. COMPATIBLE_DOCUMENT(0x1E) 존재 — 5.1.x 필수 (한글 정품 가나다·hello_world 보유)
     let mut c0 = hwp5::Hwp5Container::open(&out).unwrap();
     let di0 = c0.read_record_stream("/DocInfo").unwrap();

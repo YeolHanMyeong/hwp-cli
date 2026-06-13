@@ -45,6 +45,15 @@ pub fn default_header() -> hwp_model::DocHeader {
         base_size: 1000,
         ratios: [100; LANG_COUNT],
         rel_sizes: [100; LANG_COUNT],
+        // 음영 색(shade_color)은 0xFFFFFFFF = '없음' 표식이어야 한다. 기본값 0은
+        // 한글이 '불투명 검정 음영(글자 배경 하이라이트)'으로 해석해, 글자 칸마다
+        // 검은 막대를 그리고 (검정) 글자가 그 위에서 안 보이게 된다 — 14차 실기의
+        // '검은 바' 원인. 정상 표본(가나다.hwp 5.1.1.0, hello_world.hwp 5.1.0.1)은
+        // 모두 shade_color=0xFFFFFFFF, shadow_gap=(10,10), shadow_color≈0xC0C0C0.
+        // (face_id=0은 무해 — hello_world도 char_shape[0].face_ids=0이고 정상 렌더.)
+        shade_color: 0xFFFF_FFFF,
+        shadow_color: 0x00C0_C0C0,
+        shadow_gap: (10, 10),
         ..CharShape::default()
     };
     let cs = |size: i32, bold: bool, italic: bool| CharShape {
@@ -84,14 +93,28 @@ pub fn default_header() -> hwp_model::DocHeader {
         },
     ];
 
-    // 0 본문(양쪽), 1 헤딩(왼쪽 + 위 간격)
+    // 0 본문(양쪽), 1 헤딩(왼쪽 + 위 간격).
+    //
+    // 정상 표본(가나다.hwp 5.1.1.0, hello_world.hwp 5.1.0.1)의 PARA_SHAPE[0]은
+    // attr1=0x180(bit7 한글 줄나눔=글자 + bit8 줄 격자 사용), line_spacing_old=160,
+    // border_fill_id=2 다. 이는 본문 줄 배치를 한글이 재계산할 때의 기준값으로,
+    // 0(우리 기존값)이면 줄 격자·줄나눔 기준이 정상 표본과 어긋난다. 검은 바의
+    // 직접 원인은 char_shape 음영색이지만, 한글이 줄 배치를 다시 잡을 때 안전하도록
+    // 정상 표본 바이트에 맞춘다. (BodyText의 PARA_LINE_SEG 캐시는 합성기가 채운다.)
+    let base_para = ParaShape {
+        attr1: 0x180,
+        line_spacing_old: 160,
+        border_fill_id: 2,
+        line_spacing: 160,
+        ..ParaShape::default()
+    };
     header.para_shapes = vec![
-        ParaShape::default(),
+        base_para.clone(),
         ParaShape {
-            attr1: 1 << 2,
+            attr1: 0x180 | (1 << 2), // 정상 attr1 + 왼쪽 정렬
             spacing_top: 600,
             spacing_bottom: 300,
-            ..ParaShape::default()
+            ..base_para
         },
     ];
 
