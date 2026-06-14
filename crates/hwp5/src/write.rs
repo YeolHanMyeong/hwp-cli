@@ -1038,7 +1038,14 @@ fn emit_paragraph(
     }
 
     let mut children = Vec::new();
-    if !para.chars.is_empty() {
+    // 빈 문단(내용이 암묵적 문단끝뿐, nchars=1)은 PARA_TEXT 레코드를 만들지
+    // 않는다 — 정품 실측: work_report·한라대 정품의 빈 문단/빈 셀은 전부
+    // nchars=1 + PARA_TEXT 없음. 합성 경로는 모든 문단에 CharCtrl(13)을 붙이므로
+    // 빈 문단이 chars=[0x0d](char_count=1)가 되는데, 이를 PARA_TEXT=[0x0d]로
+    // 방출하면 한글이 '손상'으로 거부한다(빈 셀 표 전부 손상의 원인). 따라서
+    // 실제 내용이 있는 문단(char_count>1)만 PARA_TEXT를 방출한다. 채워진 문단은
+    // 끝 0x0d를 포함해 PARA_TEXT 길이=nchars로 정품과 동일하다.
+    if char_count > 1 {
         children.push(RecordNode {
             tag: tag::PARA_TEXT,
             data: emit_para_text(&para.chars),
