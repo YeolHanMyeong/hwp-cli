@@ -93,7 +93,11 @@ pub fn default_header() -> hwp_model::DocHeader {
         },
     ];
 
-    // 0 본문(양쪽), 1 헤딩(왼쪽 + 위 간격).
+    // 0 기본·표 셀(양쪽, 간격 없음), 1 제목(왼쪽 + 위/아래 간격), 2 본문(양쪽 + 아래 간격).
+    //
+    // 본문 문단은 아래 간격(spacing_bottom)을 줘서 md 생성물이 실제 문서처럼
+    // 문단 사이가 떨어져 보이게 한다. 표 셀은 0(간격 없음)을 써서 셀이 불필요하게
+    // 커지지 않게 한다 — flush_paragraph_inner가 self.table 유무로 둘을 가른다.
     //
     // 정상 표본(가나다.hwp 5.1.1.0, hello_world.hwp 5.1.0.1)의 PARA_SHAPE[0]은
     // attr1=0x180(bit7 한글 줄나눔=글자 + bit8 줄 격자 사용), line_spacing_old=160,
@@ -114,6 +118,10 @@ pub fn default_header() -> hwp_model::DocHeader {
             attr1: 0x180 | (1 << 2), // 정상 attr1 + 왼쪽 정렬
             spacing_top: 600,
             spacing_bottom: 300,
+            ..base_para.clone()
+        },
+        ParaShape {
+            spacing_bottom: 600, // 본문 문단 아래 간격
             ..base_para
         },
     ];
@@ -267,8 +275,16 @@ impl Builder {
         if runs.is_empty() {
             runs.push((0, CharShapeId(self.current_shape())));
         }
+        // 제목→1, 표 셀→0(간격 없음), 그 외 본문→2(아래 간격).
+        let para_shape = if self.heading.is_some() {
+            1
+        } else if self.table.is_some() {
+            0
+        } else {
+            2
+        };
         let para = Paragraph {
-            para_shape: ParaShapeId(if self.heading.is_some() { 1 } else { 0 }),
+            para_shape: ParaShapeId(para_shape),
             style: StyleId(self.style),
             chars: std::mem::take(&mut self.chars),
             char_shape_runs: runs,
