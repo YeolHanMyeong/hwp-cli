@@ -47,6 +47,19 @@ pub fn synthesize_linesegs(doc: &mut Document, store: &mut FontStore, warnings: 
             .max(1);
         let mut v_pos = 0i32;
         for pi in 0..doc.sections[si].paragraphs.len() {
+            // 문단 위/아래 간격(spacing_top/bottom)을 v_pos에 반영한다. 한글은 줄
+            // 배치 v_pos로 문단 세로 위치를 그리므로, 간격이 빠지면 문단 사이 여백
+            // 없이 압축돼 보인다(제목 위 여백 사라짐 등 '세로 위치 어긋남'의 원인).
+            // 문단 사이 간격 = 앞 문단 아래 간격 + 이 문단 위 간격(가산). 단 섹션
+            // 첫 문단의 위 간격은 페이지 상단이라 적용하지 않는다(정품: 첫 문단 v_pos=0).
+            let (sp_top, sp_bottom) = snap
+                .header
+                .para_shapes
+                .get(snap.sections[si].paragraphs[pi].para_shape.0 as usize)
+                .map_or((0, 0), |ps| (ps.spacing_top, ps.spacing_bottom));
+            if pi > 0 {
+                v_pos += sp_top;
+            }
             // 셀 안 문단 줄 배치를 먼저 채운다(셀 줄 수를 표 높이 계산이 읽어야 한다).
             fill_nested(si, pi, &snap, doc, store, warnings);
             // 이 문단의 표 총높이.
@@ -75,6 +88,8 @@ pub fn synthesize_linesegs(doc: &mut Document, store: &mut FontStore, warnings: 
             if table_total > 0 {
                 v_pos = anchor_v + table_total;
             }
+            // 문단 아래 간격: 다음 문단 첫 줄을 그만큼 더 내린다.
+            v_pos += sp_bottom;
         }
     }
 }

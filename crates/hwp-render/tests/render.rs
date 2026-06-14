@@ -138,6 +138,28 @@ fn 멀티페이지_lineseg_페이지_상대_v_pos() {
     );
 }
 
+/// 문단 위/아래 간격(spacing_top/bottom)이 합성 줄 배치 v_pos 에 반영되어야 한다.
+/// 빠지면 한글이 문단 사이 여백 없이 압축해 그린다(제목 위 여백 사라짐 등).
+/// from_markdown 은 제목에 spacing_top=600, spacing_bottom=300 을 준다.
+#[test]
+fn 문단_간격이_v_pos에_반영() {
+    let mut doc = hwp_convert::from_markdown("# 제목\n\n본문 문단.\n");
+    let mut store = hwp_render::FontStore::new();
+    let mut warns = Vec::new();
+    hwp_render::lineseg::synthesize_linesegs(&mut doc, &mut store, &mut warns);
+
+    let paras = &doc.sections[0].paragraphs;
+    let h = &paras[0].line_segs[0]; // 제목 (한 줄)
+    let b = &paras[1].line_segs[0]; // 본문 (한 줄)
+    // 본문 첫 줄 v_pos = 제목 줄 v_pos + 제목 line_advance + 제목 아래간격(300).
+    let heading_advance = h.line_height + h.line_spacing;
+    assert_eq!(
+        b.v_pos - h.v_pos,
+        heading_advance + 300,
+        "본문 v_pos 는 제목 advance + 제목 아래간격(300) 만큼 떨어져야"
+    );
+}
+
 #[test]
 fn 빈_문서_렌더() {
     let doc = hwp5::read_document(&fixture("hwp5/bookmark.hwp"))
