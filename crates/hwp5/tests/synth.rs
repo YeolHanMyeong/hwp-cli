@@ -147,6 +147,75 @@ fn 표_빈셀_포함_모든_셀_nparas_1이상() {
     }
 }
 
+/// 빈 문단(빈 표 셀 포함)은 PARA_TEXT 레코드를 갖지 않아야 한다.
+///
+/// 정품(work_report·한라대 정품) 실측: 빈 문단은 nchars=1 + PARA_CHAR_SHAPE +
+/// PARA_LINE_SEG 를 갖되 PARA_TEXT 레코드가 없다(문단끝은 암묵적). 합성 경로는
+/// 모든 문단에 0x0d 를 붙이는데, 빈 문단을 PARA_TEXT=[0x0d] 로 방출하면 한글이
+/// "파일이 손상되었습니다 + 본문 비어있음"으로 거부한다 — 빈 셀이 있는 표
+/// (제목 박스·목차·구역 헤더) 전부 손상시킨 근본 원인. emit_paragraph 는
+/// char_count>1 일 때만 PARA_TEXT 를 방출해야 한다. (pyhwp 는 빈 PARA_TEXT 를
+/// 관대하게 통과시켜 23라운드 동안 미검출 — 정품 바이트 대조로만 잡힌 결함.)
+#[test]
+fn 빈_문단은_para_text_없음() {
+    // 빈 셀(`| |`)을 다수 포함한 표 + 채워진 셀·본문 문단.
+    let doc = hwp_convert::from_markdown(
+        "본문 문단입니다.\n\n|  |  |  |\n| --- | --- | --- |\n| 채움 |  |  |\n|  |  |  |\n",
+    );
+    let out = tmp("synth_empty_para.hwp");
+    hwp5::write_document(&doc, &out, &hwp5::WriteOptions::default()).unwrap();
+
+    let mut c = hwp5::Hwp5Container::open(&out).unwrap();
+    let bt = c.read_record_stream("/BodyText/Section0").unwrap();
+    let recs = records_with_level(&bt);
+
+    let mut empty_paras = 0;
+    let mut filled_paras = 0;
+    for (i, (tag, _lvl, p)) in recs.iter().enumerate() {
+        if *tag != 0x42 {
+            continue; // PARA_HEADER 만
+        }
+        let nchars = u32::from_le_bytes([p[0], p[1], p[2], p[3]]) & 0x7FFF_FFFF;
+        // 이 문단의 자식(다음 PARA_HEADER 전까지)에 PARA_TEXT(0x43)가 있는가.
+        let has_text = recs[i + 1..]
+            .iter()
+            .take_while(|(t, _, _)| *t != 0x42)
+            .any(|(t, _, _)| *t == 0x43);
+        if nchars == 1 {
+            empty_paras += 1;
+            assert!(
+                !has_text,
+                "빈 문단(nchars=1)은 PARA_TEXT 가 없어야 한다 — 0x0d 만 든 PARA_TEXT 는 한글 손상(빈 셀 표)"
+            );
+        } else {
+            filled_paras += 1;
+            assert!(has_text, "채워진 문단(nchars>1)은 PARA_TEXT 가 있어야");
+        }
+    }
+    assert!(empty_paras > 0, "빈 셀 표는 빈 문단을 만들어야 한다(시험 전제)");
+    assert!(filled_paras > 0, "채워진 문단도 있어야 한다(시험 전제)");
+}
+
+/// 스트림의 모든 레코드를 (tag, level, payload) 로 펼친다.
+fn records_with_level(data: &[u8]) -> Vec<(u16, u16, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i + 4 <= data.len() {
+        let h = u32::from_le_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
+        let t = (h & 0x3FF) as u16;
+        let lvl = ((h >> 10) & 0x3FF) as u16;
+        let mut sz = h >> 20;
+        let mut hl = 4;
+        if sz == 0xFFF {
+            sz = u32::from_le_bytes([data[i + 4], data[i + 5], data[i + 6], data[i + 7]]);
+            hl = 8;
+        }
+        out.push((t, lvl, data[i + hl..i + hl + sz as usize].to_vec()));
+        i += hl + sz as usize;
+    }
+    out
+}
+
 /// 스트림에서 특정 태그 레코드들의 페이로드 목록.
 fn all_records(data: &[u8], tag: u16) -> Vec<Vec<u8>> {
     let mut out = Vec::new();

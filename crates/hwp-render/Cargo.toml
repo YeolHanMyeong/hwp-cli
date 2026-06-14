@@ -17,3 +17,4 @@ thiserror = { workspace = true }
 [dev-dependencies]
 hwp5 = { workspace = true }
 hwpx = { workspace = true }
+hwp-convert = { workspace = true }

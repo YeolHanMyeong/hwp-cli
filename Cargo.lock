@@ -565,6 +565,7 @@ name = "hwp-render"
 version = "0.1.0"
 dependencies = [
  "fontdb",
+ "hwp-convert",
  "hwp-model",
  "hwp5",
  "hwpx",
