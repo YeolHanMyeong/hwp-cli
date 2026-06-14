@@ -121,7 +121,11 @@ fn 멀티페이지_lineseg_페이지_상대_v_pos() {
         .flat_map(|p| p.line_segs.iter().map(|s| s.v_pos))
         .collect();
 
-    assert!(vs.len() >= 120, "문단마다 줄 배치가 합성되어야: {}", vs.len());
+    assert!(
+        vs.len() >= 120,
+        "문단마다 줄 배치가 합성되어야: {}",
+        vs.len()
+    );
     let maxv = *vs.iter().max().unwrap();
     assert!(
         maxv <= content_h,

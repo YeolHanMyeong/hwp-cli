@@ -29,16 +29,21 @@ const TABLE_BLOCK_PADDING: i32 = 566;
 pub fn synthesize_linesegs(doc: &mut Document, store: &mut FontStore, warnings: &mut Vec<String>) {
     let snap = doc.clone();
     for si in 0..doc.sections.len() {
-        let page = snap.sections[si].section_def().and_then(|d| d.page.as_ref());
-        let body_width =
-            page.map_or(42520, |pg| pg.width.0 - pg.margin_left.0 - pg.margin_right.0);
+        let page = snap.sections[si]
+            .section_def()
+            .and_then(|d| d.page.as_ref());
+        let body_width = page.map_or(42520, |pg| {
+            pg.width.0 - pg.margin_left.0 - pg.margin_right.0
+        });
         // 페이지 본문 높이(상·하 여백 제외). 줄/표가 이 높이를 넘으면 다음 페이지로
         // 넘겨 v_pos를 0부터 다시 쌓는다 — 정품 멀티페이지는 페이지 상대 v_pos다
         // (정품 한라대 hwpx 실측: 본문 vertpos가 페이지마다 0으로 리셋, 최댓값
         // 59668 < 본문높이). 페이지 리셋 없이 단조 누적하면(섹션 누적) v_pos가
         // 페이지 높이를 한참 초과해(예: 354408) 한글이 '손상'으로 판정한다.
         let content_h = page
-            .map_or(75686, |pg| pg.height.0 - pg.margin_top.0 - pg.margin_bottom.0)
+            .map_or(75686, |pg| {
+                pg.height.0 - pg.margin_top.0 - pg.margin_bottom.0
+            })
             .max(1);
         let mut v_pos = 0i32;
         for pi in 0..doc.sections[si].paragraphs.len() {
@@ -59,8 +64,9 @@ pub fn synthesize_linesegs(doc: &mut Document, store: &mut FontStore, warnings: 
             // 정품 첫째문단.hwp: 본문 문단(advance 1600) → 표 앵커 문단 v_pos=1600.
             let anchor_v = v_pos;
             let src = &snap.sections[si].paragraphs[pi];
-            let segs =
-                compute_linesegs(store, &snap, src, body_width, content_h, &mut v_pos, warnings);
+            let segs = compute_linesegs(
+                store, &snap, src, body_width, content_h, &mut v_pos, warnings,
+            );
             doc.sections[si].paragraphs[pi].line_segs = segs;
             // 표가 있는 문단은 한 줄(line_advance)이 아니라 표 높이만큼 커서를 내려야
             // 다음 본문 문단이 표와 겹치지 않는다(겹치면 한글이 '손상' 판정). 앵커
@@ -92,8 +98,7 @@ fn fill_nested(
             .cells
             .iter()
             .map(|c| {
-                let w =
-                    (c.width.0 - i32::from(c.margins[0]) - i32::from(c.margins[1])).max(1);
+                let w = (c.width.0 - i32::from(c.margins[0]) - i32::from(c.margins[1])).max(1);
                 (w, c.paragraphs.len())
             })
             .collect();
@@ -195,7 +200,10 @@ fn compute_linesegs(
         .char_shape_runs
         .first()
         .and_then(|(_, id)| doc.header.char_shapes.get(id.0 as usize))
-        .map_or(1000, |cs| if cs.base_size > 0 { cs.base_size } else { 1000 });
+        .map_or(
+            1000,
+            |cs| if cs.base_size > 0 { cs.base_size } else { 1000 },
+        );
     let line_spacing = base * 60 / 100;
     let line_advance = base + line_spacing;
     let baseline_gap = base * 85 / 100;

@@ -934,7 +934,15 @@ fn emit_section(
     let mut roots: Vec<RecordNode> = section
         .paragraphs
         .iter()
-        .map(|p| emit_paragraph(p, synthesize, preserve_linesegs, add_tracking_tail, warnings))
+        .map(|p| {
+            emit_paragraph(
+                p,
+                synthesize,
+                preserve_linesegs,
+                add_tracking_tail,
+                warnings,
+            )
+        })
         .collect();
     roots.extend(section.extras.iter().map(opaque_to_node));
     roots
@@ -1139,7 +1147,9 @@ fn emit_control(
 ) -> RecordNode {
     match control {
         Control::SectionDef(def) => emit_section_def(def),
-        Control::Table(table) => emit_table(table, synthesize, preserve_linesegs, add_tracking_tail),
+        Control::Table(table) => {
+            emit_table(table, synthesize, preserve_linesegs, add_tracking_tail)
+        }
         Control::Picture(pic) => emit_picture(pic, warnings),
         Control::Generic(g) => {
             let mut w = ByteWriter::new();

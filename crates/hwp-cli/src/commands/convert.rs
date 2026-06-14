@@ -79,9 +79,8 @@ pub fn write_hwp(
     output: &std::path::Path,
     preserve_layout: bool,
 ) -> anyhow::Result<()> {
-    let font_dir = std::path::PathBuf::from(
-        std::env::var("HWP_FONT_DIR").unwrap_or_else(|_| "fonts".into()),
-    );
+    let font_dir =
+        std::path::PathBuf::from(std::env::var("HWP_FONT_DIR").unwrap_or_else(|_| "fonts".into()));
     let synthesize = doc.meta.source_format != "hwp5";
 
     // 출처가 이미 줄 배치를 제공하면(hwpx의 linesegarray = 한글이 저장한 정품

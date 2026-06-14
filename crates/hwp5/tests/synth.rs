@@ -106,7 +106,11 @@ fn 합성_문단_본문_구조_정품_동형() {
     // 4. PARA_CHAR_SHAPE run 수 = char_shape_cnt(offset 12, u16), 중복 병합으로 단일.
     let cs = first_record(&bt, 0x44).expect("PARA_CHAR_SHAPE");
     let cnt = u16::from_le_bytes([ph[12], ph[13]]);
-    assert_eq!(cs.len() / 8, cnt as usize, "char_shape run 수=char_shape_cnt");
+    assert_eq!(
+        cs.len() / 8,
+        cnt as usize,
+        "char_shape run 수=char_shape_cnt"
+    );
     assert_eq!(cnt, 1, "단일 문단은 단일 char_shape run (중복 없음)");
 
     // 5. PAGE_BORDER_FILL attribute 첫 u32 = 1 (hello_world 표본 잔재 garbage 아님).
@@ -127,9 +131,8 @@ fn 합성_문단_본문_구조_정품_동형() {
 #[test]
 fn 표_빈셀_포함_모든_셀_nparas_1이상() {
     // 빈 셀(`| |`)·짧은 행(2칸 < 3열 헤더)·헤더 only 행을 모두 포함.
-    let doc = hwp_convert::from_markdown(
-        "|  |  |  |\n| --- | --- | --- |\n| a |  |  |\n| b | c |\n",
-    );
+    let doc =
+        hwp_convert::from_markdown("|  |  |  |\n| --- | --- | --- |\n| a |  |  |\n| b | c |\n");
     let out = tmp("synth_empty_cell.hwp");
     hwp5::write_document(&doc, &out, &hwp5::WriteOptions::default()).unwrap();
 
@@ -192,7 +195,10 @@ fn 빈_문단은_para_text_없음() {
             assert!(has_text, "채워진 문단(nchars>1)은 PARA_TEXT 가 있어야");
         }
     }
-    assert!(empty_paras > 0, "빈 셀 표는 빈 문단을 만들어야 한다(시험 전제)");
+    assert!(
+        empty_paras > 0,
+        "빈 셀 표는 빈 문단을 만들어야 한다(시험 전제)"
+    );
     assert!(filled_paras > 0, "채워진 문단도 있어야 한다(시험 전제)");
 }
 
