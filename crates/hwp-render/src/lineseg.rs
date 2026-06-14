@@ -29,30 +29,43 @@ const TABLE_BLOCK_PADDING: i32 = 566;
 pub fn synthesize_linesegs(doc: &mut Document, store: &mut FontStore, warnings: &mut Vec<String>) {
     let snap = doc.clone();
     for si in 0..doc.sections.len() {
-        let body_width = snap.sections[si]
-            .section_def()
-            .and_then(|d| d.page.as_ref())
-            .map_or(42520, |pg| pg.width.0 - pg.margin_left.0 - pg.margin_right.0);
+        let page = snap.sections[si].section_def().and_then(|d| d.page.as_ref());
+        let body_width =
+            page.map_or(42520, |pg| pg.width.0 - pg.margin_left.0 - pg.margin_right.0);
+        // 페이지 본문 높이(상·하 여백 제외). 줄/표가 이 높이를 넘으면 다음 페이지로
+        // 넘겨 v_pos를 0부터 다시 쌓는다 — 정품 멀티페이지는 페이지 상대 v_pos다
+        // (정품 한라대 hwpx 실측: 본문 vertpos가 페이지마다 0으로 리셋, 최댓값
+        // 59668 < 본문높이). 페이지 리셋 없이 단조 누적하면(섹션 누적) v_pos가
+        // 페이지 높이를 한참 초과해(예: 354408) 한글이 '손상'으로 판정한다.
+        let content_h = page
+            .map_or(75686, |pg| pg.height.0 - pg.margin_top.0 - pg.margin_bottom.0)
+            .max(1);
         let mut v_pos = 0i32;
         for pi in 0..doc.sections[si].paragraphs.len() {
-            // 표 앵커 문단의 줄 배치는 진입 시점 커서(=직전 문단 누적 후)에 놓인다.
-            // 정품 첫째문단.hwp: 본문 문단(advance 1600) → 표 앵커 문단 v_pos=1600.
-            let anchor_v = v_pos;
-            let src = &snap.sections[si].paragraphs[pi];
-            let segs = compute_linesegs(store, &snap, src, body_width, &mut v_pos, warnings);
-            doc.sections[si].paragraphs[pi].line_segs = segs;
             // 셀 안 문단 줄 배치를 먼저 채운다(셀 줄 수를 표 높이 계산이 읽어야 한다).
             fill_nested(si, pi, &snap, doc, store, warnings);
-            // 표가 있는 문단은 한 줄(line_advance)이 아니라 표 높이만큼 커서를 내려야
-            // 다음 본문 문단이 표와 겹치지 않는다(겹치면 한글이 '손상' 판정). 앵커
-            // 문단은 compute_linesegs가 이미 line_advance를 1회 더했으므로, 커서를
-            // 진입값 + 표 높이로 덮어쓴다(여러 표가 한 문단에 있으면 높이를 누적).
+            // 이 문단의 표 총높이.
             let mut table_total = 0i32;
             for ctrl in &doc.sections[si].paragraphs[pi].controls {
                 if let Control::Table(t) = ctrl {
                     table_total += table_height(t);
                 }
             }
+            // 표가 현재 페이지 잔여 공간에 안 들어가면 표 전체를 다음 페이지로 내린다.
+            if table_total > 0 && v_pos > 0 && v_pos + table_total > content_h {
+                v_pos = 0;
+            }
+            // 표 앵커 문단의 줄 배치는 진입 시점 커서(=직전 문단 누적 후)에 놓인다.
+            // 정품 첫째문단.hwp: 본문 문단(advance 1600) → 표 앵커 문단 v_pos=1600.
+            let anchor_v = v_pos;
+            let src = &snap.sections[si].paragraphs[pi];
+            let segs =
+                compute_linesegs(store, &snap, src, body_width, content_h, &mut v_pos, warnings);
+            doc.sections[si].paragraphs[pi].line_segs = segs;
+            // 표가 있는 문단은 한 줄(line_advance)이 아니라 표 높이만큼 커서를 내려야
+            // 다음 본문 문단이 표와 겹치지 않는다(겹치면 한글이 '손상' 판정). 앵커
+            // 문단은 compute_linesegs가 이미 line_advance를 1회 더했으므로, 커서를
+            // 진입값 + 표 높이로 덮어쓴다(여러 표가 한 문단에 있으면 높이를 누적).
             if table_total > 0 {
                 v_pos = anchor_v + table_total;
             }
@@ -91,7 +104,9 @@ fn fill_nested(
                     unreachable!();
                 };
                 let csrc = &snap_t.cells[celli].paragraphs[cpi];
-                let segs = compute_linesegs(store, snap, csrc, cw, &mut cv, warnings);
+                // 셀 내부는 페이지 분할 안 함(content_h=MAX): 셀 줄 v_pos는 셀
+                // 상대 누적이고, 페이지 넘침은 표 단위로 synthesize_linesegs가 처리.
+                let segs = compute_linesegs(store, snap, csrc, cw, i32::MAX, &mut cv, warnings);
                 if let Control::Table(t) = &mut doc.sections[si].paragraphs[pi].controls[ci] {
                     t.cells[celli].paragraphs[cpi].line_segs = segs;
                 }
@@ -170,6 +185,7 @@ fn compute_linesegs(
     doc: &Document,
     para: &Paragraph,
     body_width: i32,
+    content_h: i32,
     v_pos: &mut i32,
     warnings: &mut Vec<String>,
 ) -> Vec<LineSeg> {
@@ -199,6 +215,17 @@ fn compute_linesegs(
         flags: 0x0006_0000,
     };
 
+    // 한 줄을 배치하고 커서를 진행한다. 줄이 페이지 본문 높이를 넘으면 다음 페이지
+    // 상단(v_pos=0)부터 다시 쌓는다(정품 멀티페이지 = 페이지 상대 v_pos). 셀 내부는
+    // content_h=MAX로 호출돼 리셋이 일어나지 않는다.
+    let place = |segs: &mut Vec<LineSeg>, v_pos: &mut i32, start: u32| {
+        if *v_pos > 0 && *v_pos + base > content_h {
+            *v_pos = 0;
+        }
+        segs.push(make(start, *v_pos));
+        *v_pos += line_advance;
+    };
+
     // 폰트 셰이핑으로 글자 폭을 재고, 본문 폭 기준 그리디 줄바꿈.
     // place_wrapped(layout.rs)와 동일한 글리프 x_advance 누적 규칙.
     let items = shape_range(store, doc, para, (0, total), warnings);
@@ -211,8 +238,7 @@ fn compute_linesegs(
             InlineItem::Run(run) => {
                 for (gi, g) in run.glyphs.iter().enumerate() {
                     if content && acc + g.x_advance > limit_pt {
-                        segs.push(make(line_start, *v_pos));
-                        *v_pos += line_advance;
+                        place(&mut segs, v_pos, line_start);
                         line_start = run.start_wchar + gi as u32;
                         acc = 0.0;
                     }
@@ -227,7 +253,6 @@ fn compute_linesegs(
         }
     }
     // 마지막 줄(빈 문단이면 유일한 줄).
-    segs.push(make(line_start, *v_pos));
-    *v_pos += line_advance;
+    place(&mut segs, v_pos, line_start);
     segs
 }

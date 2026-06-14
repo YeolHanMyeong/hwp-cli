@@ -84,10 +84,21 @@ pub fn write_hwp(
     );
     let synthesize = doc.meta.source_format != "hwp5";
 
+    // 출처가 이미 줄 배치를 제공하면(hwpx의 linesegarray = 한글이 저장한 정품
+    // 페이지 분할) 그대로 보존한다. 합성으로 덮어쓰면 페이지 리셋이 없는 섹션
+    // 단조 누적이 되어(v_pos가 페이지 높이를 한참 초과) 멀티페이지 문서가
+    // 한글에서 '손상' 판정된다. 줄 배치가 없는 출처(markdown)만 합성한다.
+    // (writer는 synthesize=true면 emit_lineseg=true라 IR 줄 배치를 그대로 방출.)
+    let has_linesegs = doc
+        .sections
+        .iter()
+        .flat_map(|s| &s.paragraphs)
+        .any(|p| !p.line_segs.is_empty());
+
     // 합성 경로: 정확한 줄 배치를 폰트 셰이핑으로 계산해 IR에 채운다.
-    // 무수정 왕복(--preserve-layout)은 원본 줄 배치를 그대로 보존한다.
+    // 무수정 왕복(--preserve-layout)·원본 줄 배치 보유 시에는 합성하지 않는다.
     let owned;
-    let doc = if synthesize && !preserve_layout {
+    let doc = if synthesize && !preserve_layout && !has_linesegs {
         let mut d = doc.clone();
         let mut store = hwp_render::FontStore::new();
         store.load_dir(&font_dir);
