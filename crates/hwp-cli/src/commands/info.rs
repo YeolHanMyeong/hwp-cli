@@ -5,40 +5,67 @@
 
 use std::path::Path;
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::format::{FileFormat, detect};
 
-pub fn run(path: &Path, as_json: bool) -> anyhow::Result<()> {
+/// 컨테이너 계층 진단을 JSON으로 만든다 (CLI `--json`과 MCP가 공유).
+pub fn info_json(path: &Path) -> anyhow::Result<Value> {
     match detect(path)? {
-        FileFormat::Hwp5 => info_hwp5(path, as_json),
-        FileFormat::Hwpx => info_hwpx(path, as_json),
+        FileFormat::Hwp5 => {
+            let container = hwp5::Hwp5Container::open(path)?;
+            let header = container.file_header();
+            let streams = container.list_streams();
+            Ok(json!({
+                "file": path.display().to_string(),
+                "format": "hwp5",
+                "version": header.version.to_string(),
+                "attributes": header.attribute_names(),
+                "compressed": header.is_compressed(),
+                "encrypted": header.is_encrypted(),
+                "distribution": header.is_distribution(),
+                "sections": container.body_sections().len(),
+                "streams": streams.iter().map(|s| json!({
+                    "path": s.path,
+                    "size": s.size,
+                })).collect::<Vec<_>>(),
+            }))
+        }
+        FileFormat::Hwpx => {
+            let mut pkg = hwpx::HwpxPackage::open(path)?;
+            let version = pkg.version_info()?;
+            let entries = pkg.entries()?;
+            let sections = pkg.section_entries()?;
+            Ok(json!({
+                "file": path.display().to_string(),
+                "format": "hwpx",
+                "version": version.iter().cloned().collect::<std::collections::BTreeMap<_, _>>(),
+                "sections": sections.len(),
+                "entries": entries.iter().map(|e| json!({
+                    "name": e.name,
+                    "size": e.size,
+                    "compressed_size": e.compressed_size,
+                })).collect::<Vec<_>>(),
+            }))
+        }
     }
 }
 
-fn info_hwp5(path: &Path, as_json: bool) -> anyhow::Result<()> {
+pub fn run(path: &Path, as_json: bool) -> anyhow::Result<()> {
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&info_json(path)?)?);
+        return Ok(());
+    }
+    match detect(path)? {
+        FileFormat::Hwp5 => info_hwp5_text(path),
+        FileFormat::Hwpx => info_hwpx_text(path),
+    }
+}
+
+fn info_hwp5_text(path: &Path) -> anyhow::Result<()> {
     let container = hwp5::Hwp5Container::open(path)?;
     let header = container.file_header();
     let streams = container.list_streams();
-
-    if as_json {
-        let v = json!({
-            "file": path.display().to_string(),
-            "format": "hwp5",
-            "version": header.version.to_string(),
-            "attributes": header.attribute_names(),
-            "compressed": header.is_compressed(),
-            "encrypted": header.is_encrypted(),
-            "distribution": header.is_distribution(),
-            "sections": container.body_sections().len(),
-            "streams": streams.iter().map(|s| json!({
-                "path": s.path,
-                "size": s.size,
-            })).collect::<Vec<_>>(),
-        });
-        println!("{}", serde_json::to_string_pretty(&v)?);
-        return Ok(());
-    }
 
     println!("파일:   {}", path.display());
     println!("포맷:   HWP 5.0 (바이너리)");
@@ -60,27 +87,11 @@ fn info_hwp5(path: &Path, as_json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn info_hwpx(path: &Path, as_json: bool) -> anyhow::Result<()> {
+fn info_hwpx_text(path: &Path) -> anyhow::Result<()> {
     let mut pkg = hwpx::HwpxPackage::open(path)?;
     let version = pkg.version_info()?;
     let entries = pkg.entries()?;
     let sections = pkg.section_entries()?;
-
-    if as_json {
-        let v = json!({
-            "file": path.display().to_string(),
-            "format": "hwpx",
-            "version": version.iter().cloned().collect::<std::collections::BTreeMap<_, _>>(),
-            "sections": sections.len(),
-            "entries": entries.iter().map(|e| json!({
-                "name": e.name,
-                "size": e.size,
-                "compressed_size": e.compressed_size,
-            })).collect::<Vec<_>>(),
-        });
-        println!("{}", serde_json::to_string_pretty(&v)?);
-        return Ok(());
-    }
 
     println!("파일:   {}", path.display());
     println!("포맷:   HWPX (OWPML)");

@@ -11,8 +11,20 @@ use hwp_model::Document;
 use crate::TextFormat;
 use crate::format::{FileFormat, detect};
 
-/// 포맷을 감지해 IR로 읽는다 (cat/convert 공용).
+/// 포맷을 감지해 IR로 읽는다 (cat/convert/render 공용).
+///
+/// `.json` 입력은 IR 직렬화본으로 보고 역직렬화한다(편집 왕복 경로) — 그 외는
+/// 매직 바이트로 hwp5/hwpx를 판별한다.
 pub fn load_document(path: &Path) -> anyhow::Result<Document> {
+    if path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+    {
+        let text = std::fs::read_to_string(path)?;
+        return hwp_convert::from_json(&text)
+            .map_err(|e| anyhow::anyhow!("JSON IR 파싱 실패 ({}): {e}", path.display()));
+    }
     match detect(path)? {
         FileFormat::Hwp5 => {
             let result = hwp5::read_document(path)?;
@@ -37,7 +49,7 @@ pub fn run(path: &Path, format: TextFormat) -> anyhow::Result<()> {
     match format {
         TextFormat::Plain => print!("{}", doc.plain_text()),
         TextFormat::Markdown => print!("{}", hwp_convert::to_markdown(&doc)),
-        TextFormat::Json => println!("{}", hwp_convert::to_json(&doc, true)?),
+        TextFormat::Json => println!("{}", hwp_convert::to_json(&doc, true, false)?),
     }
     Ok(())
 }

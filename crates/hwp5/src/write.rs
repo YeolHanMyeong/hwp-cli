@@ -29,6 +29,13 @@ pub struct WriteOptions {
     /// 띄운다 (한컴 공식: 내용 수정 시 제거 권장). 기본 false — 한글이
     /// 열 때 재계산한다. 무수정 바이트 왕복에만 true를 쓸 것.
     pub preserve_linesegs: bool,
+    /// 편집된 hwp5 원본을 다시 쓸 때 참.
+    ///
+    /// hwp5 출신이라도 내용을 바꿨으면 합성 경로의 문단 불변식(문단끝 0x0d·
+    /// nchars bit31=마지막 문단·빈 문단 PARA_TEXT 생략·줄 배치 방출)을 다시
+    /// 세워야 한글이 수용한다. 단 그림은 이미 hwp5 도형 레코드를 가지므로
+    /// 재합성(synthesize_pictures)은 **하지 않는다**(출처 기준으로만 수행).
+    pub edited: bool,
 }
 
 /// 문서를 HWP 5.0 파일로 저장한다. 경고(평탄화/드롭) 목록을 반환한다.
@@ -37,13 +44,18 @@ pub fn write_document(doc: &Document, path: &Path, opts: &WriteOptions) -> Resul
 
     // hwpx 출신 문서 정규화: hwp5 레코드(SHAPE_COMPONENT)가 없는 그림은
     // 쓸 수 없으므로 컨트롤과 확장 문자를 동기 제거한다
-    let synthesize = doc.meta.source_format != "hwp5";
+    //
+    // synthesize = 문단 불변식·줄 배치를 다시 세워야 하는 경로(hwpx/md 출신 또는
+    // 편집된 hwp5). synth_pictures = hwpx/md 출신 그림을 hwp5 도형으로 합성해야
+    // 하는 경로(출처 기준 — 편집된 hwp5 그림은 이미 도형 레코드를 가지므로 제외).
+    let synth_pictures = doc.meta.source_format != "hwp5";
+    let synthesize = synth_pictures || opts.edited;
     let normalized;
     let doc = if needs_normalize(doc) || synthesize {
         let mut d = doc.clone();
         // hwpx/md 출신 이미지에 hwp5 도형 레코드(SHAPE_COMPONENT + 그림)를 먼저
         // 합성한다 — 합성되면 extras가 채워져 아래 strip이 드롭하지 않는다.
-        if synthesize {
+        if synth_pictures {
             synthesize_pictures(&mut d, &mut warnings);
         }
         for section in &mut d.sections {

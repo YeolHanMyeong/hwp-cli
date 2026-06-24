@@ -14,6 +14,7 @@ pub fn run(
     to: Option<ConvertFormat>,
     _strict: bool,
     preserve_layout: bool,
+    embed_bin: bool,
 ) -> anyhow::Result<()> {
     let target = match to {
         Some(t) => t,
@@ -27,7 +28,7 @@ pub fn run(
         }
         ConvertFormat::Json => {
             let doc = load_document(input)?;
-            std::fs::write(output, hwp_convert::to_json(&doc, true)?)?;
+            std::fs::write(output, hwp_convert::to_json(&doc, true, embed_bin)?)?;
         }
         ConvertFormat::Hwpx => {
             let doc = load_document(input)?;
@@ -49,6 +50,52 @@ pub fn run(
     }
     eprintln!("변환 완료: {} → {}", input.display(), output.display());
     Ok(())
+}
+
+/// 출력 확장자에 따라 문서를 쓴다 (edit/convert/new/MCP 공용).
+/// `edited`면 hwp 쓰기에 외과적 편집 경로(`write_hwp_edited`)를 쓴다.
+pub fn write_by_ext(
+    doc: &hwp_model::Document,
+    output: &Path,
+    edited: bool,
+    embed_bin: bool,
+) -> anyhow::Result<()> {
+    match output
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("hwp") => {
+            if edited {
+                write_hwp_edited(doc, output)
+            } else {
+                write_hwp(doc, output, false)
+            }
+        }
+        Some("hwpx") => {
+            let warnings = hwpx::write::write_document_with(
+                doc,
+                output,
+                &hwpx::write::HwpxWriteOptions {
+                    preserve_linesegs: false,
+                },
+            )?;
+            for w in &warnings {
+                eprintln!("경고: {w}");
+            }
+            Ok(())
+        }
+        Some("json") => {
+            std::fs::write(output, hwp_convert::to_json(doc, true, embed_bin)?)?;
+            Ok(())
+        }
+        Some("md") | Some("markdown") => {
+            std::fs::write(output, hwp_convert::to_markdown(doc))?;
+            Ok(())
+        }
+        other => anyhow::bail!("출력 포맷을 추론할 수 없습니다 (확장자: {other:?})"),
+    }
 }
 
 fn infer_format(output: &Path) -> anyhow::Result<ConvertFormat> {
@@ -79,9 +126,37 @@ pub fn write_hwp(
     output: &std::path::Path,
     preserve_layout: bool,
 ) -> anyhow::Result<()> {
+    write_hwp_impl(doc, output, preserve_layout, false)
+}
+
+/// 편집된 문서를 hwp로 다시 쓴다.
+///
+/// hwp5 원본 편집은 **외과적**으로 처리한다: 편집된 문단만 줄 배치를 비워 한글이
+/// 그 문단만 재계산하게 하고(편집 프리미티브가 이미 비움), 미편집 문단은 원본 줄
+/// 배치를 보존한다. 줄 배치를 전부 비우면 한글이 모든 문단을 재계산하면서 표 셀의
+/// 빈 문단까지 큰 글자 크기로 한 줄을 잡아 행 높이가 부풀어 빈 칸이 생긴다(실측).
+/// 한글 자신이 편집 시 바뀐 문단만 다시 배치하는 것과 같은 동작.
+///
+/// hwpx/md 출신은 보존할 원본 줄 배치가 한글 hwp 레이아웃과 다르므로 합성 경로
+/// (`edited`=true: 줄 배치 비우고 para_shape 복원 후 한글 재계산)를 쓴다.
+pub fn write_hwp_edited(doc: &hwp_model::Document, output: &std::path::Path) -> anyhow::Result<()> {
+    if doc.meta.source_format == "hwp5" {
+        // 원본 줄 배치 보존(preserve), 합성 정규화 없음 — 편집 문단만 count=0.
+        write_hwp_impl(doc, output, true, false)
+    } else {
+        write_hwp_impl(doc, output, false, true)
+    }
+}
+
+fn write_hwp_impl(
+    doc: &hwp_model::Document,
+    output: &std::path::Path,
+    preserve_layout: bool,
+    edited: bool,
+) -> anyhow::Result<()> {
     let font_dir =
         std::path::PathBuf::from(std::env::var("HWP_FONT_DIR").unwrap_or_else(|_| "fonts".into()));
-    let synthesize = doc.meta.source_format != "hwp5";
+    let synthesize = doc.meta.source_format != "hwp5" || edited;
     let has_source_linesegs = doc
         .sections
         .iter()
@@ -93,10 +168,12 @@ pub fn write_hwp(
         // hwp5 무수정/preserve-layout: 원본 줄 배치 그대로.
         doc
     } else if has_source_linesegs {
-        // hwpx 출신: hwpx가 저장한 줄 배치는 한글의 hwpx 내보내기 레이아웃이라
-        // hwp 저장본(정품)과 다를 수 있다(예: 같은 문서가 hwpx 6쪽, hwp 5쪽).
-        // 줄 배치를 제거하면 한글이 열 때 문단/글자 모양 기준으로 재계산해 hwp
-        // 저장본과 같은 페이지로 흐른다(문단 모양을 정품과 일치시킨 게 핵심).
+        // hwpx 출신 또는 편집된 hwp5: 저장된 줄 배치는 (편집으로) 내용과 어긋나거나
+        // 한글의 hwpx 내보내기 레이아웃이라 hwp 저장본과 다를 수 있다(예: 같은
+        // 문서가 hwpx 6쪽, hwp 5쪽). 줄 배치를 제거하면 한글이 열 때 문단/글자
+        // 모양 기준으로 재계산해 hwp 저장본과 같은 페이지로 흐른다(문단 모양을
+        // 정품과 일치시킨 게 핵심). 편집본도 이 경로를 그대로 쓴다(편집으로 낡은
+        // 줄 배치를 비우고 한글이 재계산 — convert hwpx→hwp와 동일한 검증된 동작).
         let mut d = doc.clone();
         clear_linesegs(&mut d);
         owned = d;
@@ -131,6 +208,7 @@ pub fn write_hwp(
         &hwp5::WriteOptions {
             prv_image,
             preserve_linesegs: preserve_layout,
+            edited,
         },
     )?;
     for w in &warnings {

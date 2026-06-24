@@ -104,10 +104,14 @@ pub fn layout_document(
                 .controls
                 .iter()
                 .filter(|c| {
-                    !matches!(
+                    let rendered = matches!(
                         c,
                         Control::SectionDef(_) | Control::Table(_) | Control::Picture(_)
-                    ) && ![*b"cold", *b"head", *b"foot"].contains(&c.ctrl_id())
+                    ) || [*b"cold", *b"head", *b"foot"].contains(&c.ctrl_id())
+                        // 글상자(텍스트 있는 gso)는 이제 렌더한다 — 미지원에서 제외.
+                        || matches!(c, Control::Generic(g)
+                            if g.ctrl_id == *b"gso " && !g.paragraph_lists.is_empty());
+                    !rendered
                 })
                 .count();
 
@@ -368,6 +372,42 @@ fn layout_para_objects(
                         object_y += h;
                     }
                     None => warnings.push(format!("이미지 데이터를 찾지 못함: {:?}", pic.bin_ref)),
+                }
+            }
+            // 글상자(text box): 텍스트 있는 gso 개체의 내부 문단을 박스 영역에 배치.
+            Control::Generic(g) if g.ctrl_id == *b"gso " && !g.paragraph_lists.is_empty() => {
+                let Some(b) = crate::gso::parse_gso_box(&g.data) else {
+                    continue;
+                };
+                let bw = (b.width as f32 / 100.0).max(8.0);
+                let bh = b.height as f32 / 100.0;
+                // 글자처럼취급=흐름 위치, 떠 있음=PAPER/PAGE 기준 페이지 절대 위치.
+                let (bx, by, inline) = if b.treat_as_char() {
+                    (x, object_y, true)
+                } else {
+                    (
+                        b.horz_offset as f32 / 100.0,
+                        b.vert_offset as f32 / 100.0,
+                        false,
+                    )
+                };
+                let mut inner = by;
+                for list in &g.paragraph_lists {
+                    inner = layout_box_paragraphs(
+                        doc,
+                        store,
+                        page,
+                        &list.paragraphs,
+                        bx,
+                        inner,
+                        bw,
+                        warnings,
+                    );
+                }
+                if inline {
+                    let used = (inner - by).max(bh);
+                    bottom = bottom.max(by + used);
+                    object_y += used;
                 }
             }
             _ => {}

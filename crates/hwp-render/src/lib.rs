@@ -7,9 +7,11 @@
 //! v1 범위: lineseg 기반 텍스트 렌더링 (굵게/기울임/크기/색/자간/장평,
 //! 가운데/오른쪽 정렬). 표·이미지·장식은 M5.
 
+pub mod diff;
 pub mod display;
 pub mod error;
 pub mod fonts;
+pub mod gso;
 pub mod layout;
 pub mod lineseg;
 pub mod png;
@@ -18,6 +20,7 @@ pub mod svg;
 
 use hwp_model::Document;
 
+pub use diff::{DiffReport, compare};
 pub use error::RenderError;
 pub use fonts::FontStore;
 
@@ -65,6 +68,12 @@ pub fn render_document(doc: &Document, opts: &RenderOptions) -> Result<RenderOut
     let (list, report) = build_display_list(doc, opts);
     let pages = png::render_png(&list, opts.dpi)?;
     Ok(RenderOutput { pages, report })
+}
+
+/// 기준 PNG를 픽스맵으로 읽는다 (`hwp diff`의 기준 이미지 로드용).
+pub fn load_png(path: &std::path::Path) -> Result<tiny_skia::Pixmap, RenderError> {
+    tiny_skia::Pixmap::load_png(path)
+        .map_err(|e| RenderError::Backend(format!("PNG 로드 실패 ({}): {e}", path.display())))
 }
 
 /// 문서 전체를 SVG로 렌더링한다.

@@ -10,7 +10,7 @@ use std::sync::Arc;
 use fontdb::{Database, Family, Query, Source};
 use hwp_model::Document;
 
-/// 한국어 문서용 폴백 글꼴 (우선순위순).
+/// 한국어 문서용 폴백 글꼴 (분류 불가 시, 우선순위순).
 const FALLBACKS: &[&str] = &[
     "함초롬바탕",
     "함초롬돋움",
@@ -21,6 +21,56 @@ const FALLBACKS: &[&str] = &[
     "Noto Sans CJK KR",
     "Noto Sans KR",
 ];
+
+/// 고딕(산세리프) 계열 폴백 — 요청 글꼴이 고딕/돋움/헤드라인일 때.
+const GOTHIC_FALLBACKS: &[&str] = &[
+    "함초롬돋움",
+    "Apple SD Gothic Neo",
+    "나눔고딕",
+    "NanumGothic",
+    "맑은 고딕",
+    "Malgun Gothic",
+    "AppleGothic",
+    "Noto Sans CJK KR",
+    "Noto Sans KR",
+];
+
+/// 명조(세리프) 계열 폴백 — 요청 글꼴이 명조/바탕/신명조일 때.
+const SERIF_FALLBACKS: &[&str] = &[
+    "함초롬바탕",
+    "AppleMyungjo",
+    "나눔명조",
+    "NanumMyeongjo",
+    "Batang",
+    "바탕",
+    "Noto Serif CJK KR",
+    "Apple SD Gothic Neo",
+];
+
+#[derive(Clone, Copy, PartialEq)]
+enum FontClass {
+    Gothic,
+    Serif,
+}
+
+/// 글꼴 이름으로 고딕/명조 계열을 추정한다(한국어 키워드 + 라틴 키워드).
+/// 대체 폴백을 같은 계열로 골라 글리프 모양 차이를 줄인다(고딕→고딕, 명조→명조).
+fn classify(name: &str) -> Option<FontClass> {
+    let lower = name.to_ascii_lowercase();
+    const GOTHIC: &[&str] = &["돋움", "돋음", "고딕", "헤드라인", "굴림"];
+    const GOTHIC_L: &[&str] = &["gothic", "dotum", "gulim", "headline", "sans"];
+    const SERIF: &[&str] = &["바탕", "명조", "신명조", "궁서"];
+    const SERIF_L: &[&str] = &[
+        "batang", "myungjo", "myeongjo", "gungsuh", "serif", "mincho",
+    ];
+    if GOTHIC.iter().any(|k| name.contains(k)) || GOTHIC_L.iter().any(|k| lower.contains(k)) {
+        return Some(FontClass::Gothic);
+    }
+    if SERIF.iter().any(|k| name.contains(k)) || SERIF_L.iter().any(|k| lower.contains(k)) {
+        return Some(FontClass::Serif);
+    }
+    None
+}
 
 pub struct LoadedFont {
     pub data: Arc<Vec<u8>>,
@@ -78,7 +128,13 @@ impl FontStore {
         if let Some(alt) = &alt {
             candidates.push(alt);
         }
-        candidates.extend(FALLBACKS);
+        // 요청 글꼴 계열(고딕/명조)을 같은 계열 폴백으로 — 모양 차이 최소화.
+        let class = classify(&requested).or_else(|| alt.as_deref().and_then(classify));
+        candidates.extend(match class {
+            Some(FontClass::Gothic) => GOTHIC_FALLBACKS,
+            Some(FontClass::Serif) => SERIF_FALLBACKS,
+            None => FALLBACKS,
+        });
 
         let mut result = None;
         for name in &candidates {
