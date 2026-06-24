@@ -310,15 +310,28 @@ fn write_para_properties(out: &mut String, header: &DocHeader) {
             3 => "AT_LEAST",
             _ => "PERCENT",
         };
-        let ls_value = if ps.line_spacing > 0 {
+        // IR 줄간격: PERCENT는 비율 그대로, 길이 종류(고정/여백만/최소)는 2배 단위라
+        // ÷2 해서 HWPUNIT로 환원(hwpx 읽기의 ×2와 대칭).
+        let ls_raw = if ps.line_spacing > 0 {
             ps.line_spacing
         } else {
             160
         };
+        let ls_value = if ps.line_spacing_type == 0 {
+            ls_raw
+        } else {
+            ls_raw / 2
+        };
+        // IR 여백류는 hwp5 PARA_SHAPE 단위(HWPUNIT의 2배)다. hwpx는 HWPUNIT이므로
+        // ÷2 해서 내보낸다(hwpx 읽기의 ×2와 대칭 — hwpx 왕복 보존).
         let _ = write!(
             out,
             r##"<hh:paraPr id="{i}" tabPrIDRef="{tab_ref}" condense="0" fontLineHeight="0" snapToGrid="1" suppressLineNumbers="0" checked="0" textDir="LTR"><hh:align horizontal="{align}" vertical="BASELINE"/><hh:heading type="NONE" idRef="0" level="0"/><hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="BREAK_WORD" widowOrphan="0" keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="BREAK"/><hh:autoSpacing eAsianEng="0" eAsianNum="0"/><hh:margin><hc:intent value="{}" unit="HWPUNIT"/><hc:left value="{}" unit="HWPUNIT"/><hc:right value="{}" unit="HWPUNIT"/><hc:prev value="{}" unit="HWPUNIT"/><hc:next value="{}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="{ls_type}" value="{ls_value}" unit="HWPUNIT"/><hh:border borderFillIDRef="2" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/></hh:paraPr>"##,
-            ps.indent, ps.margin_left, ps.margin_right, ps.spacing_top, ps.spacing_bottom,
+            ps.indent / 2,
+            ps.margin_left / 2,
+            ps.margin_right / 2,
+            ps.spacing_top / 2,
+            ps.spacing_bottom / 2,
         );
     }
     out.push_str("</hh:paraProperties>");

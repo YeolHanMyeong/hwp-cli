@@ -95,12 +95,62 @@ pub struct PageDef {
     pub attr: u32,
 }
 
+/// 개체 공통 속성(gso common)의 배치 정보 — hwpx `<hp:pos>`/`<hp:sz>`/`<hp:outMargin>`/
+/// `zOrder`에서 읽어 hwp5 CTRL_HEADER 40바이트 공통 속성으로 합성한다. hwpx 출신 표가
+/// 이 정보를 잃으면 writer가 떠 있는(floating) 상수로 덮어써 본문 흐름에서 빠진다.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct GsoPlacement {
+    /// 글자처럼 취급 (attr bit0). 정품 표는 대부분 true(인라인).
+    pub treat_as_char: bool,
+    /// 줄 간격에 영향 (attr bit2).
+    pub affect_line_spacing: bool,
+    /// 본문과 어울림(flowWithText) (attr bit13).
+    pub flow_with_text: bool,
+    /// 앵커/개체 고정(holdAnchorAndSO) — 공통 속성 @36.
+    pub hold_anchor: bool,
+    /// 세로 위치 기준: 0=PAPER, 1=PAGE, 2=PARA (attr bits3-4).
+    pub vert_rel_to: u8,
+    /// 가로 위치 기준: 0=PAPER, 1=PAGE, 2=COLUMN, 3=PARA (attr bits8-9).
+    pub horz_rel_to: u8,
+    /// 세로 정렬 (attr bits5-7).
+    pub vert_align: u8,
+    /// 가로 정렬 (attr bits10-12).
+    pub horz_align: u8,
+    pub vert_offset: i32,
+    pub horz_offset: i32,
+    pub z_order: i32,
+    /// 개체 바깥 경계 너비/높이(HWPUNIT) — hwpx `<hp:sz>`. 병합 셀 합산보다 정확.
+    pub width: i32,
+    pub height: i32,
+    /// 바깥 여백 (왼/오른/위/아래).
+    pub out_margins: [u16; 4],
+}
+
+impl GsoPlacement {
+    /// hwp5 개체 공통 속성 attr(u32)로 합성. 상위 16비트는 관측 상수(0x082a:
+    /// widthRelTo/heightRelTo=ABSOLUTE, textWrap 등)로 둔다.
+    pub fn synth_attr(&self) -> u32 {
+        let mut low: u32 = 0;
+        low |= u32::from(self.treat_as_char); // bit0
+        low |= u32::from(self.affect_line_spacing) << 2; // bit2
+        low |= (u32::from(self.vert_rel_to) & 0x3) << 3; // bits3-4
+        low |= (u32::from(self.vert_align) & 0x7) << 5; // bits5-7
+        low |= (u32::from(self.horz_rel_to) & 0x3) << 8; // bits8-9
+        low |= (u32::from(self.horz_align) & 0x7) << 10; // bits10-12
+        low |= u32::from(self.flow_with_text) << 13; // bit13
+        0x082a_0000 | low
+    }
+}
+
 /// 표 컨트롤.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Table {
     /// CTRL_HEADER 페이로드 (개체 공통 속성) — 미해석 보존
     #[serde(with = "hex_bytes")]
     pub common_data: Vec<u8>,
+    /// hwpx 출신 표의 배치 정보 (hwp5 출신은 common_data가 채워져 None).
+    #[serde(default)]
+    pub placement: Option<GsoPlacement>,
     pub attr: u32,
     pub rows: u16,
     pub cols: u16,
@@ -163,4 +213,39 @@ pub struct ParagraphList {
     #[serde(with = "hex_bytes")]
     pub header_data: Vec<u8>,
     pub paragraphs: Vec<Paragraph>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GsoPlacement;
+
+    /// 정품 한라대 .hwp 실측 표 공통 속성 attr를 비트 합성으로 재현하는지 확인한다.
+    /// (글자처럼 취급 보존 — 인라인 표가 떠 있는 개체로 빠지던 버그의 회귀 방지.)
+    #[test]
+    fn 표_공통속성_attr_정품값_재현() {
+        // 인라인 표(제목바·본문·꼬리말): treatAsChar=1, vertRelTo=PARA(2),
+        // horzRelTo=PARA(3), flowWithText=1 → 0x082a2311
+        let inline = GsoPlacement {
+            treat_as_char: true,
+            flow_with_text: true,
+            vert_rel_to: 2,
+            horz_rel_to: 3,
+            ..Default::default()
+        };
+        assert_eq!(inline.synth_attr(), 0x082a_2311);
+
+        // 표지/꼬리말 3x3: flowWithText=0 → 0x082a0311
+        let cover = GsoPlacement {
+            flow_with_text: false,
+            ..inline.clone()
+        };
+        assert_eq!(cover.synth_attr(), 0x082a_0311);
+
+        // 목차 박스: treatAsChar=0(떠 있음) → 0x082a2310
+        let toc = GsoPlacement {
+            treat_as_char: false,
+            ..inline
+        };
+        assert_eq!(toc.synth_attr(), 0x082a_2310);
+    }
 }

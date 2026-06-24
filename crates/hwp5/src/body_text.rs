@@ -377,6 +377,7 @@ fn parse_page_def(data: &[u8]) -> Result<PageDef> {
 fn parse_table(common_data: Vec<u8>, children: &[RecordNode], warnings: &mut Vec<String>) -> Table {
     let mut table = Table {
         common_data,
+        placement: None,
         attr: 0,
         rows: 0,
         cols: 0,

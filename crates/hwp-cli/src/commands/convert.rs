@@ -82,22 +82,27 @@ pub fn write_hwp(
     let font_dir =
         std::path::PathBuf::from(std::env::var("HWP_FONT_DIR").unwrap_or_else(|_| "fonts".into()));
     let synthesize = doc.meta.source_format != "hwp5";
-
-    // 출처가 이미 줄 배치를 제공하면(hwpx의 linesegarray = 한글이 저장한 정품
-    // 페이지 분할) 그대로 보존한다. 합성으로 덮어쓰면 페이지 리셋이 없는 섹션
-    // 단조 누적이 되어(v_pos가 페이지 높이를 한참 초과) 멀티페이지 문서가
-    // 한글에서 '손상' 판정된다. 줄 배치가 없는 출처(markdown)만 합성한다.
-    // (writer는 synthesize=true면 emit_lineseg=true라 IR 줄 배치를 그대로 방출.)
-    let has_linesegs = doc
+    let has_source_linesegs = doc
         .sections
         .iter()
         .flat_map(|s| &s.paragraphs)
         .any(|p| !p.line_segs.is_empty());
 
-    // 합성 경로: 정확한 줄 배치를 폰트 셰이핑으로 계산해 IR에 채운다.
-    // 무수정 왕복(--preserve-layout)·원본 줄 배치 보유 시에는 합성하지 않는다.
     let owned;
-    let doc = if synthesize && !preserve_layout && !has_linesegs {
+    let doc = if !synthesize || preserve_layout {
+        // hwp5 무수정/preserve-layout: 원본 줄 배치 그대로.
+        doc
+    } else if has_source_linesegs {
+        // hwpx 출신: hwpx가 저장한 줄 배치는 한글의 hwpx 내보내기 레이아웃이라
+        // hwp 저장본(정품)과 다를 수 있다(예: 같은 문서가 hwpx 6쪽, hwp 5쪽).
+        // 줄 배치를 제거하면 한글이 열 때 문단/글자 모양 기준으로 재계산해 hwp
+        // 저장본과 같은 페이지로 흐른다(문단 모양을 정품과 일치시킨 게 핵심).
+        let mut d = doc.clone();
+        clear_linesegs(&mut d);
+        owned = d;
+        &owned
+    } else {
+        // markdown 등 줄 배치 없는 출처: 폰트 셰이핑으로 합성.
         let mut d = doc.clone();
         let mut store = hwp_render::FontStore::new();
         store.load_dir(&font_dir);
@@ -108,8 +113,6 @@ pub fn write_hwp(
         }
         owned = d;
         &owned
-    } else {
-        doc
     };
 
     let prv_image = hwp_render::render_document(
@@ -134,4 +137,36 @@ pub fn write_hwp(
         eprintln!("경고: {w}");
     }
     Ok(())
+}
+
+/// 모든 문단(표 셀·머리말 등 중첩 포함)의 줄 배치를 제거한다 — 한글이 열 때
+/// 문단/글자 모양 기준으로 재계산하도록(hwpx 내보내기 줄배치가 hwp와 다른 문제 회피).
+fn clear_linesegs(doc: &mut hwp_model::Document) {
+    fn clear_para(para: &mut hwp_model::Paragraph) {
+        para.line_segs.clear();
+        for control in &mut para.controls {
+            match control {
+                hwp_model::Control::Table(t) => {
+                    for cell in &mut t.cells {
+                        for p in &mut cell.paragraphs {
+                            clear_para(p);
+                        }
+                    }
+                }
+                hwp_model::Control::Generic(g) => {
+                    for list in &mut g.paragraph_lists {
+                        for p in &mut list.paragraphs {
+                            clear_para(p);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for section in &mut doc.sections {
+        for para in &mut section.paragraphs {
+            clear_para(para);
+        }
+    }
 }

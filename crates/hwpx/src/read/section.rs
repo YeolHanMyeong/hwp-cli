@@ -97,7 +97,18 @@ fn parse_paragraph(
                     b"run" => {
                         let id = attr_u16(e, "charPrIDRef").unwrap_or(0);
                         if last_shape != Some(id) {
-                            para.char_shape_runs.push((wchar_pos, CharShapeId(id)));
+                            // 직전 run이 글자를 안 더했으면(빈 <hp:t/>) 같은 위치에
+                            // 두 글자모양이 겹친다. HWP5 PARA_CHAR_SHAPE는 위치당 1개
+                            // (마지막이 유효)이므로 같은 위치면 마지막 run으로 덮어쓴다.
+                            // (빈 문단의 빈 run 2개 → 첫 run의 큰 글자로 줄이 높아져
+                            // 페이지가 밀리는 문제 방지.)
+                            if let Some(last) = para.char_shape_runs.last_mut()
+                                && last.0 == wchar_pos
+                            {
+                                last.1 = CharShapeId(id);
+                            } else {
+                                para.char_shape_runs.push((wchar_pos, CharShapeId(id)));
+                            }
                             last_shape = Some(id);
                         }
                     }
@@ -149,11 +160,14 @@ fn parse_paragraph(
                         }
                     }
                     b"pic" => {
-                        let picture = if empty {
+                        let mut picture = if empty {
                             default_picture()
                         } else {
                             parse_picture(reader)?
                         };
+                        // z-순서는 <hp:pic> 시작 태그 속성(자식 <hp:pos>가 아님).
+                        // 누락하면 머리말/본문 로고 겹침 순서가 어긋난다.
+                        picture.z_order = attr_i32(e, "zOrder").unwrap_or(0).max(0) as u32;
                         push_ext_ctrl(&mut para, &mut wchar_pos, 11, *b"gso ");
                         para.controls.push(Control::Picture(picture));
                     }
@@ -312,6 +326,83 @@ fn parse_sec_pr(reader: &mut XmlReader<'_>) -> Result<SectionDef> {
 ///
 /// 각 자식 컨트롤의 서브트리를 끝까지 소비하고, 문단 리스트(`hp:subList`)는
 /// 재귀 수집한다 — 머리말 안의 텍스트·이미지가 여기로 들어온다.
+/// hwpx `<hp:header/footer applyPageType id>` → hwp5 머리말/꼬리말 8B 페이로드.
+/// `적용쪽(u32)` + `id(u32)`. 적용쪽: BOTH=0, EVEN=1, ODD=2. 정품 실측:
+/// `<hp:header id="2" applyPageType="BOTH">` → `00000000 02000000`.
+fn head_foot_data(e: &BytesStart<'_>) -> Vec<u8> {
+    let apply: u32 = match attr(e, "applyPageType").as_deref() {
+        Some("EVEN") => 1,
+        Some("ODD") => 2,
+        _ => 0, // BOTH
+    };
+    let id: u32 = attr(e, "id").and_then(|s| s.parse().ok()).unwrap_or(0);
+    let mut v = Vec::with_capacity(8);
+    v.extend_from_slice(&apply.to_le_bytes());
+    v.extend_from_slice(&id.to_le_bytes());
+    v
+}
+
+/// hwpx `<hp:pageNum pos formatType sideChar>` → hwp5 pgnp(쪽 번호 위치) 12B.
+/// `properties(u32: 서식 | 위치<<8)` + 예약(6B) + sideChar WCHAR. 정품 실측:
+/// pos=BOTTOM_CENTER(5), sideChar='-' → `000500000000000000002d00`.
+fn build_pgnp(e: &BytesStart<'_>) -> Vec<u8> {
+    let position: u32 = match attr(e, "pos").as_deref() {
+        Some("TOP_LEFT") => 1,
+        Some("TOP_CENTER") => 2,
+        Some("TOP_RIGHT") => 3,
+        Some("BOTTOM_LEFT") => 4,
+        Some("BOTTOM_CENTER") => 5,
+        Some("BOTTOM_RIGHT") => 6,
+        Some("OUTSIDE_TOP") => 7,
+        Some("OUTSIDE_BOTTOM") => 8,
+        Some("INSIDE_TOP") => 9,
+        Some("INSIDE_BOTTOM") => 10,
+        _ => 0, // NONE
+    };
+    // 서식은 아라비아 숫자(DIGIT=0)만 매핑, 그 외는 0으로 대체.
+    let format: u32 = 0;
+    let side_char: u16 = attr(e, "sideChar")
+        .and_then(|s| s.chars().next())
+        .map(|c| c as u16)
+        .unwrap_or(0);
+    let props = format | (position << 8);
+    let mut v = Vec::with_capacity(12);
+    v.extend_from_slice(&props.to_le_bytes());
+    v.extend_from_slice(&[0u8; 6]);
+    v.extend_from_slice(&side_char.to_le_bytes());
+    v
+}
+
+/// hwpx `<hp:pageHiding hide.../>` → hwp5 pghd(쪽 감추기) 4B 비트맵.
+/// bit0=머리말, 1=꼬리말, 2=바탕쪽, 3=테두리, 4=배경, 5=쪽번호.
+/// 정품 실측: 표지=0x21(머리말+쪽번호), 목차=0x20(쪽번호).
+fn build_pghd(e: &BytesStart<'_>) -> Vec<u8> {
+    let bit = |name: &str, b: u32| {
+        if attr(e, name).as_deref() == Some("1") {
+            1u32 << b
+        } else {
+            0
+        }
+    };
+    let mask = bit("hideHeader", 0)
+        | bit("hideFooter", 1)
+        | bit("hideMasterPage", 2)
+        | bit("hideBorder", 3)
+        | bit("hideFill", 4)
+        | bit("hidePageNum", 5);
+    mask.to_le_bytes().to_vec()
+}
+
+/// hwpx `<hp:newNum num/>` → hwp5 nwno(새 번호 지정) 6B. `종류(u32=0,PAGE)` + `번호(u16)`.
+/// 정품 실측: num=1 → `000000000100`.
+fn build_nwno(e: &BytesStart<'_>) -> Vec<u8> {
+    let num: u16 = attr(e, "num").and_then(|s| s.parse().ok()).unwrap_or(1);
+    let mut v = Vec::with_capacity(6);
+    v.extend_from_slice(&0u32.to_le_bytes());
+    v.extend_from_slice(&num.to_le_bytes());
+    v
+}
+
 fn parse_ctrl(
     reader: &mut XmlReader<'_>,
     para: &mut Paragraph,
@@ -323,25 +414,30 @@ fn parse_ctrl(
         match &event {
             Event::Start(e) | Event::Empty(e) => {
                 let name = e.local_name().as_ref().to_vec();
-                // hwp5와 동일한 ctrl_id/컨트롤 문자 코드 매핑
-                let (ctrl_id, code): ([u8; 4], u16) = match name.as_slice() {
-                    b"colPr" => (*b"cold", 2),
-                    b"header" => (*b"head", 16),
-                    b"footer" => (*b"foot", 16),
-                    b"footNote" => (*b"fn  ", 17),
-                    b"endNote" => (*b"en  ", 17),
-                    b"autoNum" | b"newNum" => (*b"atno", 18),
+                // hwp5와 동일한 ctrl_id/컨트롤 문자 코드 매핑. 쪽번호·감추기·새번호는
+                // 코드 21(페이지 컨트롤)이며, hwp5 페이로드를 여기서 합성해 둔다(빈
+                // GenericControl이면 writer가 드롭). head/foot는 적용쪽+id를 8B로.
+                let (ctrl_id, code, data): ([u8; 4], u16, Vec<u8>) = match name.as_slice() {
+                    b"colPr" => (*b"cold", 2, Vec::new()),
+                    b"header" => (*b"head", 16, head_foot_data(e)),
+                    b"footer" => (*b"foot", 16, head_foot_data(e)),
+                    b"footNote" => (*b"fn  ", 17, Vec::new()),
+                    b"endNote" => (*b"en  ", 17, Vec::new()),
+                    b"autoNum" => (*b"atno", 18, Vec::new()),
+                    b"pageNum" => (*b"pgnp", 21, build_pgnp(e)),
+                    b"pageHiding" => (*b"pghd", 21, build_pghd(e)),
+                    b"newNum" => (*b"nwno", 21, build_nwno(e)),
                     other => {
                         let mut id = [b' '; 4];
                         for (i, b) in other.iter().take(4).enumerate() {
                             id[i] = *b;
                         }
-                        (id, 21)
+                        (id, 21, Vec::new())
                     }
                 };
                 let mut generic = GenericControl {
                     ctrl_id,
-                    data: Vec::new(),
+                    data,
                     paragraph_lists: Vec::new(),
                     extras: Vec::new(),
                     raw_children: Vec::new(),
@@ -360,24 +456,77 @@ fn parse_ctrl(
     Ok(())
 }
 
+/// hwpx vertRelTo → hwp5 코드 (PAPER=0, PAGE=1, PARA=2).
+fn vert_rel_to_code(s: Option<&str>) -> u8 {
+    match s {
+        Some("PAGE") => 1,
+        Some("PARA") => 2,
+        _ => 0, // PAPER
+    }
+}
+
+/// hwpx horzRelTo → hwp5 코드 (PAPER=0, PAGE=1, COLUMN=2, PARA=3).
+fn horz_rel_to_code(s: Option<&str>) -> u8 {
+    match s {
+        Some("PAGE") => 1,
+        Some("COLUMN") => 2,
+        Some("PARA") => 3,
+        _ => 0, // PAPER
+    }
+}
+
+/// hwpx vertAlign/horzAlign → hwp5 코드 (TOP/LEFT=0, CENTER=1, BOTTOM/RIGHT=2).
+fn align_code(s: Option<&str>) -> u8 {
+    match s {
+        Some("CENTER") => 1,
+        Some("BOTTOM") | Some("RIGHT") => 2,
+        _ => 0, // TOP/LEFT
+    }
+}
+
 /// `<hp:tbl>` — 표.
 fn parse_table(
     reader: &mut XmlReader<'_>,
     start: &BytesStart<'_>,
     warnings: &mut Vec<String>,
 ) -> Result<Table> {
+    // 표 속성(attr): bits0-1=쪽 나눔(NONE=0/TABLE=1/CELL=2), bit2=제목줄 반복,
+    // bit3=자동 너비 조정 안 함. 정품 실측으로 검증. 0으로 두면(과거 버그) 표가
+    // "나누지 않음"이 돼, 잔여 공간에 안 들어가는 표가 통째로 다음 쪽으로 밀린다
+    // (목차 박스가 별도 쪽으로 분리되는 원인).
+    let mut table_attr: u32 = match attr(start, "pageBreak").as_deref() {
+        Some("TABLE") => 1,
+        Some("CELL") => 2,
+        _ => 0, // NONE
+    };
+    if attr(start, "repeatHeader").as_deref() == Some("1") {
+        table_attr |= 1 << 2;
+    }
+    if attr(start, "noAdjust").as_deref() == Some("1") {
+        table_attr |= 1 << 3;
+    }
     let mut table = Table {
         common_data: Vec::new(),
-        attr: 0,
+        placement: None, // 루프 종료 후 GsoPlacement로 채운다
+        attr: table_attr,
         rows: attr_u16(start, "rowCnt").unwrap_or(0),
         cols: attr_u16(start, "colCnt").unwrap_or(0),
         cell_spacing: attr_u16(start, "cellSpacing").unwrap_or(0),
+        // 셀 안쪽 여백: hwpx <hp:inMargin>에서 읽는다(아래 루프). 기본 0.
         inner_margins: [0; 4],
         row_cell_counts: Vec::new(),
         border_fill: hwp_model::BorderFillId(attr_u16(start, "borderFillIDRef").unwrap_or(0)),
         table_tail: Vec::new(),
         cells: Vec::new(),
         extras: Vec::new(),
+    };
+
+    // 개체 공통 속성(배치) — hwp5 CTRL_HEADER 40바이트로 합성한다. 읽지 않으면
+    // writer가 떠 있는(floating) 상수로 덮어써, 인라인이어야 할 표가 본문 흐름에서
+    // 빠지고 한글이 재배치해 겹침/빈 페이지가 생긴다. zOrder는 시작 태그에 있다.
+    let mut placement = hwp_model::GsoPlacement {
+        z_order: attr_i32(start, "zOrder").unwrap_or(0),
+        ..Default::default()
     };
 
     loop {
@@ -393,11 +542,48 @@ fn parse_table(
                     skip_subtree(reader, &name)?;
                 }
             },
+            // 표 자신의 셀 안쪽 여백(self-closing). 셀(tc) 안 중첩 표는 parse_cell이
+            // 따로 소비하므로 여기서 보이는 건 이 표의 것뿐이다. 순서: left,right,top,bottom.
+            Event::Empty(e) if e.local_name().as_ref() == b"inMargin" => {
+                table.inner_margins = [
+                    attr_u16(&e, "left").unwrap_or(0),
+                    attr_u16(&e, "right").unwrap_or(0),
+                    attr_u16(&e, "top").unwrap_or(0),
+                    attr_u16(&e, "bottom").unwrap_or(0),
+                ];
+            }
+            // 배치: <hp:pos>(글자처럼취급/위치기준/오프셋), <hp:sz>(경계 너비/높이 —
+            // 병합 셀 합산보다 정확), <hp:outMargin>(바깥 여백).
+            Event::Empty(e) if e.local_name().as_ref() == b"pos" => {
+                placement.treat_as_char = attr(&e, "treatAsChar").as_deref() == Some("1");
+                placement.affect_line_spacing = attr(&e, "affectLSpacing").as_deref() == Some("1");
+                placement.flow_with_text = attr(&e, "flowWithText").as_deref() == Some("1");
+                placement.hold_anchor = attr(&e, "holdAnchorAndSO").as_deref() == Some("1");
+                placement.vert_rel_to = vert_rel_to_code(attr(&e, "vertRelTo").as_deref());
+                placement.horz_rel_to = horz_rel_to_code(attr(&e, "horzRelTo").as_deref());
+                placement.vert_align = align_code(attr(&e, "vertAlign").as_deref());
+                placement.horz_align = align_code(attr(&e, "horzAlign").as_deref());
+                placement.vert_offset = attr_offset_i32(&e, "vertOffset").unwrap_or(0);
+                placement.horz_offset = attr_offset_i32(&e, "horzOffset").unwrap_or(0);
+            }
+            Event::Empty(e) if e.local_name().as_ref() == b"sz" => {
+                placement.width = attr_i32(&e, "width").unwrap_or(0);
+                placement.height = attr_i32(&e, "height").unwrap_or(0);
+            }
+            Event::Empty(e) if e.local_name().as_ref() == b"outMargin" => {
+                placement.out_margins = [
+                    attr_u16(&e, "left").unwrap_or(0),
+                    attr_u16(&e, "right").unwrap_or(0),
+                    attr_u16(&e, "top").unwrap_or(0),
+                    attr_u16(&e, "bottom").unwrap_or(0),
+                ];
+            }
             Event::End(e) if e.local_name().as_ref() == b"tbl" => break,
             Event::Eof => break,
             _ => {}
         }
     }
+    table.placement = Some(placement);
     // 행별 셀 수 재구성 (hwp5와 동일 의미 유지)
     let mut counts = vec![0u16; table.rows as usize];
     for cell in &table.cells {
@@ -416,7 +602,13 @@ fn parse_cell(
     warnings: &mut Vec<String>,
 ) -> Result<Cell> {
     let mut cell = Cell {
-        list_attr: 0,
+        // 제목(머리) 셀이면 bit18 — 표 헤더 행 반복 대상(정품 실측). vertAlign은
+        // 아래 subList에서 bits5-6에 더한다.
+        list_attr: if attr(start, "header").as_deref() == Some("1") {
+            1 << 18
+        } else {
+            0
+        },
         col: 0,
         row: 0,
         col_span: 1,
@@ -450,6 +642,18 @@ fn parse_cell(
                         attr_u16(&e, "top").unwrap_or(0),
                         attr_u16(&e, "bottom").unwrap_or(0),
                     ];
+                }
+                b"subList" => {
+                    // 셀 세로 정렬(vertAlign)을 list_attr bits5-6에 인코딩:
+                    // TOP=0, CENTER=1, BOTTOM=2. 정품 셀은 CENTER(0x20)인데 안 읽으면
+                    // 0(TOP)이 돼 셀 내용이 위로 몰리고, 셀 높이가 내용보다 크면 빈
+                    // 아래 영역이 다음 쪽으로 분리된다(빈 페이지 발생).
+                    let va = match attr(&e, "vertAlign").as_deref() {
+                        Some("CENTER") => 1u32,
+                        Some("BOTTOM") => 2,
+                        _ => 0, // TOP
+                    };
+                    cell.list_attr |= va << 5;
                 }
                 b"p" => {
                     cell.paragraphs.push(parse_paragraph(reader, &e, warnings)?);
@@ -593,4 +797,66 @@ fn parse_linesegs(reader: &mut XmlReader<'_>, para: &mut Paragraph) -> Result<()
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod page_ctrl_tests {
+    use super::*;
+
+    fn elem(name: &str, attrs: &[(&str, &str)]) -> BytesStart<'static> {
+        let mut e = BytesStart::new(name.to_string());
+        for (k, v) in attrs {
+            e.push_attribute((*k, *v));
+        }
+        e
+    }
+
+    /// 쪽 번호 위치(pgnp): 정품 한라대 = pos BOTTOM_CENTER + sideChar '-'.
+    #[test]
+    fn pgnp_합성() {
+        let e = elem(
+            "hp:pageNum",
+            &[
+                ("pos", "BOTTOM_CENTER"),
+                ("formatType", "DIGIT"),
+                ("sideChar", "-"),
+            ],
+        );
+        // props=위치5<<8=0x500, 예약6B, sideChar '-'(0x2d) WCHAR.
+        assert_eq!(
+            build_pgnp(&e),
+            vec![0x00, 0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0x2d, 0x00]
+        );
+    }
+
+    /// 쪽 감추기(pghd): 표지=머리말+쪽번호(0x21), 목차=쪽번호(0x20).
+    #[test]
+    fn pghd_합성() {
+        let cover = elem(
+            "hp:pageHiding",
+            &[("hideHeader", "1"), ("hidePageNum", "1")],
+        );
+        assert_eq!(build_pghd(&cover), vec![0x21, 0, 0, 0]);
+        let toc = elem(
+            "hp:pageHiding",
+            &[("hideHeader", "0"), ("hidePageNum", "1")],
+        );
+        assert_eq!(build_pghd(&toc), vec![0x20, 0, 0, 0]);
+    }
+
+    /// 새 번호 지정(nwno): num=1 → 종류(0) + 번호(1).
+    #[test]
+    fn nwno_합성() {
+        let e = elem("hp:newNum", &[("num", "1"), ("numType", "PAGE")]);
+        assert_eq!(build_nwno(&e), vec![0, 0, 0, 0, 0x01, 0x00]);
+    }
+
+    /// 머리말/꼬리말: 적용쪽(u32) + id(u32). BOTH(0) + id=2.
+    #[test]
+    fn head_foot_8바이트() {
+        let e = elem("hp:header", &[("id", "2"), ("applyPageType", "BOTH")]);
+        assert_eq!(head_foot_data(&e), vec![0, 0, 0, 0, 0x02, 0, 0, 0]);
+        let odd = elem("hp:footer", &[("id", "3"), ("applyPageType", "ODD")]);
+        assert_eq!(head_foot_data(&odd), vec![0x02, 0, 0, 0, 0x03, 0, 0, 0]);
+    }
 }

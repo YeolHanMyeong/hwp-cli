@@ -21,7 +21,8 @@ pub mod text;
 pub mod units;
 
 pub use control::{
-    BinRef, Cell, Control, GenericControl, PageDef, ParagraphList, Picture, SectionDef, Table,
+    BinRef, Cell, Control, GenericControl, GsoPlacement, PageDef, ParagraphList, Picture,
+    SectionDef, Table,
 };
 pub use document::{BinStream, DocMeta, Document, Section};
 pub use header::{

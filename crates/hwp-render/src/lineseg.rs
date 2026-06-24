@@ -219,8 +219,21 @@ fn compute_linesegs(
             1000,
             |cs| if cs.base_size > 0 { cs.base_size } else { 1000 },
         );
-    let line_spacing = base * 60 / 100;
-    let line_advance = base + line_spacing;
+    // 줄간격은 문단 모양에서 유도한다. 종류는 attr1 bits0-1(0 비율%, 1 고정, 3 최소),
+    // 값은 line_spacing_old(@24). 길이 종류(고정/최소)는 HWPUNIT의 2배 단위라 ÷2.
+    // 미지정이면 정품 기본 160%(가나다 실측). (예전엔 160% 고정이라 문단별
+    // 줄간격(130/170 등)을 무시해 페이지네이션이 어긋났다.)
+    let (line_advance, line_spacing) = {
+        let ps = doc.header.para_shapes.get(para.para_shape.0 as usize);
+        let ls_type = ps.map_or(0, |p| (p.attr1 & 0x3) as u8);
+        let ls_val = ps.map_or(0, |p| p.line_spacing_old);
+        let adv = match ls_type {
+            1 | 3 if ls_val > 0 => (ls_val / 2).max(base),
+            _ if ls_val > 0 => base * ls_val / 100,
+            _ => base * 160 / 100,
+        };
+        (adv, (adv - base).max(0))
+    };
     let baseline_gap = base * 85 / 100;
     let seg_width = body_width.max(1);
     let limit_pt = seg_width as f32 / 100.0;

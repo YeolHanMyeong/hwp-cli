@@ -125,3 +125,141 @@ fn 합성_섹션_표와_컨트롤문자() {
     assert_eq!(table.cells[0].col_span, 2);
     assert_eq!(table.row_cell_counts, vec![1, 2]);
 }
+
+/// 표 개체 공통 속성(<hp:pos>/<hp:sz>/<hp:outMargin>/zOrder)이 GsoPlacement로 보존되는지.
+/// 글자처럼 취급(treatAsChar)을 잃으면 인라인 표가 떠 있는 개체가 돼 본문 흐름에서
+/// 빠지고 한글이 재배치(겹침/빈 페이지)한다 — 정품 한라대 실측 기반 회귀 방지.
+#[test]
+fn 표_배치정보_보존() {
+    let xml = r##"<?xml version="1.0"?>
+<hs:sec xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section" xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph">
+  <hp:p paraPrIDRef="0" styleIDRef="0">
+    <hp:run charPrIDRef="0">
+      <hp:tbl rowCnt="1" colCnt="1" borderFillIDRef="1" zOrder="8">
+        <hp:sz width="18279" widthRelTo="ABSOLUTE" height="3931" heightRelTo="ABSOLUTE"/>
+        <hp:pos treatAsChar="1" flowWithText="1" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="0" horzOffset="0"/>
+        <hp:outMargin left="283" right="283" top="283" bottom="283"/>
+        <hp:tr><hp:tc><hp:cellAddr colAddr="0" rowAddr="0"/><hp:subList><hp:p><hp:run charPrIDRef="0"><hp:t>x</hp:t></hp:run></hp:p></hp:subList></hp:tc></hp:tr>
+      </hp:tbl>
+    </hp:run>
+  </hp:p>
+</hs:sec>"##;
+    let (section, _) = hwpx::read::section::parse_section(xml).unwrap();
+    let Some(Control::Table(table)) = section.paragraphs[0].controls.first() else {
+        panic!("표 컨트롤이 있어야 한다");
+    };
+    let pl = table
+        .placement
+        .as_ref()
+        .expect("표 배치정보가 보존돼야 한다");
+    assert!(pl.treat_as_char, "글자처럼 취급(인라인) 보존");
+    assert!(pl.flow_with_text);
+    assert_eq!(pl.vert_rel_to, 2); // PARA
+    assert_eq!(pl.horz_rel_to, 3); // PARA
+    assert_eq!(pl.z_order, 8);
+    assert_eq!(pl.width, 18279); // <hp:sz> — 병합 셀 합산 아님
+    assert_eq!(pl.height, 3931);
+    assert_eq!(pl.out_margins, [283, 283, 283, 283]);
+    // 합성 attr = 정품 인라인 표 값
+    assert_eq!(pl.synth_attr(), 0x082a_2311);
+}
+
+/// 그림 z-순서(<hp:pic zOrder>)가 보존되는지 — 누락하면 머리말/본문 로고 겹침 순서가
+/// 어긋난다(정품 머리말 로고 z=4, 본문 로고 z=7).
+#[test]
+fn 그림_zorder_보존() {
+    let xml = r##"<?xml version="1.0"?>
+<hs:sec xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section" xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph" xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core">
+  <hp:p paraPrIDRef="0" styleIDRef="0">
+    <hp:run charPrIDRef="0">
+      <hp:pic zOrder="7" reverse="0">
+        <hp:sz width="12299" height="5074"/>
+        <hp:pos treatAsChar="1" vertRelTo="PAGE" horzRelTo="PAPER" vertOffset="68401" horzOffset="25510"/>
+        <hc:img binaryItemIDRef="image1"/>
+      </hp:pic>
+    </hp:run>
+  </hp:p>
+</hs:sec>"##;
+    let (section, _) = hwpx::read::section::parse_section(xml).unwrap();
+    let Some(Control::Picture(pic)) = section.paragraphs[0].controls.first() else {
+        panic!("그림 컨트롤이 있어야 한다");
+    };
+    assert_eq!(pic.z_order, 7);
+    assert!(pic.treat_as_char);
+    // 글자처럼 취급이어도 오프셋은 보존돼야 한다(정품 본문 로고 voff=68401).
+    assert_eq!(pic.vert_offset, 68401);
+    assert_eq!(pic.horz_offset, 25510);
+}
+
+/// hwpx 여백류(HWPUNIT)는 hwp5 PARA_SHAPE 단위(2배)로 저장돼야 한다.
+/// 정품 한라대 실측: hwpx left=1500 → hwp5 ml=3000. 줄간격은 2배 아님.
+#[test]
+fn 문단_여백_2배_단위() {
+    let xml = r##"<?xml version="1.0"?>
+<hh:head xmlns:hh="http://www.hancom.co.kr/hwpml/2011/head" xmlns:hc="http://www.hancom.co.kr/hwpml/2011/core">
+  <hh:refList>
+    <hh:paraProperties>
+      <hh:paraPr id="0">
+        <hh:align horizontal="LEFT"/>
+        <hh:margin>
+          <hc:intent value="-2248" unit="HWPUNIT"/>
+          <hc:left value="1500" unit="HWPUNIT"/>
+          <hc:right value="0" unit="HWPUNIT"/>
+          <hc:prev value="1416" unit="HWPUNIT"/>
+          <hc:next value="0" unit="HWPUNIT"/>
+        </hh:margin>
+        <hh:lineSpacing type="PERCENT" value="160" unit="HWPUNIT"/>
+      </hh:paraPr>
+    </hh:paraProperties>
+  </hh:refList>
+</hh:head>"##;
+    let (header, _) = hwpx::read::header::parse_header(xml).unwrap();
+    let ps = &header.para_shapes[0];
+    assert_eq!(ps.margin_left, 3000, "left 1500 → ×2");
+    assert_eq!(ps.indent, -4496, "intent -2248 → ×2");
+    assert_eq!(ps.spacing_top, 1416 * 2, "prev → ×2");
+    assert_eq!(ps.line_spacing, 160, "줄간격은 2배 아님");
+}
+
+/// 쪽번호/감추기/새번호 컨트롤이 올바른 ctrl_id로 매핑·보존돼야 한다(드롭 방지).
+#[test]
+fn 쪽번호_감추기_컨트롤_매핑() {
+    let xml = r##"<?xml version="1.0"?>
+<hs:sec xmlns:hs="http://www.hancom.co.kr/hwpml/2011/section" xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph">
+  <hp:p paraPrIDRef="0">
+    <hp:run charPrIDRef="0"><hp:ctrl>
+      <hp:pageNum pos="BOTTOM_CENTER" formatType="DIGIT" sideChar="-"/>
+      <hp:newNum num="1" numType="PAGE"/>
+    </hp:ctrl></hp:run>
+  </hp:p>
+  <hp:p paraPrIDRef="0">
+    <hp:run charPrIDRef="0"><hp:ctrl>
+      <hp:pageHiding hideHeader="1" hideFooter="0" hideMasterPage="0" hideBorder="0" hideFill="0" hidePageNum="1"/>
+    </hp:ctrl></hp:run>
+  </hp:p>
+</hs:sec>"##;
+    let (section, _) = hwpx::read::section::parse_section(xml).unwrap();
+    let ids0: Vec<[u8; 4]> = section.paragraphs[0]
+        .controls
+        .iter()
+        .map(|c| c.ctrl_id())
+        .collect();
+    assert!(ids0.contains(b"pgnp"), "pageNum → pgnp: {ids0:?}");
+    assert!(ids0.contains(b"nwno"), "newNum → nwno: {ids0:?}");
+    let ids1: Vec<[u8; 4]> = section.paragraphs[1]
+        .controls
+        .iter()
+        .map(|c| c.ctrl_id())
+        .collect();
+    assert!(ids1.contains(b"pghd"), "pageHiding → pghd: {ids1:?}");
+    // 데이터가 비어 있지 않아야 writer가 드롭하지 않는다.
+    for p in &section.paragraphs {
+        for c in &p.controls {
+            if let Control::Generic(g) = c
+                && matches!(&g.ctrl_id, b"pgnp" | b"nwno" | b"pghd")
+            {
+                assert!(!g.data.is_empty(), "{:?} data 비어있음", g.ctrl_id);
+            }
+        }
+    }
+}

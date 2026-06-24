@@ -523,6 +523,7 @@ fn table_paragraph(tb: TableBuilder) -> Paragraph {
     }
     let table = Table {
         common_data: Vec::new(),
+        placement: None,
         attr: 0,
         rows: rows as u16,
         cols: cols as u16,

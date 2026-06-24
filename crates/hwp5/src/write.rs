@@ -255,12 +255,12 @@ fn set_last_para_flag(paras: &mut [Paragraph]) {
     }
 }
 
-/// 합성(md/hwpx 출신) 문서의 ParaShape에 정상 표본 기준값을 보정 주입한다.
-/// attr1 의 0x180(bit7 한글 줄나눔=글자 + bit8 줄 격자 사용)은 정렬 비트와
-/// 무관하게 항상 OR 한다(== 0 게이트로 막으면 정렬을 가진 헤딩 PS가 누락됨).
+/// 합성(md/hwpx 출신) 문서의 ParaShape에 누락 기준값만 보정한다.
+/// (attr1 의 줄나눔·줄격자 비트는 hwpx reader가 실제 값으로 채우므로 강제하지
+/// 않는다 — 강제하면 BREAK_WORD 문단까지 KEEP_WORD가 돼 줄바꿈이 느슨해지고
+/// 페이지가 밀린다. markdown은 from_markdown이 attr1을 직접 설정.)
 fn ensure_para_shape_defaults(header: &mut hwp_model::DocHeader) {
     for ps in &mut header.para_shapes {
-        ps.attr1 |= 0x180;
         if ps.line_spacing_old == 0 {
             ps.line_spacing_old = 160;
         }
@@ -310,13 +310,6 @@ const HEADER_LIST_HEADER_TEMPLATE: &str =
     "01000000400000003ebc0000130b0000000000000000000000000000000000000000";
 /// SHAPE_COMPONENT 196B. width@20/28, height@24/32.
 const SHAPE_COMPONENT_TEMPLATE: &str = "636970246369702400000000000000000000010038220000ec04000038220000ec0400000000082400001c110000760200000100000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f0000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f0000000000000000000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f0000000000000000";
-/// SHAPE_COMPONENT_PICTURE. 모서리/자르기 = width/height, BinItem ID@71.
-/// work_report(5.0.2.4) 78B(border12+rect32+clip16+padding8+picture5+
-/// 투명1+instance_id4) 뒤에 picture_effect flags(4B=0)을 덧붙여 82B로 만든다 —
-/// 5.0.3.4+ 그림 개체는 picture_effect가 필수다(pyhwp ShapePicture 버전 게이트).
-/// 누락 시 한글/pyhwp가 레코드를 짧게 읽어 거부.
-const PICTURE_TEMPLATE: &str = "0000000000000000000000000000000000000000382200000000000038220000ec04000000000000ec040000000000000000000038220000ec0400000000000000000000000000010000d607bf2d00000000";
-
 fn hex_to_bytes(s: &str) -> Vec<u8> {
     (0..s.len())
         .step_by(2)
@@ -324,24 +317,110 @@ fn hex_to_bytes(s: &str) -> Vec<u8> {
         .collect()
 }
 
+/// 임베드 이미지 바이트에서 픽셀 크기(가로,세로)를 읽는다. PNG/JPEG/GIF/BMP.
+/// 그림의 자르기(clip)·picture_effect에 들어가는 "원본 자연 크기" 계산용.
+fn image_pixel_size(data: &[u8]) -> Option<(u32, u32)> {
+    if data.len() >= 24 && data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        // IHDR: width@16, height@20 (big-endian)
+        let w = u32::from_be_bytes(data[16..20].try_into().ok()?);
+        let h = u32::from_be_bytes(data[20..24].try_into().ok()?);
+        return Some((w, h));
+    }
+    if data.len() >= 10 && data.starts_with(b"GIF") {
+        // 논리 화면 width@6, height@8 (little-endian u16)
+        let w = u16::from_le_bytes([data[6], data[7]]) as u32;
+        let h = u16::from_le_bytes([data[8], data[9]]) as u32;
+        return Some((w, h));
+    }
+    if data.len() >= 26 && data.starts_with(b"BM") {
+        // BITMAPINFOHEADER: width@18, height@22 (little-endian i32)
+        let w = i32::from_le_bytes(data[18..22].try_into().ok()?);
+        let h = i32::from_le_bytes(data[22..26].try_into().ok()?);
+        return Some((w.unsigned_abs(), h.unsigned_abs()));
+    }
+    if data.len() >= 4 && data[0] == 0xFF && data[1] == 0xD8 {
+        // JPEG: SOFn 마커(C0~CF, 단 C4/C8/CC 제외)에서 height/width(big-endian)
+        let mut i = 2;
+        while i + 9 < data.len() {
+            if data[i] != 0xFF {
+                i += 1;
+                continue;
+            }
+            let marker = data[i + 1];
+            if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC
+            {
+                let h = u16::from_be_bytes([data[i + 5], data[i + 6]]) as u32;
+                let w = u16::from_be_bytes([data[i + 7], data[i + 8]]) as u32;
+                return Some((w, h));
+            }
+            let seg_len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+            if seg_len < 2 {
+                break;
+            }
+            i += 2 + seg_len;
+        }
+        return None;
+    }
+    None
+}
+
+/// 픽셀 크기 → HWPUNIT 자연 크기(96 DPI 기준, px × 7200/96 = px × 75).
+fn natural_size_hwpunit(px: (u32, u32)) -> (i32, i32) {
+    let conv = |v: u32| (v as i64 * 7200 / 96) as i32;
+    (conv(px.0), conv(px.1))
+}
+
 /// 정품 템플릿을 크기·BinItem ID로 패치해 그림 extras(SHAPE_COMPONENT +
 /// 그 자식 SHAPE_COMPONENT_PICTURE)를 만든다.
-fn build_picture_extras(width: i32, height: i32, bin_id: u16) -> Vec<OpaqueRecord> {
+///
+/// - `width`/`height`: 표시 크기(HWPUNIT). gso 박스·도형 최종 크기.
+/// - `natural`: 원본 이미지 자연 크기(픽셀×7200/96). 그림 자르기(clip)
+///   사각형 = (0,0,natural) — **전체 이미지를 표시**한다. 표시 크기를 자르기로
+///   쓰면 원본의 좌상단 일부만 잘려 보여(예: 8196/150000 ≈ 5%) 한글에서
+///   그림이 거의 안 보인다(정품 한글은 항상 자연 크기를 쓴다).
+/// - `bin_id`: BIN_DATA 항목 ID. `pic_inst`: 그림 개체 유니크 instance_id.
+fn build_picture_extras(
+    width: i32,
+    height: i32,
+    natural: (i32, i32),
+    bin_id: u16,
+    pic_inst: u32,
+) -> Vec<OpaqueRecord> {
     let w = width.to_le_bytes();
     let h = height.to_le_bytes();
+    let (nw, nh) = natural;
     let mut sc = hex_to_bytes(SHAPE_COMPONENT_TEMPLATE);
-    sc[20..24].copy_from_slice(&w); // 폭
-    sc[24..28].copy_from_slice(&h); // 높이
-    sc[28..32].copy_from_slice(&w); // 폭(초기)
+    sc[20..24].copy_from_slice(&w); // 폭(최종)
+    sc[24..28].copy_from_slice(&h); // 높이(최종)
+    sc[28..32].copy_from_slice(&w); // 폭(초기) — 단위행렬이라 최종과 동일
     sc[32..36].copy_from_slice(&h); // 높이(초기)
-    let mut pic = hex_to_bytes(PICTURE_TEMPLATE);
-    pic[20..24].copy_from_slice(&w); // 꼭지점1.x
-    pic[28..32].copy_from_slice(&w); // 꼭지점2.x
-    pic[32..36].copy_from_slice(&h); // 꼭지점2.y
-    pic[40..44].copy_from_slice(&h); // 꼭지점3.y
-    pic[52..56].copy_from_slice(&w); // 자르기 우
-    pic[56..60].copy_from_slice(&h); // 자르기 하
-    pic[71..73].copy_from_slice(&bin_id.to_le_bytes()); // BinItem ID
+
+    // SHAPE_COMPONENT_PICTURE 91B (정품 5.1.x 레이아웃):
+    // 테두리(12) + 표시 사각형 4꼭지점(32) + 자르기(16: 0,0,natural) +
+    // 안쪽여백(8) + 그림(5: 밝기,명암,효과,BinItem ID) + 테두리투명(1) +
+    // instance_id(4) + picture_effect(13: flags4=0 + natural_w4 + natural_h4 + 1)
+    let mut pic = Vec::with_capacity(91);
+    pic.extend_from_slice(&[0u8; 12]); // 테두리
+    for &(x, y) in &[(0, 0), (width, 0), (width, height), (0, height)] {
+        pic.extend_from_slice(&i32::to_le_bytes(x));
+        pic.extend_from_slice(&i32::to_le_bytes(y));
+    }
+    pic.extend_from_slice(&0i32.to_le_bytes()); // 자르기 좌
+    pic.extend_from_slice(&0i32.to_le_bytes()); // 자르기 상
+    pic.extend_from_slice(&nw.to_le_bytes()); // 자르기 우 = 자연 폭
+    pic.extend_from_slice(&nh.to_le_bytes()); // 자르기 하 = 자연 높이
+    pic.extend_from_slice(&[0u8; 8]); // 안쪽 여백
+    pic.push(0); // 밝기
+    pic.push(0); // 명암
+    pic.push(0); // 효과
+    pic.extend_from_slice(&bin_id.to_le_bytes()); // BinItem ID
+    pic.push(0); // 테두리 투명도
+    pic.extend_from_slice(&pic_inst.to_le_bytes()); // instance_id(유니크)
+    pic.extend_from_slice(&0u32.to_le_bytes()); // picture_effect flags=0(효과 없음)
+    pic.extend_from_slice(&nw.to_le_bytes()); // picture_effect: 자연 폭
+    pic.extend_from_slice(&nh.to_le_bytes()); // picture_effect: 자연 높이
+    pic.push(0); // picture_effect reserved
+
     vec![OpaqueRecord {
         tag: tag::SHAPE_COMPONENT,
         data: sc,
@@ -359,6 +438,12 @@ fn synthesize_pictures(doc: &mut Document, warnings: &mut Vec<String>) {
     if bin_names.is_empty() {
         return;
     }
+    // 각 이미지의 원본 픽셀 크기(자르기·picture_effect의 자연 크기 산출용).
+    let bin_dims: Vec<Option<(u32, u32)>> = doc
+        .bin_streams
+        .iter()
+        .map(|b| image_pixel_size(&b.data))
+        .collect();
     let mut next_id: u16 = doc
         .header
         .bin_data
@@ -375,11 +460,30 @@ fn synthesize_pictures(doc: &mut Document, warnings: &mut Vec<String>) {
     // gso 개체마다 유니크 instance_id (같은 값이면 한글이 같은 개체로 보고 무시 가능).
     let mut inst: u32 = 0x3000_0000;
 
+    // 머리말/꼬리말 LIST_HEADER를 구역 PageDef 치수로 채운다(hwpx 출신, 빈 것만).
+    // textWidth=본문 폭(용지−좌우 여백), textHeight=머리말/꼬리말 여백. 과거에는
+    // 다른 문서(work_report)에서 차용한 템플릿(textHeight=2835, list_attr=0x40)을 써
+    // 머리말 영역 높이가 어긋났다. hwp5 출신은 header_data가 차 있어 건드리지 않는다.
+    for section in &mut doc.sections {
+        if let Some(pg) = section_page_def(section) {
+            let text_width = pg.width.0 - pg.margin_left.0 - pg.margin_right.0;
+            for para in &mut section.paragraphs {
+                fill_head_foot_list_header(
+                    para,
+                    text_width,
+                    pg.margin_header.0,
+                    pg.margin_footer.0,
+                );
+            }
+        }
+    }
+
     for section in &mut doc.sections {
         for para in &mut section.paragraphs {
             synth_pictures_para(
                 para,
                 &bin_names,
+                &bin_dims,
                 &mut assigned,
                 &mut next_id,
                 &mut inst,
@@ -397,11 +501,53 @@ fn synthesize_pictures(doc: &mut Document, warnings: &mut Vec<String>) {
     }
 }
 
+/// 구역의 PageDef를 찾는다 (SectionDef 컨트롤).
+fn section_page_def(section: &Section) -> Option<hwp_model::PageDef> {
+    section
+        .paragraphs
+        .iter()
+        .flat_map(|p| &p.controls)
+        .find_map(|c| match c {
+            Control::SectionDef(sd) => sd.page,
+            _ => None,
+        })
+}
+
+/// 머리말/꼬리말(head/foot) GenericControl의 빈 LIST_HEADER를 구역 치수로 채운다.
+/// textWidth=본문 폭, textHeight=머리말/꼬리말 여백. hwp5 출신(header_data가 이미 참)은
+/// 건드리지 않는다.
+fn fill_head_foot_list_header(para: &mut Paragraph, text_width: i32, head_h: i32, foot_h: i32) {
+    for control in &mut para.controls {
+        let Control::Generic(g) = control else {
+            continue;
+        };
+        let is_head = g.ctrl_id == *b"head";
+        let is_foot = g.ctrl_id == *b"foot";
+        if !(is_head || is_foot) || !g.raw_children.is_empty() {
+            continue;
+        }
+        let text_height = if is_head { head_h } else { foot_h };
+        for list in &mut g.paragraph_lists {
+            if !list.header_data.is_empty() {
+                continue;
+            }
+            let mut lh = hex_to_bytes(HEADER_LIST_HEADER_TEMPLATE);
+            let npara = list.paragraphs.len().max(1) as u16;
+            lh[0..2].copy_from_slice(&npara.to_le_bytes());
+            lh[4..8].copy_from_slice(&0u32.to_le_bytes()); // list_attr=0 (정품 머리말)
+            lh[8..12].copy_from_slice(&text_width.to_le_bytes());
+            lh[12..16].copy_from_slice(&text_height.to_le_bytes());
+            list.header_data = lh;
+        }
+    }
+}
+
 /// 한 문단(및 표 셀·글상자 재귀)의 빈 extras 그림에 도형 레코드를 합성한다.
 #[allow(clippy::too_many_arguments)]
 fn synth_pictures_para(
     para: &mut Paragraph,
     bin_names: &[String],
+    bin_dims: &[Option<(u32, u32)>],
     assigned: &mut [Option<u16>],
     next_id: &mut u16,
     inst: &mut u32,
@@ -449,18 +595,21 @@ fn synth_pictures_para(
                         s
                     }
                 };
-                // gso 개체 공통 속성(40B)을 배치에서 합성한다. 정품 attr 템플릿:
-                // 인라인(글자처럼)=0x042a2311(work_report), 떠 있는(floating)=
-                // 0x046a4000(annual_report). floating은 hwpx 오프셋으로 위치 지정.
-                // instance_id는 개체마다 유니크 부여. (고정 템플릿을 쓰면 떠 있는
-                // 로고가 인라인으로 배치돼 한글에서 안 보이거나 오배치된다.)
+                // gso 개체 공통 속성(40B)을 배치에서 합성한다. 정품 한라대 .hwp
+                // 실측 attr: 인라인(글자처럼)=0x042a6001, 떠 있는(floating)=
+                // 0x040a6000. floating은 hwpx 오프셋으로 위치 지정. instance_id는
+                // 개체마다 유니크 부여. (고정 템플릿을 쓰면 떠 있는 로고가 인라인으로
+                // 배치돼 한글에서 안 보이거나 오배치된다.)
                 let attr: u32 = if p.treat_as_char {
-                    0x042a_2311
+                    0x042a_6001
                 } else {
-                    0x046a_4000
+                    0x040a_6000
                 };
-                let voff: i32 = if p.treat_as_char { 0 } else { p.vert_offset };
-                let hoff: i32 = if p.treat_as_char { 0 } else { p.horz_offset };
+                // 오프셋은 글자처럼 취급(treat_as_char)이어도 보존한다. 정품 본문 로고는
+                // treatAsChar=1인데도 vertOffset=68401을 유지하므로, 0으로 만들면 좌상단으로
+                // 이동해 본문과 겹친다.
+                let voff: i32 = p.vert_offset;
+                let hoff: i32 = p.horz_offset;
                 let inst_id = *inst;
                 *inst += 1;
                 let mut common = Vec::with_capacity(40);
@@ -473,29 +622,46 @@ fn synth_pictures_para(
                 common.extend_from_slice(&0u32.to_le_bytes()); // 바깥 여백(왼/위)
                 common.extend_from_slice(&0u32.to_le_bytes()); // 바깥 여백(오른/아래)
                 common.extend_from_slice(&inst_id.to_le_bytes());
-                common.extend_from_slice(&0u32.to_le_bytes()); // 쪽 나눔 방지 등
+                common.extend_from_slice(&0u32.to_le_bytes()); // 쪽 나눔 방지(split)
+                // 개체 설명(description) BSTR — CommonControl ≥5.0.0.5 필수 필드.
+                // 빈 설명도 길이(u16=0)는 반드시 있어야 한다(정품 한글은 항상 기록).
+                // 누락 시 한글이 BSTR을 기대하다 레코드를 짧게 읽어 그림을 거부할 수
+                // 있다(pyhwp는 관대해 통과하나 한글은 다름).
+                common.extend_from_slice(&0u16.to_le_bytes()); // desc_len = 0
                 p.common_data = common;
-                p.extras = build_picture_extras(p.width.0, p.height.0, sid);
+                // 원본 이미지 자연 크기(픽셀×7200/96). 못 읽으면 표시 크기로
+                // 대체(구버전 동작) — 자르기가 일부만 보일 수 있으나 차선.
+                let natural = bin_dims
+                    .get(idx)
+                    .copied()
+                    .flatten()
+                    .map(natural_size_hwpunit)
+                    .unwrap_or((p.width.0, p.height.0));
+                // 그림 개체 instance_id(SCPIC)는 gso CTRL의 instance_id와 달라야
+                // 한다 — 유니크 비트를 토글해 파생(역시 유니크 유지).
+                let pic_inst = inst_id ^ 0x0010_0000;
+                p.extras = build_picture_extras(p.width.0, p.height.0, natural, sid, pic_inst);
                 p.bin_ref = hwp_model::BinRef::Id(hwp_model::BinDataId(sid));
             }
             Control::Table(t) => {
                 for cell in &mut t.cells {
                     for cp in &mut cell.paragraphs {
                         synth_pictures_para(
-                            cp, bin_names, assigned, next_id, inst, new_items, renames, warnings,
+                            cp, bin_names, bin_dims, assigned, next_id, inst, new_items, renames,
+                            warnings,
                         );
                     }
                 }
             }
             Control::Generic(g) => {
-                // hwpx 출신 머리말/꼬리말(head/foot)은 payload·LIST_HEADER가 비어
-                // strip이 통째로 드롭한다(내부 그림째). 4B data + 정품 LIST_HEADER
-                // 템플릿을 채워 보존한다(paraCount는 실제 문단 수로 패치).
-                if (g.ctrl_id == *b"head" || g.ctrl_id == *b"foot")
-                    && g.data.is_empty()
-                    && g.raw_children.is_empty()
-                {
-                    g.data = vec![0, 0, 0, 0];
+                // hwpx 출신 머리말/꼬리말(head/foot)은 LIST_HEADER가 비어 strip이
+                // 통째로 드롭한다(내부 그림째). 정품 LIST_HEADER 템플릿을 채워 보존한다
+                // (paraCount는 실제 문단 수로 패치). data(적용쪽+id 8B)는 hwpx reader가
+                // 채우지만, 만일 비어 있으면 최소 4B로 대체해 드롭을 막는다.
+                if (g.ctrl_id == *b"head" || g.ctrl_id == *b"foot") && g.raw_children.is_empty() {
+                    if g.data.is_empty() {
+                        g.data = vec![0, 0, 0, 0];
+                    }
                     for list in &mut g.paragraph_lists {
                         if list.header_data.is_empty() {
                             let mut lh = hex_to_bytes(HEADER_LIST_HEADER_TEMPLATE);
@@ -508,7 +674,8 @@ fn synth_pictures_para(
                 for list in &mut g.paragraph_lists {
                     for lp in &mut list.paragraphs {
                         synth_pictures_para(
-                            lp, bin_names, assigned, next_id, inst, new_items, renames, warnings,
+                            lp, bin_names, bin_dims, assigned, next_id, inst, new_items, renames,
+                            warnings,
                         );
                     }
                 }
@@ -1493,8 +1660,27 @@ fn emit_table(
 ) -> RecordNode {
     let mut w = ByteWriter::new();
     w.write_bytes(b" lbt");
-    if table.common_data.is_empty() {
-        // hwpx/md 출신: 개체 공통 속성 합성 (표본 속성값 + 계산된 크기)
+    if !table.common_data.is_empty() {
+        // hwp5 출신: 원본 개체 공통 속성 그대로 보존.
+        w.write_bytes(&table.common_data);
+    } else if let Some(pl) = &table.placement {
+        // hwpx 출신: 배치 정보(<hp:pos>/<hp:sz>/<hp:outMargin>/zOrder)에서 합성.
+        // 과거에는 0x082A2210(글자처럼취급=꺼짐) 상수로 덮어써 인라인이어야 할 표가
+        // 떠 있는 개체가 되고 본문 흐름에서 빠져 한글이 재배치(겹침/빈 페이지)했다.
+        w.write_u32(pl.synth_attr());
+        w.write_i32(pl.vert_offset);
+        w.write_i32(pl.horz_offset);
+        w.write_i32(pl.width); // <hp:sz> — 병합 셀 합산보다 정확
+        w.write_i32(pl.height);
+        w.write_i32(pl.z_order);
+        for m in pl.out_margins {
+            w.write_u16(m);
+        }
+        // instance id: 고유한 비-0 값(z순서 기반). 개체 링크용이라 렌더 영향은 작다.
+        w.write_u32(0x5000_0000 | (pl.z_order as u32 & 0xffff));
+        w.write_i32(i32::from(pl.hold_anchor)); // @36: 앵커/개체 고정
+    } else {
+        // md 출신: 셀 크기로 계산한 떠 있는 표본값(기존 동작 유지).
         let mut col_w = vec![0i64; table.cols.max(1) as usize];
         let mut row_h = vec![0i64; table.rows.max(1) as usize];
         for cell in &table.cells {
@@ -1517,8 +1703,6 @@ fn emit_table(
         }
         w.write_u32(0); // instance id
         w.write_i32(0); // 쪽 나눔 방지
-    } else {
-        w.write_bytes(&table.common_data);
     }
 
     let mut tw = ByteWriter::new();
@@ -1626,11 +1810,12 @@ mod tests {
     use super::*;
 
     /// hwpx 출신 이미지의 합성 도형 레코드가 정품 5.1.x 구조여야 한다.
-    /// SHAPE_COMPONENT(196B, "$pic") → SHAPE_COMPONENT_PICTURE(82B, 5.0.3.4+
-    /// picture_effect 포함). 크기·BinItem ID 패치 확인.
+    /// SHAPE_COMPONENT(196B, "$pic") → SHAPE_COMPONENT_PICTURE(91B): 자르기는
+    /// 표시 크기가 아니라 원본 자연 크기여야 한다(부분 크롭 → 미표시 방지).
     #[test]
     fn 그림_extras_합성_구조() {
-        let extras = build_picture_extras(8760, 1260, 1);
+        // 표시 8760×1260, 자연 150000×61875.
+        let extras = build_picture_extras(8760, 1260, (150000, 61875), 1, 0x3010_0000);
         assert_eq!(extras.len(), 1, "SHAPE_COMPONENT 1개");
         let sc = &extras[0];
         assert_eq!(sc.tag, tag::SHAPE_COMPONENT);
@@ -1650,15 +1835,15 @@ mod tests {
         assert_eq!(pic.tag, tag::SHAPE_COMPONENT_PICTURE);
         assert_eq!(
             pic.data.len(),
-            82,
-            "PICTURE 82B (5.1.x: picture_effect 포함)"
+            91,
+            "PICTURE 91B (정품 5.1.x picture_effect)"
         );
         assert_eq!(
             u16::from_le_bytes(pic.data[71..73].try_into().unwrap()),
             1,
             "BinItem ID @71"
         );
-        // 꼭지점2 = (width, height)
+        // 꼭지점2 = 표시 크기 (width, height)
         assert_eq!(
             i32::from_le_bytes(pic.data[28..32].try_into().unwrap()),
             8760
@@ -1666,6 +1851,37 @@ mod tests {
         assert_eq!(
             i32::from_le_bytes(pic.data[32..36].try_into().unwrap()),
             1260
+        );
+        // 자르기 우/하 = 자연 크기 (표시 크기 아님!)
+        assert_eq!(
+            i32::from_le_bytes(pic.data[52..56].try_into().unwrap()),
+            150000,
+            "자르기 우 = 자연 폭"
+        );
+        assert_eq!(
+            i32::from_le_bytes(pic.data[56..60].try_into().unwrap()),
+            61875,
+            "자르기 하 = 자연 높이"
+        );
+        // instance_id @74 유니크
+        assert_eq!(
+            u32::from_le_bytes(pic.data[74..78].try_into().unwrap()),
+            0x3010_0000,
+            "instance_id @74"
+        );
+        // picture_effect @78: flags=0, 자연 폭@82, 자연 높이@86
+        assert_eq!(
+            u32::from_le_bytes(pic.data[78..82].try_into().unwrap()),
+            0,
+            "picture_effect flags=0"
+        );
+        assert_eq!(
+            i32::from_le_bytes(pic.data[82..86].try_into().unwrap()),
+            150000
+        );
+        assert_eq!(
+            i32::from_le_bytes(pic.data[86..90].try_into().unwrap()),
+            61875
         );
     }
 }
