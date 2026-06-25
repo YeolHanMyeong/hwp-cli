@@ -193,8 +193,8 @@ cargo fmt --check
 테스트는 hwp5의 바이트 동일 왕복(identity/roundtrip/synth), hwpx 의미 동등 왕복, IR JSON·markdown
 왕복, 편집/필드 보정, 렌더 레이아웃·표·diff 메트릭 등을 포함한다.
 
-`docs/`에 한글문서파일형식 5.0 공식 스펙 PDF·스펙 hwp 원본·렌더 기준 PNG가 있다 — 파서/렌더러 작업
-시 참고한다.
+HWP 5.0 포맷 스펙은 한컴 공식 [한글 문서 파일 형식 5.0](https://store.hancom.com/etc/hwpDownload.do)
+문서를 참고한다 — 저작권상 저장소에 동봉하지 않고 공식 배포처 링크만 둔다(`docs/README.md` 참고).
 
 **CI** (`.github/workflows/ci.yml`, GitHub Actions, Ubuntu): `fonts-noto-cjk` 설치 후
 `cargo fmt --check` → `cargo clippy --all-targets -- -D warnings` → `cargo test`를 실행한다.
@@ -206,7 +206,23 @@ cargo fmt --check
 - PR 전 로컬에서 CI와 동일한 게이트를 통과시킨다: `cargo fmt --check`,
   `cargo clippy --all-targets -- -D warnings`, `cargo test`.
 - 새 포맷 기능은 가능하면 왕복/골든 테스트를 함께 추가한다.
-- 스펙 참고 자료는 `docs/`의 한글문서파일형식 5.0 PDF·스펙 hwp 원본을 본다.
+- 스펙 참고 자료는 한컴 공식 [한글 문서 파일 형식 5.0](https://store.hancom.com/etc/hwpDownload.do)
+  문서를 본다(저장소에 동봉하지 않는다).
+
+## 고지 (Acknowledgments)
+
+본 제품은 한글과컴퓨터의 한글 문서 파일(`.hwp`) 공개 문서를 참고하여 개발하였습니다.
+
+> This product was developed with reference to Hancom's HWP document file format open
+> specification — [한글 문서 파일 형식 5.0 / HWP Document File Formats 5.0](https://store.hancom.com/etc/hwpDownload.do)
+> (© (주)한글과컴퓨터).
+
+한컴 공개 문서의 저작권은 (주)한글과컴퓨터에 있다. 한컴 공개 문서 라이선스는 자유로운 열람·복사·
+배포를 허용하되 **수정되지 않은 원본/복사본**으로 제한하므로, 이 저장소는 스펙 문서(및 그 추출본·
+페이지 캡처 등 파생물)를 **동봉하지 않고** 공식 배포처 링크만 제공한다(`docs/README.md` 참고).
+
+테스트 픽스처 일부는 [hahnlee/hwp-rs](https://github.com/hahnlee/hwp-rs)(Apache-2.0)에서 가져왔다 —
+`fixtures/README.md`와 루트 `NOTICE` 참고.
 
 ## 라이선스
 

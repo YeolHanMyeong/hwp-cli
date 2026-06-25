@@ -1,0 +1,30 @@
+hwp-cli
+Copyright (c) 2026 hwp-cli contributors
+
+This product is dual-licensed under MIT OR Apache-2.0.
+See LICENSE-MIT and LICENSE-APACHE.
+
+================================================================================
+Hancom HWP 5.0 specification attribution (한컴 공개 문서 고지)
+================================================================================
+
+본 제품은 한글과컴퓨터의 한글 문서 파일(.hwp) 공개 문서를 참고하여 개발하였습니다.
+
+This product was developed with reference to Hancom's HWP document file format
+open specification ("한글 문서 파일 형식 5.0 / HWP Document File Formats 5.0",
+(c) (주)한글과컴퓨터 / Hancom Inc.), available at:
+
+    https://store.hancom.com/etc/hwpDownload.do
+
+The specification document itself is the copyright of Hancom Inc. and is NOT
+redistributed in this repository; only a link to the official source is provided.
+Code comments cite the specification by section number (fair-use reference).
+
+================================================================================
+Bundled third-party test fixtures
+================================================================================
+
+Some HWP test fixtures under fixtures/hwp5/ — hello_world.hwp, bookmark.hwp,
+color_fill.hwp, outline.hwp — are taken from the hahnlee/hwp-rs project
+(https://github.com/hahnlee/hwp-rs), licensed under Apache-2.0.
+See fixtures/README.md.

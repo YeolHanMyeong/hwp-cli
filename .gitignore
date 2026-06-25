@@ -8,3 +8,10 @@
 
 # 골든 기준 이미지는 커밋하지 않음 (레시피 fixtures/golden/README.md만 커밋)
 /fixtures/golden/*.png
+
+# HWP 5.0 스펙 문서는 한컴 저작물 — 저장소에 동봉하지 않음(공식 배포처 링크만, docs/README.md 참고).
+# 로컬 참고용으로 docs/에 두더라도 추적하지 않는다.
+/docs/*.pdf
+/docs/*.hwp
+/docs/*.png
+/docs/spec.txt

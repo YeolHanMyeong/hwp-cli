@@ -1,5 +1,8 @@
 //! HWP 5.0 바이너리 포맷 reader/writer.
 //!
+//! 본 제품은 한글과컴퓨터의 한글 문서 파일(.hwp) 공개 문서(한글 문서 파일 형식 5.0,
+//! <https://store.hancom.com/etc/hwpDownload.do>, © (주)한글과컴퓨터)를 참고하여 개발하였습니다.
+//!
 //! HWP 5.0 파일 = MS CFB(Compound File Binary) 컨테이너:
 //! - `FileHeader`        — 256바이트 고정 헤더 (시그니처/버전/속성 플래그)
 //! - `DocInfo`           — 문서 정보 레코드 스트림 (보통 raw deflate 압축)
