@@ -1,8 +1,8 @@
 //! IR → PNG/SVG/PDF 페이지 렌더러.
 //!
 //! 파이프라인: IR → Layout([`layout`] — LineSegLayouter) →
-//! [`display::DisplayList`] → 백엔드([`png`] — tiny-skia).
-//! SVG(M5)/PDF(M7) 백엔드는 이후 마일스톤에서 추가한다.
+//! [`display::DisplayList`] → 백엔드([`png`] tiny-skia / [`svg`] / [`pdf`]).
+//! 세 백엔드 모두 같은 DisplayList를 소비한다.
 //!
 //! v1 범위: lineseg 기반 텍스트 렌더링 (굵게/기울임/크기/색/자간/장평,
 //! 가운데/오른쪽 정렬). 표·이미지·장식은 M5.
@@ -14,6 +14,7 @@ pub mod fonts;
 pub mod gso;
 pub mod layout;
 pub mod lineseg;
+pub mod pdf;
 pub mod png;
 pub mod shape;
 pub mod svg;
@@ -83,4 +84,39 @@ pub fn render_document_svg(doc: &Document, opts: &RenderOptions) -> SvgOutput {
         pages: svg::render_svg(&list),
         report,
     }
+}
+
+pub struct PdfOutput {
+    /// 단일 멀티페이지 PDF 바이트
+    pub data: Vec<u8>,
+    /// 경고 + 폰트 해석 리포트
+    pub report: Vec<String>,
+}
+
+/// 문서를 단일 멀티페이지 PDF로 렌더링한다 (폰트 임베드 + 검색 가능 텍스트).
+/// `pages`는 1-기반 페이지 번호 목록; `None`이면 전체 페이지.
+pub fn render_document_pdf(
+    doc: &Document,
+    opts: &RenderOptions,
+    pages: Option<&[usize]>,
+) -> Result<PdfOutput, RenderError> {
+    let (mut list, mut report) = build_display_list(doc, opts);
+    if let Some(sel) = pages {
+        let mut taken: Vec<Option<display::PageList>> =
+            list.pages.into_iter().map(Some).collect();
+        let mut picked = Vec::with_capacity(sel.len());
+        for &n in sel {
+            if let Some(page) = taken.get_mut(n.wrapping_sub(1)).and_then(Option::take) {
+                picked.push(page);
+            }
+        }
+        list = display::DisplayList { pages: picked };
+    }
+    let data = pdf::render_pdf(&list, &mut report)?;
+    Ok(PdfOutput { data, report })
+}
+
+/// 렌더 시 페이지 수 (PDF 페이지 선택 검증용).
+pub fn count_pages(doc: &Document, opts: &RenderOptions) -> usize {
+    build_display_list(doc, opts).0.pages.len()
 }

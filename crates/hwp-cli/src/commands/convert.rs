@@ -16,6 +16,24 @@ pub fn run(
     preserve_layout: bool,
     embed_bin: bool,
 ) -> anyhow::Result<()> {
+    // PDF는 문서 포맷 변환이 아니라 렌더 출력 — render 경로에 위임한다
+    // (사용자의 "변환" 프레이밍 대응: `hwp convert in.hwp -o out.pdf`).
+    if to.is_none()
+        && output
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+    {
+        return crate::commands::render::run(
+            input,
+            output,
+            "all",
+            96.0,
+            Some(crate::RenderFormat::Pdf),
+            Vec::new(),
+        );
+    }
+
     let target = match to {
         Some(t) => t,
         None => infer_format(output)?,

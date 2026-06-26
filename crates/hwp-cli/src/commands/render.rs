@@ -1,4 +1,6 @@
-//! `hwp render` — 페이지 렌더링 (PNG/SVG).
+//! `hwp render` — 페이지 렌더링 (PNG/SVG/PDF).
+//!
+//! PNG/SVG는 페이지별 파일(out-1.png …)로, PDF는 단일 멀티페이지 파일로 쓴다.
 
 use std::path::{Path, PathBuf};
 
@@ -51,6 +53,20 @@ pub fn run(
                 eprintln!("저장: {}", path.display());
             }
         }
+        RenderFormat::Pdf => {
+            // PNG/SVG와 달리 PDF는 단일 멀티페이지 파일이다 (페이지별 분리 없음).
+            let total = hwp_render::count_pages(&doc, &opts);
+            let selected = parse_pages(pages_spec, total)?;
+            let result = hwp_render::render_document_pdf(&doc, &opts, Some(&selected))?;
+            report(&result.report);
+            std::fs::write(output, &result.data)?;
+            eprintln!(
+                "저장: {} ({}쪽, {} bytes)",
+                output.display(),
+                selected.len(),
+                result.data.len()
+            );
+        }
     }
     Ok(())
 }
@@ -69,6 +85,7 @@ fn infer_format(output: &Path) -> RenderFormat {
         .as_deref()
     {
         Some("svg") => RenderFormat::Svg,
+        Some("pdf") => RenderFormat::Pdf,
         _ => RenderFormat::Png,
     }
 }

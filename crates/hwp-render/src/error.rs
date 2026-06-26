@@ -9,4 +9,7 @@ pub enum RenderError {
 
     #[error("PNG 인코딩 실패: {0}")]
     Encode(String),
+
+    #[error("PDF 생성 실패: {0}")]
+    Pdf(String),
 }

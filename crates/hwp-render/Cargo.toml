@@ -13,6 +13,9 @@ rustybuzz = { workspace = true }
 fontdb = { workspace = true }
 image = { workspace = true }
 thiserror = { workspace = true }
+flate2 = { workspace = true }
+pdf-writer = { workspace = true }
+subsetter = { workspace = true }
 
 [dev-dependencies]
 hwp5 = { workspace = true }

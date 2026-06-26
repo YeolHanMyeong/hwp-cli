@@ -171,6 +171,7 @@ enum ConvertFormat {
 enum RenderFormat {
     Png,
     Svg,
+    Pdf,
 }
 
 fn main() -> anyhow::Result<()> {
