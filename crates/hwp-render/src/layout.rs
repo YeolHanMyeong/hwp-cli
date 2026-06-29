@@ -627,9 +627,44 @@ fn layout_table(
                     });
                 }
             }
+
+            // 4) 대각선/역대각선 — slash/backSlash 비트가 켜졌을 때만(병합 셀은 전체 영역 가로지름).
+            //    diagonal 선은 스타일/색만 제공하므로 방향 비트가 없으면 그리지 않는다.
+            let (slash, backslash) = diagonal_dirs(bf.attr);
+            if (slash || backslash) && bf.diagonal.is_visible() {
+                let dw = bf.diagonal.width_mm() * 72.0 / 25.4;
+                if backslash {
+                    page.items.push(Item::Line {
+                        x1: cx,
+                        y1: cy,
+                        x2: cx + cw,
+                        y2: cy + ch,
+                        color: bf.diagonal.color,
+                        width: dw,
+                    });
+                }
+                if slash {
+                    page.items.push(Item::Line {
+                        x1: cx,
+                        y1: cy + ch,
+                        x2: cx + cw,
+                        y2: cy,
+                        color: bf.diagonal.color,
+                        width: dw,
+                    });
+                }
+            }
         }
     }
     row_h.iter().sum()
+}
+
+/// BORDER_FILL 속성 비트 → (대각선 `/`, 역대각선 `\`) 그릴지.
+/// slash=bit2~4, backSlash=bit5~7. 둘 다 0이면 대각선 없음.
+fn diagonal_dirs(attr: u16) -> (bool, bool) {
+    let slash = (attr >> 2) & 0x7 != 0;
+    let backslash = (attr >> 5) & 0x7 != 0;
+    (slash, backslash)
 }
 
 /// 상자(셀) 안 문단들을 배치한다. origin은 텍스트 영역 좌상단(pt).
@@ -1006,6 +1041,25 @@ fn place_wrapped(
         }
     }
     y
+}
+
+#[cfg(test)]
+mod diagonal_tests {
+    use super::diagonal_dirs;
+
+    #[test]
+    fn 대각선_방향_비트() {
+        // 둘 다 0 → 대각선 없음.
+        assert_eq!(diagonal_dirs(0), (false, false));
+        // 3D/그림자(bit0,1)만 켜져도 대각선 아님.
+        assert_eq!(diagonal_dirs(0b11), (false, false));
+        // slash(bit2~4) → `/`.
+        assert_eq!(diagonal_dirs(0x4), (true, false));
+        // backSlash(bit5~7) → `\`.
+        assert_eq!(diagonal_dirs(0x20), (false, true));
+        // 둘 다(X자).
+        assert_eq!(diagonal_dirs(0x4 | 0x20), (true, true));
+    }
 }
 
 #[cfg(test)]

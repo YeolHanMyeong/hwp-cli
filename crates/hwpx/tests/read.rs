@@ -287,3 +287,41 @@ fn 쪽번호_감추기_컨트롤_매핑() {
         }
     }
 }
+
+/// borderFill의 `<hh:slash>`/`<hh:backSlash>` type≠NONE을 대각선 방향 비트(attr)로
+/// 합성해야 한다(렌더러 diagonal_dirs: slash=bit2, backSlash=bit5).
+#[test]
+fn 테두리채움_대각선_방향_파싱() {
+    let xml = r##"<?xml version="1.0"?>
+<hh:head xmlns:hh="http://www.hancom.co.kr/hwpml/2011/head">
+  <hh:refList>
+    <hh:borderFills itemCnt="3">
+      <hh:borderFill id="1" threeD="0" shadow="0">
+        <hh:slash type="NONE"/><hh:backSlash type="NONE"/>
+        <hh:diagonal type="SOLID" width="0.1 mm" color="#000000"/>
+      </hh:borderFill>
+      <hh:borderFill id="2" threeD="0" shadow="0">
+        <hh:slash type="NONE"/><hh:backSlash type="SOLID"/>
+        <hh:diagonal type="SOLID" width="0.1 mm" color="#FF0000"/>
+      </hh:borderFill>
+      <hh:borderFill id="3" threeD="0" shadow="0">
+        <hh:slash type="SOLID"/><hh:backSlash type="SOLID"/>
+        <hh:diagonal type="SOLID" width="0.1 mm" color="#0000FF"/>
+      </hh:borderFill>
+    </hh:borderFills>
+  </hh:refList>
+</hh:head>"##;
+    let (header, _) = hwpx::read::header::parse_header(xml).unwrap();
+    let bfs = &header.border_fills;
+    assert_eq!(bfs.len(), 3);
+    // id=1: 대각선 라인은 있으나 방향 NONE → 방향 비트 0 (그리지 않음).
+    assert_eq!(bfs[0].attr & 0x4, 0, "slash off");
+    assert_eq!(bfs[0].attr & 0x20, 0, "backSlash off");
+    assert!(bfs[0].diagonal.is_visible(), "대각선 스타일은 SOLID");
+    // id=2: backSlash만.
+    assert_eq!(bfs[1].attr & 0x4, 0);
+    assert_ne!(bfs[1].attr & 0x20, 0, "backSlash on");
+    // id=3: 둘 다(X).
+    assert_ne!(bfs[2].attr & 0x4, 0, "slash on");
+    assert_ne!(bfs[2].attr & 0x20, 0, "backSlash on");
+}

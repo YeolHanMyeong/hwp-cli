@@ -349,6 +349,19 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
                                 .push(current_border.take().expect("방금 생성"));
                         }
                     }
+                    // 대각선 방향: <hh:slash>/<hh:backSlash> type≠NONE이면 hwp5 attr 비트로 합성
+                    // (slash=bit2, backSlash=bit5 — 렌더러 diagonal_dirs와 동일 인코딩).
+                    b"slash" | b"backSlash" => {
+                        if let Some(bf) = &mut current_border
+                            && attr(e, "type").is_some_and(|t| !t.eq_ignore_ascii_case("NONE"))
+                        {
+                            bf.attr |= if e.local_name().as_ref() == b"slash" {
+                                0x4
+                            } else {
+                                0x20
+                            };
+                        }
+                    }
                     b"leftBorder" | b"rightBorder" | b"topBorder" | b"bottomBorder" => {
                         if let Some(bf) = &mut current_border {
                             let idx = match e.local_name().as_ref() {
