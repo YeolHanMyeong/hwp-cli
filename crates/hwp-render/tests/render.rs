@@ -224,3 +224,38 @@ fn 글상자_연결_다단_배치() {
         .any(|(x, y)| (280.0..330.0).contains(x) && (200.0..800.0).contains(y));
     assert!(right_col, "오른쪽 단(x≈300pt)에 본문이 없음 — 다단 글상자 미배치");
 }
+
+/// 그리기 개체(도형) 렌더: annual_report의 선/사각형/타원/호/다각형이 Item::Path로
+/// 생성되고, 미지원 컨트롤로 생략되지 않아야 한다. 파이(링) 페이지엔 곡선(CubicTo)
+/// 경로(타원/호)가 있어야 한다. 폰트 무관 — 배치는 도형 기하·행렬이 좌우.
+#[test]
+fn 도형_렌더_경로_생성() {
+    use hwp_render::display::{Item, PathCmd};
+    let Some(path) = fixture_or_skip("hwp5/annual_report.hwp") else {
+        return;
+    };
+    let doc = hwp5::read_document(&path).unwrap().document;
+    let mut store = hwp_render::FontStore::new();
+    let mut warns = Vec::new();
+    let list = hwp_render::layout::layout_document(&doc, &mut store, &mut warns);
+
+    let paths = list
+        .pages
+        .iter()
+        .flat_map(|p| &p.items)
+        .filter(|i| matches!(i, Item::Path { .. }))
+        .count();
+    // 보이지 않는 글상자 프레임은 제외되므로 가시 도형(선 43·타원·호·다각형 등)만 ~80개.
+    assert!(paths > 50, "도형 경로가 너무 적음: {paths} (선·사각형·타원 등 미렌더)");
+
+    // 파이(링) 페이지: 타원/호 유래 곡선(CubicTo) 경로 존재.
+    let has_curve = list.pages.iter().flat_map(|p| &p.items).any(|i| {
+        matches!(i, Item::Path { commands, .. }
+            if commands.iter().any(|c| matches!(c, PathCmd::CubicTo(..))))
+    });
+    assert!(has_curve, "타원/호 유래 곡선 경로가 없음 (파이/원 미렌더)");
+
+    // 도형이 더 이상 "미지원 컨트롤"로 집계되지 않아야 한다.
+    let skipped = warns.iter().filter(|w| w.contains("미지원 컨트롤")).count();
+    assert_eq!(skipped, 0, "아직 미지원으로 집계되는 도형이 있음: {warns:?}");
+}

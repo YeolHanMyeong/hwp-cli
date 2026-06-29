@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 
 use rustybuzz::ttf_parser;
 
-use crate::display::{DisplayList, Item, PageList};
+use crate::display::{DisplayList, Item, PageList, PathCmd};
 
 pub fn render_svg(list: &DisplayList) -> Vec<String> {
     list.pages.iter().map(render_page).collect()
@@ -102,6 +102,35 @@ fn render_page(page: &PageList) -> String {
                     }
                     pen_x += glyph.x_advance;
                 }
+            }
+            Item::Path {
+                commands,
+                fill,
+                stroke,
+            } => {
+                let mut d = String::new();
+                for cmd in commands {
+                    match *cmd {
+                        PathCmd::MoveTo(x, y) => {
+                            let _ = write!(d, "M{x:.2} {y:.2}");
+                        }
+                        PathCmd::LineTo(x, y) => {
+                            let _ = write!(d, "L{x:.2} {y:.2}");
+                        }
+                        PathCmd::CubicTo(a, b, c, e, f, g) => {
+                            let _ = write!(d, "C{a:.2} {b:.2} {c:.2} {e:.2} {f:.2} {g:.2}");
+                        }
+                        PathCmd::Close => d.push('Z'),
+                    }
+                }
+                let fill_attr = fill.map_or_else(|| "none".to_string(), hex_color);
+                let stroke_attr = match stroke {
+                    Some((c, w)) => {
+                        format!(r#" stroke="{}" stroke-width="{:.2}""#, hex_color(*c), w)
+                    }
+                    None => String::new(),
+                };
+                let _ = writeln!(out, r#"<path d="{d}" fill="{fill_attr}"{stroke_attr}/>"#);
             }
         }
     }

@@ -22,7 +22,7 @@ use pdf_writer::{Content, Filter, Finish, Name, Pdf, Rect, Ref, Str};
 use rustybuzz::ttf_parser;
 use subsetter::{GlyphRemapper, subset};
 
-use crate::display::{DisplayList, Item};
+use crate::display::{DisplayList, Item, PathCmd};
 use crate::error::RenderError;
 use crate::fonts::LoadedFont;
 use crate::shape::ShapedRun;
@@ -179,6 +179,53 @@ pub fn render_pdf(list: &DisplayList, warnings: &mut Vec<String>) -> Result<Vec<
                 Item::Glyphs { x, y, run } => {
                     if let Some(&idx) = font_index.get(&font_key(&run.font)) {
                         write_glyph_run(&mut content, &fonts[idx], *x, *y, h, run);
+                    }
+                }
+                Item::Path {
+                    commands,
+                    fill,
+                    stroke,
+                } => {
+                    // y 뒤집기: PDF는 y-위 (h - y).
+                    for cmd in commands {
+                        match *cmd {
+                            PathCmd::MoveTo(x, y) => {
+                                content.move_to(x, h - y);
+                            }
+                            PathCmd::LineTo(x, y) => {
+                                content.line_to(x, h - y);
+                            }
+                            PathCmd::CubicTo(a, b, c, e, f, g) => {
+                                content.cubic_to(a, h - b, c, h - e, f, h - g);
+                            }
+                            PathCmd::Close => {
+                                content.close_path();
+                            }
+                        }
+                    }
+                    if let Some((sc, w)) = stroke {
+                        let (r, g, b) = colorref_rgb(*sc);
+                        content.set_stroke_rgb(r, g, b);
+                        content.set_line_width(w.max(0.1));
+                    }
+                    match (fill, stroke) {
+                        (Some(fc), Some(_)) => {
+                            let (r, g, b) = colorref_rgb(*fc);
+                            content.set_fill_rgb(r, g, b);
+                            content.fill_nonzero_and_stroke();
+                        }
+                        (Some(fc), None) => {
+                            let (r, g, b) = colorref_rgb(*fc);
+                            content.set_fill_rgb(r, g, b);
+                            content.fill_nonzero();
+                        }
+                        (None, Some(_)) => {
+                            content.stroke();
+                        }
+                        // 채움·선 없음: 경로를 칠하지 않고 비운다(n) — 누적 방지.
+                        (None, None) => {
+                            content.end_path();
+                        }
                     }
                 }
             }

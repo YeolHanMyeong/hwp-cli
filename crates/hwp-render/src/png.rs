@@ -6,7 +6,7 @@
 use rustybuzz::ttf_parser;
 use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
-use crate::display::{DisplayList, Item, PageList};
+use crate::display::{DisplayList, Item, PageList, PathCmd};
 use crate::error::RenderError;
 
 /// 기울임 시뮬레이션 각도의 탄젠트 (≈12°).
@@ -152,6 +152,42 @@ fn render_page(page: &PageList, dpi: f32) -> Result<Pixmap, RenderError> {
                         }
                     }
                     pen_x += glyph.x_advance;
+                }
+            }
+            Item::Path {
+                commands,
+                fill,
+                stroke,
+            } => {
+                let mut pb = PathBuilder::new();
+                for cmd in commands {
+                    match *cmd {
+                        PathCmd::MoveTo(x, y) => pb.move_to(x, y),
+                        PathCmd::LineTo(x, y) => pb.line_to(x, y),
+                        PathCmd::CubicTo(a, b, c, d, e, f) => pb.cubic_to(a, b, c, d, e, f),
+                        PathCmd::Close => pb.close(),
+                    }
+                }
+                if let Some(path) = pb.finish() {
+                    let t = Transform::from_scale(px_scale, px_scale);
+                    if let Some(fc) = fill {
+                        let (r, g, b) = colorref_rgb(*fc);
+                        let mut paint = Paint::default();
+                        paint.set_color_rgba8(r, g, b, 255);
+                        paint.anti_alias = true;
+                        pixmap.fill_path(&path, &paint, FillRule::Winding, t, None);
+                    }
+                    if let Some((sc, w)) = stroke {
+                        let (r, g, b) = colorref_rgb(*sc);
+                        let mut paint = Paint::default();
+                        paint.set_color_rgba8(r, g, b, 255);
+                        paint.anti_alias = true;
+                        let stroke = Stroke {
+                            width: w.max(0.05),
+                            ..Stroke::default()
+                        };
+                        pixmap.stroke_path(&path, &paint, &stroke, t, None);
+                    }
                 }
             }
         }

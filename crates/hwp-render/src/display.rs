@@ -45,4 +45,21 @@ pub enum Item {
         h: f32,
         data: Arc<Vec<u8>>,
     },
+    /// 임의 경로 — 그리기 개체(선/사각형/타원/호/다각형). 좌표 pt, 페이지 공간.
+    Path {
+        commands: Vec<PathCmd>,
+        /// 채움색 COLORREF. None=채움 없음.
+        fill: Option<u32>,
+        /// (선색 COLORREF, 굵기 pt). None=선 없음.
+        stroke: Option<(u32, f32)>,
+    },
+}
+
+/// 경로 명령 (좌표 pt, 페이지 공간).
+#[derive(Debug, Clone, Copy)]
+pub enum PathCmd {
+    MoveTo(f32, f32),
+    LineTo(f32, f32),
+    CubicTo(f32, f32, f32, f32, f32, f32),
+    Close,
 }

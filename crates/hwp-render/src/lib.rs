@@ -17,6 +17,7 @@ pub mod lineseg;
 pub mod pdf;
 pub mod png;
 pub mod shape;
+pub mod shape_draw;
 pub mod svg;
 
 use hwp_model::Document;

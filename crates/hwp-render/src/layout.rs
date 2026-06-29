@@ -154,9 +154,11 @@ pub fn layout_document(
                         c,
                         Control::SectionDef(_) | Control::Table(_) | Control::Picture(_)
                     ) || [*b"cold", *b"head", *b"foot"].contains(&c.ctrl_id())
-                        // 글상자(텍스트 있는 gso)는 이제 렌더한다 — 미지원에서 제외.
+                        // 글상자(텍스트) + 도형(선/사각형/타원/호/다각형)은 렌더한다.
                         || matches!(c, Control::Generic(g)
-                            if g.ctrl_id == *b"gso " && !g.paragraph_lists.is_empty());
+                            if g.ctrl_id == *b"gso "
+                                && (!g.paragraph_lists.is_empty()
+                                    || crate::shape_draw::has_shape(&g.raw_children)));
                     !rendered
                 })
                 .count();
@@ -439,6 +441,14 @@ fn layout_para_objects(
                     )
                 };
 
+                // 글상자 자체 테두리/배경(사각형 프레임)을 텍스트 뒤에 먼저 그린다.
+                let frame_origin = if inline {
+                    (bx as f64 * 100.0, by as f64 * 100.0)
+                } else {
+                    (b.horz_offset as f64, b.vert_offset as f64)
+                };
+                crate::shape_draw::draw_gso_shapes(g, frame_origin, page, warnings);
+
                 // 다단/연결 글상자: 내부 문단의 v_pos 리셋(단 나누기)으로 단을 분할한다.
                 // 단 0은 이 박스, 단 1+는 연결 글상자(같은 크기·세로위치, 더 오른쪽
                 // 떠 있는 gso 박스) 위치로 흐른다. 없으면 가로로 한 단 진행(근사).
@@ -478,6 +488,22 @@ fn layout_para_objects(
                     bottom = bottom.max(by + used);
                     object_y += used;
                 }
+            }
+            // 순수 도형 (텍스트 없는 gso): 선/사각형/타원/호/다각형.
+            Control::Generic(g)
+                if g.ctrl_id == *b"gso "
+                    && g.paragraph_lists.is_empty()
+                    && crate::shape_draw::has_shape(&g.raw_children) =>
+            {
+                let Some(b) = crate::gso::parse_gso_box(&g.data) else {
+                    continue;
+                };
+                let origin = if b.treat_as_char() {
+                    (x as f64 * 100.0, object_y as f64 * 100.0)
+                } else {
+                    (b.horz_offset as f64, b.vert_offset as f64)
+                };
+                crate::shape_draw::draw_gso_shapes(g, origin, page, warnings);
             }
             _ => {}
         }
