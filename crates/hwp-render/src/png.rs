@@ -196,13 +196,17 @@ fn render_page(page: &PageList, dpi: f32) -> Result<Pixmap, RenderError> {
                         }
                         pixmap.fill_path(&path, &paint, FillRule::Winding, t, None);
                     }
-                    if let Some((sc, w)) = stroke {
-                        let (r, g, b) = colorref_rgb(*sc);
+                    if let Some(s) = stroke {
+                        let (r, g, b) = colorref_rgb(s.color);
                         let mut paint = Paint::default();
                         paint.set_color_rgba8(r, g, b, 255);
                         paint.anti_alias = true;
+                        let dash = (s.dash.len() >= 2)
+                            .then(|| tiny_skia::StrokeDash::new(s.dash.clone(), 0.0))
+                            .flatten();
                         let stroke = Stroke {
-                            width: w.max(0.05),
+                            width: s.width.max(0.05),
+                            dash,
                             ..Stroke::default()
                         };
                         pixmap.stroke_path(&path, &paint, &stroke, t, None);

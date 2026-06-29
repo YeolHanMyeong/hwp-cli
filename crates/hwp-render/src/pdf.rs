@@ -22,7 +22,7 @@ use pdf_writer::{Content, Filter, Finish, Name, Pdf, Rect, Ref, Str};
 use rustybuzz::ttf_parser;
 use subsetter::{GlyphRemapper, subset};
 
-use crate::display::{DisplayList, Fill, Gradient, Item, PathCmd, path_bbox};
+use crate::display::{DisplayList, Fill, Gradient, Item, PathCmd, Stroke, path_bbox};
 use crate::error::RenderError;
 use crate::fonts::LoadedFont;
 use crate::shape::ShapedRun;
@@ -186,6 +186,7 @@ pub fn render_pdf(list: &DisplayList, warnings: &mut Vec<String>) -> Result<Vec<
                     fill,
                     stroke,
                 } => {
+                    let dashed = stroke.as_ref().is_some_and(|s| s.dash.len() >= 2);
                     // 그러데이션 채움: 경로로 클립한 뒤 색 띠/원으로 채운다(실제 그러데이션).
                     if let Some(Fill::Gradient(grad)) = fill {
                         content.save_state();
@@ -195,19 +196,15 @@ pub fn render_pdf(list: &DisplayList, warnings: &mut Vec<String>) -> Result<Vec<
                         pdf_gradient_bands(&mut content, grad, commands, h);
                         content.restore_state();
                         // 테두리(선)는 별도로 다시 그린다.
-                        if let Some((sc, w)) = stroke {
-                            let (r, g, b) = colorref_rgb(*sc);
-                            content.set_stroke_rgb(r, g, b);
-                            content.set_line_width(w.max(0.1));
+                        if let Some(s) = stroke {
+                            apply_stroke(&mut content, s);
                             pdf_emit_path(&mut content, commands, h);
                             content.stroke();
                         }
                     } else {
                         pdf_emit_path(&mut content, commands, h);
-                        if let Some((sc, w)) = stroke {
-                            let (r, g, b) = colorref_rgb(*sc);
-                            content.set_stroke_rgb(r, g, b);
-                            content.set_line_width(w.max(0.1));
+                        if let Some(s) = stroke {
+                            apply_stroke(&mut content, s);
                         }
                         let solid = match fill {
                             Some(Fill::Solid(c)) => Some(*c),
@@ -232,6 +229,10 @@ pub fn render_pdf(list: &DisplayList, warnings: &mut Vec<String>) -> Result<Vec<
                                 content.end_path();
                             }
                         }
+                    }
+                    // 점선 상태가 이후 항목(표 테두리 등)으로 새지 않도록 실선 복원.
+                    if dashed {
+                        content.set_dash_pattern([], 0.0);
                     }
                 }
             }
@@ -530,6 +531,16 @@ fn subset_tag(mut i: usize) -> String {
         i /= 26;
     }
     s
+}
+
+/// 선 스타일(색·굵기·점선)을 콘텐츠 상태에 적용한다.
+fn apply_stroke(content: &mut Content, s: &Stroke) {
+    let (r, g, b) = colorref_rgb(s.color);
+    content.set_stroke_rgb(r, g, b);
+    content.set_line_width(s.width.max(0.1));
+    if s.dash.len() >= 2 {
+        content.set_dash_pattern(s.dash.iter().copied(), 0.0);
+    }
 }
 
 /// 경로 명령을 PDF 콘텐츠로(y 뒤집기 h-y).

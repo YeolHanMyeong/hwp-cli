@@ -245,6 +245,15 @@ pub struct ShapeGeom {
     /// 둥근 사각형 모서리 곡률(%, 0=직각). Rect에만 의미.
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub round_ratio: u8,
+    /// 테두리 선 종류: 0=실선, 1=파선, 2=점선, 3=일점쇄선, 4=이점쇄선, 5=긴파선.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub border_style: u8,
+    /// 선 시작 화살촉: 0=없음, 그 외=화살촉. Line에만 의미.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub arrow_start: u8,
+    /// 선 끝 화살촉: 0=없음, 그 외=화살촉. Line에만 의미.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub arrow_end: u8,
 }
 
 fn is_zero_u8(v: &u8) -> bool {

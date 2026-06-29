@@ -135,8 +135,19 @@ fn render_page(page: &PageList) -> String {
                     }
                 };
                 let stroke_attr = match stroke {
-                    Some((c, w)) => {
-                        format!(r#" stroke="{}" stroke-width="{:.2}""#, hex_color(*c), w)
+                    Some(s) => {
+                        let dash = if s.dash.len() >= 2 {
+                            let arr: Vec<String> =
+                                s.dash.iter().map(|v| format!("{v:.2}")).collect();
+                            format!(r#" stroke-dasharray="{}""#, arr.join(","))
+                        } else {
+                            String::new()
+                        };
+                        format!(
+                            r#" stroke="{}" stroke-width="{:.2}"{dash}"#,
+                            hex_color(s.color),
+                            s.width
+                        )
                     }
                     None => String::new(),
                 };

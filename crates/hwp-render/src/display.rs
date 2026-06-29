@@ -50,9 +50,31 @@ pub enum Item {
         commands: Vec<PathCmd>,
         /// 채움 (단색/그러데이션). None=채움 없음. (이미지 채움은 별도 Item::Image로 emit.)
         fill: Option<Fill>,
-        /// (선색 COLORREF, 굵기 pt). None=선 없음.
-        stroke: Option<(u32, f32)>,
+        /// 선 스타일(색·굵기·점선). None=선 없음.
+        stroke: Option<Stroke>,
     },
+}
+
+/// 선 스타일 — 색, 굵기(pt), 점선 패턴.
+#[derive(Debug, Clone)]
+pub struct Stroke {
+    /// 선색 COLORREF(0x00BBGGRR).
+    pub color: u32,
+    /// 굵기 pt.
+    pub width: f32,
+    /// 점선 패턴(on, off, …) pt. 빈 벡터=실선.
+    pub dash: Vec<f32>,
+}
+
+impl Stroke {
+    /// 실선.
+    pub fn solid(color: u32, width: f32) -> Self {
+        Self {
+            color,
+            width,
+            dash: Vec::new(),
+        }
+    }
 }
 
 /// 경로 명령 (좌표 pt, 페이지 공간).

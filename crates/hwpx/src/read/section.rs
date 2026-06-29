@@ -818,6 +818,9 @@ fn collect_shape(
     let mut border_width = 0i32;
     let mut points: Vec<(i32, i32)> = Vec::new();
     let mut fill_gradient: Option<GradientSpec> = None;
+    let mut border_style = 0u8;
+    let mut arrow_start = 0u8;
+    let mut arrow_end = 0u8;
     let mut read_attrs = |e: &BytesStart<'_>| match e.local_name().as_ref() {
         b"pos" => {
             x = attr_offset_i32(e, "horzOffset").unwrap_or(x);
@@ -832,6 +835,15 @@ fn collect_shape(
                 border_color = parse_color(&c);
             }
             border_width = attr_i32(e, "width").unwrap_or(border_width);
+            if let Some(st) = attr(e, "style") {
+                border_style = line_style_code(&st);
+            }
+            if let Some(hs) = attr(e, "headStyle") {
+                arrow_start = arrow_code(&hs);
+            }
+            if let Some(ts) = attr(e, "tailStyle") {
+                arrow_end = arrow_code(&ts);
+            }
         }
         b"winBrush" => {
             if let Some(c) = attr(e, "faceColor") {
@@ -903,9 +915,33 @@ fn collect_shape(
             border_color,
             border_width,
             round_ratio,
+            border_style,
+            arrow_start,
+            arrow_end,
         });
     }
     Ok(())
+}
+
+/// hp:lineShape `style` → 선 종류 코드(0=실선,1=파선,2=점선,3=일점쇄선,4=이점쇄선,5=긴파선).
+fn line_style_code(s: &str) -> u8 {
+    match s.to_ascii_uppercase().as_str() {
+        "DASH" => 1,
+        "DOT" => 2,
+        "DASH_DOT" | "DASHDOT" => 3,
+        "DASH_DOT_DOT" | "DASHDOTDOT" => 4,
+        "LONG_DASH" | "LONGDASH" => 5,
+        _ => 0, // SOLID 등
+    }
+}
+
+/// hp:lineShape `headStyle`/`tailStyle` → 화살촉 유무(0=없음/NORMAL, 1=화살촉).
+fn arrow_code(s: &str) -> u8 {
+    if s.is_empty() || s.eq_ignore_ascii_case("NORMAL") || s.eq_ignore_ascii_case("NONE") {
+        0
+    } else {
+        1
+    }
 }
 
 /// `<hp:gradation>` — 그러데이션 채움. type(LINEAR/RADIAL/...), angle, 자식
