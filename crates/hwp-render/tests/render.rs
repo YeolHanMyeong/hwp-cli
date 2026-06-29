@@ -259,3 +259,47 @@ fn 도형_렌더_경로_생성() {
     let skipped = warns.iter().filter(|w| w.contains("미지원 컨트롤")).count();
     assert_eq!(skipped, 0, "아직 미지원으로 집계되는 도형이 있음: {warns:?}");
 }
+
+/// 그러데이션 채움이 백엔드에서 실제 그러데이션으로 렌더되는지(단색 근사가 아니라).
+/// 도형 fixture가 없어 합성 DisplayList로 검증한다.
+#[test]
+fn 그러데이션_채움_백엔드() {
+    use hwp_render::display::{DisplayList, Fill, Gradient, Item, PageList, PathCmd};
+    let page = PageList {
+        width_pt: 100.0,
+        height_pt: 100.0,
+        items: vec![Item::Path {
+            commands: vec![
+                PathCmd::MoveTo(10.0, 10.0),
+                PathCmd::LineTo(90.0, 10.0),
+                PathCmd::LineTo(90.0, 90.0),
+                PathCmd::LineTo(10.0, 90.0),
+                PathCmd::Close,
+            ],
+            fill: Some(Fill::Gradient(Gradient {
+                radial: false,
+                angle_deg: 0.0, // 가로
+                stops: vec![(0.0, 0x0000_00FF), (1.0, 0x00FF_0000)], // 빨강→파랑
+            })),
+            stroke: None,
+        }],
+    };
+    let list = DisplayList { pages: vec![page] };
+
+    // SVG: <linearGradient> 정의 + url 참조
+    let svg = hwp_render::svg::render_svg(&list).remove(0);
+    assert!(svg.contains("<linearGradient"), "SVG 그러데이션 정의 없음");
+    assert!(svg.contains("url(#grad0)"), "SVG fill url 참조 없음");
+
+    // PNG: 좌(빨강)와 우(파랑)가 달라야 한다(실제 그러데이션).
+    let pngs = hwp_render::png::render_png(&list, 96.0).unwrap();
+    let px = &pngs[0];
+    let mid = px.height() / 2;
+    let left = px.pixel(20, mid).unwrap();
+    let right = px.pixel(px.width() - 20, mid).unwrap();
+    assert!(
+        left.red() > right.red() && left.blue() < right.blue(),
+        "좌측은 빨강, 우측은 파랑이어야 — 좌({},{}) 우({},{})",
+        left.red(), left.blue(), right.red(), right.blue()
+    );
+}

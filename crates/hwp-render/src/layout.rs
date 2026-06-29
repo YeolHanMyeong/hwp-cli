@@ -158,7 +158,9 @@ pub fn layout_document(
                         || matches!(c, Control::Generic(g)
                             if g.ctrl_id == *b"gso "
                                 && (!g.paragraph_lists.is_empty()
-                                    || crate::shape_draw::has_shape(&g.raw_children)));
+                                    || crate::shape_draw::has_shape(&g.raw_children)))
+                        // hwpx 구조화 도형(rect/ellipse/...).
+                        || matches!(c, Control::Generic(g) if !g.gso_shapes.is_empty());
                     !rendered
                 })
                 .count();
@@ -234,6 +236,7 @@ pub fn layout_document(
                 continue;
             }
 
+            let last_content = last_content_seg(para);
             for (i, seg) in para.line_segs.iter().enumerate() {
                 // 페이지 경계: v_pos 리셋 감지
                 if seg.v_pos < prev_v_pos && !page.items.is_empty() {
@@ -260,21 +263,23 @@ pub fn layout_document(
                     continue;
                 }
 
-                let items = shape_range(store, doc, para, (line_start, line_end), warnings);
+                let mut items = shape_range(store, doc, para, (line_start, line_end), warnings);
                 let natural_width: f32 = items_width(&items);
 
-                // 정렬 보정 (가운데/오른쪽만 — 양쪽 정렬 잉여 분배는 U2)
+                // 정렬 보정 (가운데/오른쪽 + 양쪽정렬은 마지막 줄 빼고 글자 사이로 잉여 분배).
                 let seg_width_pt = seg.seg_width as f32 / 100.0;
                 let align = doc
                     .header
                     .para_shapes
                     .get(para.para_shape.0 as usize)
                     .map_or(0, |ps| ps.alignment());
-                let shift = match align {
-                    2 => (seg_width_pt - natural_width).max(0.0), // 오른쪽
-                    3 => ((seg_width_pt - natural_width) / 2.0).max(0.0), // 가운데
-                    _ => 0.0,
-                };
+                let shift = align_line(
+                    &mut items,
+                    align,
+                    seg_width_pt,
+                    natural_width,
+                    i == last_content,
+                );
 
                 let baseline_gap_pt = seg.baseline_gap as f32 / 100.0;
                 let line_height_pt = seg.line_height as f32 / 100.0;
@@ -447,7 +452,7 @@ fn layout_para_objects(
                 } else {
                     (b.horz_offset as f64, b.vert_offset as f64)
                 };
-                crate::shape_draw::draw_gso_shapes(g, frame_origin, page, warnings);
+                crate::shape_draw::draw_gso_shapes(g, frame_origin, doc, page, warnings);
 
                 // 다단/연결 글상자: 내부 문단의 v_pos 리셋(단 나누기)으로 단을 분할한다.
                 // 단 0은 이 박스, 단 1+는 연결 글상자(같은 크기·세로위치, 더 오른쪽
@@ -503,7 +508,11 @@ fn layout_para_objects(
                 } else {
                     (b.horz_offset as f64, b.vert_offset as f64)
                 };
-                crate::shape_draw::draw_gso_shapes(g, origin, page, warnings);
+                crate::shape_draw::draw_gso_shapes(g, origin, doc, page, warnings);
+            }
+            // hwpx 구조화 도형(rect/ellipse/line/polygon/curve).
+            Control::Generic(g) if !g.gso_shapes.is_empty() => {
+                crate::shape_draw::draw_ir_shapes(&g.gso_shapes, page);
             }
             _ => {}
         }
@@ -684,6 +693,7 @@ fn layout_box_para_iter<'a>(
             // 폴백(캐시 없는) 문단은 흐름 배치 — 이후 캐시 문단이 넘지 않게 바닥을 올린다.
             flow_floor = flow_floor.max(content_bottom);
         } else {
+            let last_content = last_content_seg(para);
             for (i, seg) in para.line_segs.iter().enumerate() {
                 let line_start = seg.text_start;
                 let line_end = para
@@ -693,7 +703,7 @@ fn layout_box_para_iter<'a>(
                 if line_end <= line_start {
                     continue;
                 }
-                let items = shape_range(store, doc, para, (line_start, line_end), warnings);
+                let mut items = shape_range(store, doc, para, (line_start, line_end), warnings);
                 let natural_width = items_width(&items);
 
                 let seg_width_pt = (seg.seg_width as f32 / 100.0).min(width);
@@ -702,11 +712,13 @@ fn layout_box_para_iter<'a>(
                     .para_shapes
                     .get(para.para_shape.0 as usize)
                     .map_or(0, |ps| ps.alignment());
-                let shift = match align {
-                    2 => (seg_width_pt - natural_width).max(0.0),
-                    3 => ((seg_width_pt - natural_width) / 2.0).max(0.0),
-                    _ => 0.0,
-                };
+                let shift = align_line(
+                    &mut items,
+                    align,
+                    seg_width_pt,
+                    natural_width,
+                    i == last_content,
+                );
 
                 let gap_pt = seg.baseline_gap as f32 / 100.0;
                 let stored = origin_y + (seg.v_pos + seg.baseline_gap) as f32 / 100.0;
@@ -783,6 +795,93 @@ fn prefix_sums(values: &[f32], start: f32) -> Vec<f32> {
     }
     out.push(acc);
     out
+}
+
+/// 문단에서 텍스트가 있는(line_end>line_start) 마지막 seg 인덱스. 빈 trailing seg 방어.
+fn last_content_seg(para: &Paragraph) -> usize {
+    let n = para.line_segs.len();
+    (0..n)
+        .rev()
+        .find(|&j| {
+            let ls = para.line_segs[j].text_start;
+            let le = para
+                .line_segs
+                .get(j + 1)
+                .map_or(para.wchar_len(), |s| s.text_start);
+            le > ls
+        })
+        .unwrap_or(n.saturating_sub(1))
+}
+
+/// 정렬에 따른 가로 shift(pt). 양쪽/배분/나눔(0/4/5)이고 마지막 줄이 아니면
+/// items의 글리프 advance를 늘려 줄을 seg_width까지 채우고 shift 0을 반환한다.
+fn align_line(items: &mut [InlineItem], align: u8, seg_width: f32, natural: f32, is_last: bool) -> f32 {
+    match align {
+        2 => (seg_width - natural).max(0.0),       // 오른쪽
+        3 => ((seg_width - natural) / 2.0).max(0.0), // 가운데
+        0 | 4 | 5 if !is_last => {
+            // 잉여 폭 분배. 폰트 부재 등으로 natural이 비정상이면 캡(≤100% stretch)으로 폭주 방지.
+            let slack = (seg_width - natural).max(0.0).min(natural.max(1.0));
+            justify_line(items, slack);
+            0.0
+        }
+        _ => 0.0,
+    }
+}
+
+/// 양쪽 정렬: 잉여 폭 slack을 분배. 줄에 **공백이 있으면 공백에만**(단어 사이 벌림),
+/// 없으면 전 글자 사이에 균등 분배한다. 후행 공백(마지막 보이는 글리프 뒤)에는 분배하지
+/// 않아 보이는 텍스트가 오른쪽 끝에 닿도록 한다. 글리프↔글자는 CJK 1:1 가정.
+fn justify_line(items: &mut [InlineItem], slack: f32) {
+    if slack <= 0.0 {
+        return;
+    }
+    // 줄 전체 글리프의 공백 여부(런 내 글자 순서 매핑).
+    let mut is_space: Vec<bool> = Vec::new();
+    for item in items.iter() {
+        if let InlineItem::Run(run) = item {
+            let mut chars = run.text.chars();
+            for _ in 0..run.glyphs.len() {
+                is_space.push(chars.next().is_some_and(|c| c.is_whitespace()));
+            }
+        }
+    }
+    let total = is_space.len();
+    if total < 2 {
+        return;
+    }
+    // 마지막 보이는(비공백) 글리프 — 그 이후엔 분배하지 않는다.
+    let last_visible = is_space.iter().rposition(|&s| !s).unwrap_or(total - 1);
+    let space_count = is_space[..last_visible].iter().filter(|&&s| s).count();
+
+    // 공백 우선; 없으면 전 글자 사이(마지막 보이는 글리프 전까지의 gap).
+    let use_spaces = space_count > 0;
+    let denom = if use_spaces {
+        space_count as f32
+    } else {
+        last_visible.max(1) as f32
+    };
+    let extra = slack / denom;
+
+    let mut gi = 0usize;
+    for item in items.iter_mut() {
+        if let InlineItem::Run(run) = item {
+            let mut added = 0.0;
+            for g in run.glyphs.iter_mut() {
+                let apply = if use_spaces {
+                    is_space[gi] && gi < last_visible
+                } else {
+                    gi < last_visible
+                };
+                if apply {
+                    g.x_advance += extra;
+                    added += extra;
+                }
+                gi += 1;
+            }
+            run.width_pt += added;
+        }
+    }
 }
 
 fn items_width(items: &[InlineItem]) -> f32 {
@@ -907,4 +1006,112 @@ fn place_wrapped(
         }
     }
     y
+}
+
+#[cfg(test)]
+mod justify_tests {
+    use super::*;
+    use crate::fonts::LoadedFont;
+    use crate::shape::Glyph;
+    use std::sync::Arc;
+
+    fn run(advs: &[f32]) -> InlineItem {
+        run_t("", advs)
+    }
+
+    fn run_t(text: &str, advs: &[f32]) -> InlineItem {
+        let glyphs: Vec<Glyph> = advs
+            .iter()
+            .map(|&a| Glyph {
+                id: 0,
+                x_advance: a,
+                x_offset: 0.0,
+                y_offset: 0.0,
+            })
+            .collect();
+        InlineItem::Run(crate::shape::ShapedRun {
+            font: Arc::new(LoadedFont {
+                data: Arc::new(Vec::new()),
+                index: 0,
+                family: String::new(),
+            }),
+            size_pt: 10.0,
+            x_scale: 1.0,
+            color: 0,
+            bold: false,
+            italic: false,
+            underline: false,
+            strike: false,
+            underline_color: 0xFFFF_FFFF,
+            glyphs,
+            width_pt: advs.iter().sum(),
+            text: text.to_string(),
+            start_wchar: 0,
+        })
+    }
+
+    fn total_adv(items: &[InlineItem]) -> f32 {
+        items
+            .iter()
+            .map(|i| match i {
+                InlineItem::Run(r) => r.glyphs.iter().map(|g| g.x_advance).sum(),
+                InlineItem::Tab => 0.0,
+            })
+            .sum()
+    }
+
+    #[test]
+    fn 양쪽정렬_잉여를_글자사이에_분배() {
+        // natural 30, seg_width 45 → slack 15, 마지막 제외 2개에 7.5씩.
+        let mut items = vec![run(&[10.0, 10.0, 10.0])];
+        let shift = align_line(&mut items, 0, 45.0, 30.0, false);
+        assert_eq!(shift, 0.0);
+        assert!((total_adv(&items) - 45.0).abs() < 0.01, "줄이 seg_width를 채워야");
+        if let InlineItem::Run(r) = &items[0] {
+            assert!((r.glyphs[0].x_advance - 17.5).abs() < 0.01);
+            assert!((r.glyphs[2].x_advance - 10.0).abs() < 0.01, "마지막 글리프는 불변");
+            assert!((r.width_pt - 45.0).abs() < 0.01, "width_pt 갱신");
+        }
+    }
+
+    #[test]
+    fn 공백이_있으면_공백에만_분배() {
+        // "ab cd" 5글자, glyph 5개. 공백(인덱스2)에만 slack 전부.
+        let mut items = vec![run_t("ab cd", &[10.0, 10.0, 5.0, 10.0, 10.0])];
+        align_line(&mut items, 0, 60.0, 45.0, false); // slack 15
+        if let InlineItem::Run(r) = &items[0] {
+            assert!((r.glyphs[2].x_advance - 20.0).abs() < 0.01, "공백 5+15=20");
+            assert!((r.glyphs[0].x_advance - 10.0).abs() < 0.01, "글자 불변");
+            assert!((r.glyphs[4].x_advance - 10.0).abs() < 0.01, "글자 불변");
+        }
+        assert!((total_adv(&items) - 60.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn 후행_공백엔_분배안함() {
+        // "ab " 끝 공백 → 보이는 텍스트가 끝까지 닿도록 공백 없는 줄처럼 전 글자 분배.
+        let mut items = vec![run_t("ab ", &[10.0, 10.0, 5.0])];
+        align_line(&mut items, 0, 40.0, 25.0, false); // slack 15
+        if let InlineItem::Run(r) = &items[0] {
+            // 후행 공백(idx2)은 분배 제외, last_visible=1 → gap 1개(idx0)에 15.
+            assert!((r.glyphs[0].x_advance - 25.0).abs() < 0.01, "{}", r.glyphs[0].x_advance);
+            assert!((r.glyphs[2].x_advance - 5.0).abs() < 0.01, "후행 공백 불변");
+        }
+    }
+
+    #[test]
+    fn 마지막_줄은_늘리지_않음() {
+        let mut items = vec![run(&[10.0, 10.0, 10.0])];
+        align_line(&mut items, 0, 45.0, 30.0, true);
+        assert!((total_adv(&items) - 30.0).abs() < 0.01, "마지막 줄은 ragged 유지");
+    }
+
+    #[test]
+    fn 가운데_오른쪽은_shift만() {
+        let mut center = vec![run(&[10.0, 10.0])];
+        assert!((align_line(&mut center, 3, 40.0, 20.0, false) - 10.0).abs() < 0.01);
+        assert!((total_adv(&center) - 20.0).abs() < 0.01, "가운데는 advance 불변");
+        let mut right = vec![run(&[10.0, 10.0])];
+        assert!((align_line(&mut right, 2, 40.0, 20.0, false) - 20.0).abs() < 0.01);
+    }
 }

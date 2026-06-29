@@ -334,6 +334,7 @@ mod tests {
                 data: cd,
                 children: Vec::new(),
             }],
+            gso_shapes: Vec::new(),
         });
         let mut chars = vec![HwpChar::ExtCtrl {
             code: FIELD_START,

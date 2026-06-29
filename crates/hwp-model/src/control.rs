@@ -204,6 +204,41 @@ pub struct GenericControl {
     /// 텍스트 추출 전용으로만 쓴다(gso 등 중첩 구조 평탄화 방지).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub raw_children: Vec<OpaqueRecord>,
+    /// hwpx 그리기 개체(도형) 기하/스타일 — 렌더 전용(hwpx reader가 채움).
+    /// hwp5 도형은 raw_children에서 렌더 시점 파싱하므로 비어 있다.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gso_shapes: Vec<ShapeGeom>,
+}
+
+/// 도형 종류 (hwpx 그리기 개체).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ShapeKind {
+    Rect,
+    Ellipse,
+    Line,
+    Polygon,
+    Curve,
+    Arc,
+}
+
+/// hwpx 그리기 개체 기하/스타일 (HWPUNIT, 페이지 기준). 렌더러가 Item::Path로 변환.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShapeGeom {
+    pub kind: ShapeKind,
+    /// 경계 상자(HWPUNIT): pos 오프셋 + sz.
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    /// 선/다각형/곡선의 점(HWPUNIT, 경계 상자 원점 기준).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub points: Vec<(i32, i32)>,
+    /// 채움색 COLORREF(없음=0xFFFFFFFF).
+    pub fill: u32,
+    /// 테두리 색 COLORREF(없음=0xFFFFFFFF).
+    pub border_color: u32,
+    /// 테두리 굵기 HWPUNIT(0이면 선 없음).
+    pub border_width: i32,
 }
 
 /// LIST_HEADER 하나가 여는 문단 리스트.

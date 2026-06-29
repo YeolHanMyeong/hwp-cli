@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 
 use rustybuzz::ttf_parser;
 
-use crate::display::{DisplayList, Item, PageList, PathCmd};
+use crate::display::{DisplayList, Fill, Gradient, Item, PageList, PathCmd, path_bbox};
 
 pub fn render_svg(list: &DisplayList) -> Vec<String> {
     list.pages.iter().map(render_page).collect()
@@ -27,6 +27,7 @@ fn render_page(page: &PageList) -> String {
 
     // (폰트 데이터 주소, 글리프 ID) → path d 캐시
     let mut outline_cache: HashMap<(usize, u16), Option<String>> = HashMap::new();
+    let mut grad_id = 0usize;
 
     for item in &page.items {
         match item {
@@ -123,7 +124,16 @@ fn render_page(page: &PageList) -> String {
                         PathCmd::Close => d.push('Z'),
                     }
                 }
-                let fill_attr = fill.map_or_else(|| "none".to_string(), hex_color);
+                let fill_attr = match fill {
+                    None => "none".to_string(),
+                    Some(Fill::Solid(c)) => hex_color(*c),
+                    Some(Fill::Gradient(g)) => {
+                        let id = format!("grad{grad_id}");
+                        grad_id += 1;
+                        out.push_str(&svg_gradient_def(&id, g, commands));
+                        format!("url(#{id})")
+                    }
+                };
                 let stroke_attr = match stroke {
                     Some((c, w)) => {
                         format!(r#" stroke="{}" stroke-width="{:.2}""#, hex_color(*c), w)
@@ -161,6 +171,38 @@ impl ttf_parser::OutlineBuilder for SvgPath {
     }
     fn close(&mut self) {
         self.0.push('Z');
+    }
+}
+
+/// 그러데이션 정의(<linearGradient>/<radialGradient>) 문자열. userSpaceOnUse(경로 좌표 pt).
+fn svg_gradient_def(id: &str, g: &Gradient, cmds: &[PathCmd]) -> String {
+    let (x0, y0, x1, y1) = path_bbox(cmds);
+    let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+    let mut stops = String::new();
+    for &(p, c) in &g.stops {
+        let _ = write!(
+            stops,
+            r#"<stop offset="{p:.3}" stop-color="{}"/>"#,
+            hex_color(c)
+        );
+    }
+    if g.radial {
+        let r = ((x1 - x0).max(y1 - y0) / 2.0).max(0.1);
+        format!(
+            "<radialGradient id=\"{id}\" gradientUnits=\"userSpaceOnUse\" cx=\"{cx:.2}\" cy=\"{cy:.2}\" r=\"{r:.2}\">{stops}</radialGradient>\n"
+        )
+    } else {
+        let a = g.angle_deg.to_radians();
+        let (dx, dy) = (a.cos(), a.sin());
+        let proj = |x: f32, y: f32| (x - cx) * dx + (y - cy) * dy;
+        let ps = [proj(x0, y0), proj(x1, y0), proj(x1, y1), proj(x0, y1)];
+        let tmin = ps.iter().cloned().fold(f32::MAX, f32::min);
+        let tmax = ps.iter().cloned().fold(f32::MIN, f32::max);
+        let (gx0, gy0) = (cx + dx * tmin, cy + dy * tmin);
+        let (gx1, gy1) = (cx + dx * tmax, cy + dy * tmax);
+        format!(
+            "<linearGradient id=\"{id}\" gradientUnits=\"userSpaceOnUse\" x1=\"{gx0:.2}\" y1=\"{gy0:.2}\" x2=\"{gx1:.2}\" y2=\"{gy1:.2}\">{stops}</linearGradient>\n"
+        )
     }
 }
 

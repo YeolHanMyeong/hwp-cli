@@ -22,7 +22,7 @@ use pdf_writer::{Content, Filter, Finish, Name, Pdf, Rect, Ref, Str};
 use rustybuzz::ttf_parser;
 use subsetter::{GlyphRemapper, subset};
 
-use crate::display::{DisplayList, Item, PathCmd};
+use crate::display::{DisplayList, Fill, Gradient, Item, PathCmd, path_bbox};
 use crate::error::RenderError;
 use crate::fonts::LoadedFont;
 use crate::shape::ShapedRun;
@@ -186,45 +186,51 @@ pub fn render_pdf(list: &DisplayList, warnings: &mut Vec<String>) -> Result<Vec<
                     fill,
                     stroke,
                 } => {
-                    // y 뒤집기: PDF는 y-위 (h - y).
-                    for cmd in commands {
-                        match *cmd {
-                            PathCmd::MoveTo(x, y) => {
-                                content.move_to(x, h - y);
-                            }
-                            PathCmd::LineTo(x, y) => {
-                                content.line_to(x, h - y);
-                            }
-                            PathCmd::CubicTo(a, b, c, e, f, g) => {
-                                content.cubic_to(a, h - b, c, h - e, f, h - g);
-                            }
-                            PathCmd::Close => {
-                                content.close_path();
-                            }
-                        }
-                    }
-                    if let Some((sc, w)) = stroke {
-                        let (r, g, b) = colorref_rgb(*sc);
-                        content.set_stroke_rgb(r, g, b);
-                        content.set_line_width(w.max(0.1));
-                    }
-                    match (fill, stroke) {
-                        (Some(fc), Some(_)) => {
-                            let (r, g, b) = colorref_rgb(*fc);
-                            content.set_fill_rgb(r, g, b);
-                            content.fill_nonzero_and_stroke();
-                        }
-                        (Some(fc), None) => {
-                            let (r, g, b) = colorref_rgb(*fc);
-                            content.set_fill_rgb(r, g, b);
-                            content.fill_nonzero();
-                        }
-                        (None, Some(_)) => {
+                    // 그러데이션 채움: 경로로 클립한 뒤 색 띠/원으로 채운다(실제 그러데이션).
+                    if let Some(Fill::Gradient(grad)) = fill {
+                        content.save_state();
+                        pdf_emit_path(&mut content, commands, h);
+                        content.clip_nonzero();
+                        content.end_path();
+                        pdf_gradient_bands(&mut content, grad, commands, h);
+                        content.restore_state();
+                        // 테두리(선)는 별도로 다시 그린다.
+                        if let Some((sc, w)) = stroke {
+                            let (r, g, b) = colorref_rgb(*sc);
+                            content.set_stroke_rgb(r, g, b);
+                            content.set_line_width(w.max(0.1));
+                            pdf_emit_path(&mut content, commands, h);
                             content.stroke();
                         }
-                        // 채움·선 없음: 경로를 칠하지 않고 비운다(n) — 누적 방지.
-                        (None, None) => {
-                            content.end_path();
+                    } else {
+                        pdf_emit_path(&mut content, commands, h);
+                        if let Some((sc, w)) = stroke {
+                            let (r, g, b) = colorref_rgb(*sc);
+                            content.set_stroke_rgb(r, g, b);
+                            content.set_line_width(w.max(0.1));
+                        }
+                        let solid = match fill {
+                            Some(Fill::Solid(c)) => Some(*c),
+                            _ => None,
+                        };
+                        match (solid, stroke) {
+                            (Some(fc), Some(_)) => {
+                                let (r, g, b) = colorref_rgb(fc);
+                                content.set_fill_rgb(r, g, b);
+                                content.fill_nonzero_and_stroke();
+                            }
+                            (Some(fc), None) => {
+                                let (r, g, b) = colorref_rgb(fc);
+                                content.set_fill_rgb(r, g, b);
+                                content.fill_nonzero();
+                            }
+                            (None, Some(_)) => {
+                                content.stroke();
+                            }
+                            // 채움·선 없음: 경로를 칠하지 않고 비운다(n) — 누적 방지.
+                            (None, None) => {
+                                content.end_path();
+                            }
                         }
                     }
                 }
@@ -524,6 +530,74 @@ fn subset_tag(mut i: usize) -> String {
         i /= 26;
     }
     s
+}
+
+/// 경로 명령을 PDF 콘텐츠로(y 뒤집기 h-y).
+fn pdf_emit_path(content: &mut Content, cmds: &[PathCmd], h: f32) {
+    for cmd in cmds {
+        match *cmd {
+            PathCmd::MoveTo(x, y) => {
+                content.move_to(x, h - y);
+            }
+            PathCmd::LineTo(x, y) => {
+                content.line_to(x, h - y);
+            }
+            PathCmd::CubicTo(a, b, c, e, f, g) => {
+                content.cubic_to(a, h - b, c, h - e, f, h - g);
+            }
+            PathCmd::Close => {
+                content.close_path();
+            }
+        }
+    }
+}
+
+/// 클립된 영역에 색 띠(선형)/동심원(방사형)으로 그러데이션을 그린다. (PDF 셰이딩 대체 근사)
+fn pdf_gradient_bands(content: &mut Content, g: &Gradient, cmds: &[PathCmd], h: f32) {
+    const N: usize = 48;
+    let (x0, y0, x1, y1) = path_bbox(cmds);
+    let set = |content: &mut Content, t: f32| {
+        let (r, gg, b) = g.color_at(t);
+        content.set_fill_rgb(r as f32 / 255.0, gg as f32 / 255.0, b as f32 / 255.0);
+    };
+    if g.radial {
+        let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+        let rmax = ((x1 - x0).max(y1 - y0) / 2.0 * 1.05).max(0.1);
+        // 가장자리(t=1) → 중심(t=0): 큰 원부터 그려 작은 원이 위에.
+        for i in 0..N {
+            let t = 1.0 - i as f32 / (N - 1) as f32;
+            set(content, t);
+            pdf_circle(content, cx, h - cy, (rmax * t).max(0.02));
+            content.fill_nonzero();
+        }
+    } else {
+        let a = g.angle_deg.to_radians();
+        let horizontal = a.cos().abs() >= a.sin().abs();
+        for i in 0..N {
+            let t = i as f32 / (N - 1) as f32;
+            set(content, t);
+            if horizontal {
+                let bx = x0 + (x1 - x0) * t;
+                content.rect(bx, h - y1, (x1 - x0) / N as f32 + 0.5, y1 - y0);
+            } else {
+                let by = y0 + (y1 - y0) * t;
+                let bh = (y1 - y0) / N as f32 + 0.5;
+                content.rect(x0, h - (by + bh), x1 - x0, bh);
+            }
+            content.fill_nonzero();
+        }
+    }
+}
+
+/// 4개 큐빅으로 원(중심 cx,cy 반지름 r) 경로를 만든다 (PDF 좌표 그대로).
+fn pdf_circle(content: &mut Content, cx: f32, cy: f32, r: f32) {
+    let k = 0.552_285 * r;
+    content.move_to(cx + r, cy);
+    content.cubic_to(cx + r, cy + k, cx + k, cy + r, cx, cy + r);
+    content.cubic_to(cx - k, cy + r, cx - r, cy + k, cx - r, cy);
+    content.cubic_to(cx - r, cy - k, cx - k, cy - r, cx, cy - r);
+    content.cubic_to(cx + k, cy - r, cx + r, cy - k, cx + r, cy);
+    content.close_path();
 }
 
 /// COLORREF(0x00BBGGRR) → (r, g, b) 0..1. 없음(0xFFFFFFFF)은 검정 (png/svg 규칙).

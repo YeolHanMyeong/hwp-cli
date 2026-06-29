@@ -4,9 +4,12 @@
 //! Path로 채운다. 합성 굵게 = fill+stroke, 합성 기울임 = skew 변환.
 
 use rustybuzz::ttf_parser;
-use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
+use tiny_skia::{
+    Color, FillRule, GradientStop, LinearGradient, Paint, PathBuilder, Pixmap, Point,
+    RadialGradient, Shader, SpreadMode, Stroke, Transform,
+};
 
-use crate::display::{DisplayList, Item, PageList, PathCmd};
+use crate::display::{DisplayList, Fill, Gradient, Item, PageList, PathCmd, path_bbox};
 use crate::error::RenderError;
 
 /// 기울임 시뮬레이션 각도의 탄젠트 (≈12°).
@@ -170,11 +173,27 @@ fn render_page(page: &PageList, dpi: f32) -> Result<Pixmap, RenderError> {
                 }
                 if let Some(path) = pb.finish() {
                     let t = Transform::from_scale(px_scale, px_scale);
-                    if let Some(fc) = fill {
-                        let (r, g, b) = colorref_rgb(*fc);
-                        let mut paint = Paint::default();
-                        paint.set_color_rgba8(r, g, b, 255);
-                        paint.anti_alias = true;
+                    if let Some(f) = fill {
+                        let mut paint = Paint {
+                            anti_alias: true,
+                            ..Default::default()
+                        };
+                        match f {
+                            Fill::Solid(c) => {
+                                let (r, g, b) = colorref_rgb(*c);
+                                paint.set_color_rgba8(r, g, b, 255);
+                            }
+                            Fill::Gradient(grad) => match gradient_shader(grad, commands, px_scale) {
+                                Some(sh) => paint.shader = sh,
+                                None => {
+                                    let (r, g, b) = grad
+                                        .stops
+                                        .first()
+                                        .map_or((0, 0, 0), |&(_, c)| colorref_rgb(c));
+                                    paint.set_color_rgba8(r, g, b, 255);
+                                }
+                            },
+                        }
                         pixmap.fill_path(&path, &paint, FillRule::Winding, t, None);
                     }
                     if let Some((sc, w)) = stroke {
@@ -193,6 +212,53 @@ fn render_page(page: &PageList, dpi: f32) -> Result<Pixmap, RenderError> {
         }
     }
     Ok(pixmap)
+}
+
+/// 그러데이션 → tiny-skia 셰이더. 경로 bbox(pt) 기준, transform=px_scale로 device 정합.
+fn gradient_shader(g: &Gradient, cmds: &[PathCmd], px_scale: f32) -> Option<Shader<'static>> {
+    let (x0, y0, x1, y1) = path_bbox(cmds);
+    let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+    let stops: Vec<GradientStop> = g
+        .stops
+        .iter()
+        .map(|&(p, c)| {
+            let (r, gg, b) = colorref_rgb(c);
+            GradientStop::new(p, Color::from_rgba8(r, gg, b, 255))
+        })
+        .collect();
+    if stops.len() < 2 {
+        return None;
+    }
+    let xf = Transform::from_scale(px_scale, px_scale);
+    if g.radial {
+        let radius = ((x1 - x0).max(y1 - y0) / 2.0).max(0.1);
+        RadialGradient::new(
+            Point::from_xy(cx, cy),
+            0.0,
+            Point::from_xy(cx, cy),
+            radius,
+            stops,
+            SpreadMode::Pad,
+            xf,
+        )
+    } else {
+        let a = g.angle_deg.to_radians();
+        let (dx, dy) = (a.cos(), a.sin());
+        let proj = |x: f32, y: f32| (x - cx) * dx + (y - cy) * dy;
+        let ps = [proj(x0, y0), proj(x1, y0), proj(x1, y1), proj(x0, y1)];
+        let tmin = ps.iter().cloned().fold(f32::MAX, f32::min);
+        let tmax = ps.iter().cloned().fold(f32::MIN, f32::max);
+        if (tmax - tmin).abs() < 0.01 {
+            return None;
+        }
+        LinearGradient::new(
+            Point::from_xy(cx + dx * tmin, cy + dy * tmin),
+            Point::from_xy(cx + dx * tmax, cy + dy * tmax),
+            stops,
+            SpreadMode::Pad,
+            xf,
+        )
+    }
 }
 
 /// 인코딩된 이미지를 tiny-skia Pixmap으로 디코드한다 (premultiplied RGBA).

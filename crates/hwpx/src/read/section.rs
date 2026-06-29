@@ -12,13 +12,13 @@
 
 use hwp_model::{
     Cell, CharShapeId, Control, GenericControl, HwpChar, HwpUnit, LineSeg, PageDef, ParaShapeId,
-    Paragraph, ParagraphList, Section, SectionDef, StyleId, Table,
+    Paragraph, ParagraphList, Section, SectionDef, ShapeGeom, ShapeKind, StyleId, Table,
 };
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
 use crate::error::{HwpxError, Result};
-use crate::read::xml::{attr, attr_i32, attr_offset_i32, attr_u16, attr_u32};
+use crate::read::xml::{attr, attr_i32, attr_offset_i32, attr_u16, attr_u32, parse_color};
 
 type XmlReader<'a> = Reader<&'a [u8]>;
 
@@ -171,7 +171,7 @@ fn parse_paragraph(
                         push_ext_ctrl(&mut para, &mut wchar_pos, 11, *b"gso ");
                         para.controls.push(Control::Picture(picture));
                     }
-                    // 그 외 개체 (rect, ellipse, equation, container...)
+                    // 그 외 개체 (rect, ellipse, line, polygon, curve, equation, container...)
                     _ => {
                         let mut ctrl_id = [b' '; 4];
                         for (i, b) in name.iter().take(4).enumerate() {
@@ -183,9 +183,14 @@ fn parse_paragraph(
                             paragraph_lists: Vec::new(),
                             extras: Vec::new(),
                             raw_children: Vec::new(),
+                            gso_shapes: Vec::new(),
                         };
                         if !empty {
-                            collect_sub_lists(reader, &name, &mut generic, warnings)?;
+                            if let Some(kind) = shape_kind(&name) {
+                                collect_shape(reader, &name, kind, &mut generic, warnings)?;
+                            } else {
+                                collect_sub_lists(reader, &name, &mut generic, warnings)?;
+                            }
                         }
                         push_ext_ctrl(&mut para, &mut wchar_pos, 11, ctrl_id);
                         para.controls.push(Control::Generic(generic));
@@ -441,6 +446,7 @@ fn parse_ctrl(
                     paragraph_lists: Vec::new(),
                     extras: Vec::new(),
                     raw_children: Vec::new(),
+                    gso_shapes: Vec::new(),
                 };
                 if matches!(event, Event::Start(_)) {
                     collect_sub_lists(reader, &name, &mut generic, warnings)?;
@@ -770,6 +776,121 @@ fn collect_sub_lists(
             Event::Eof => break,
             _ => {}
         }
+    }
+    Ok(())
+}
+
+/// 그리기 개체 요소 이름 → 도형 종류.
+fn shape_kind(name: &[u8]) -> Option<ShapeKind> {
+    match name {
+        b"rect" => Some(ShapeKind::Rect),
+        b"ellipse" => Some(ShapeKind::Ellipse),
+        b"line" => Some(ShapeKind::Line),
+        b"polygon" => Some(ShapeKind::Polygon),
+        b"curve" => Some(ShapeKind::Curve),
+        b"arc" => Some(ShapeKind::Arc),
+        _ => None,
+    }
+}
+
+/// 도형 요소를 파싱: hp:pos(오프셋)·hp:sz(크기)·hp:lineShape(테두리)·
+/// hp:fillBrush>hp:winBrush(채움)·hp:pt*(점) + subList(텍스트). gso_shapes에 담는다.
+fn collect_shape(
+    reader: &mut XmlReader<'_>,
+    end_name: &[u8],
+    kind: ShapeKind,
+    generic: &mut GenericControl,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    let (mut x, mut y, mut w, mut h) = (0i32, 0i32, 0i32, 0i32);
+    let mut fill = 0xFFFF_FFFFu32;
+    let mut border_color = 0xFFFF_FFFFu32;
+    let mut border_width = 0i32;
+    let mut points: Vec<(i32, i32)> = Vec::new();
+    let mut read_attrs = |e: &BytesStart<'_>| {
+        match e.local_name().as_ref() {
+            b"pos" => {
+                x = attr_offset_i32(e, "horzOffset").unwrap_or(x);
+                y = attr_offset_i32(e, "vertOffset").unwrap_or(y);
+            }
+            b"sz" => {
+                w = attr_i32(e, "width").unwrap_or(w);
+                h = attr_i32(e, "height").unwrap_or(h);
+            }
+            b"lineShape" => {
+                if let Some(c) = attr(e, "color") {
+                    border_color = parse_color(&c);
+                }
+                border_width = attr_i32(e, "width").unwrap_or(border_width);
+            }
+            b"winBrush" => {
+                if let Some(c) = attr(e, "faceColor") {
+                    fill = parse_color(&c);
+                }
+            }
+            n if n.starts_with(b"pt") => {
+                if let (Some(px), Some(py)) = (attr_i32(e, "x"), attr_i32(e, "y")) {
+                    points.push((px, py));
+                }
+            }
+            _ => {}
+        }
+    };
+
+    let mut depth = 1u32;
+    loop {
+        match next_event(reader)? {
+            Event::Empty(e) => read_attrs(&e),
+            Event::Start(e) => {
+                let n = e.local_name().as_ref().to_vec();
+                if n == b"subList" {
+                    let mut list = ParagraphList {
+                        header_data: Vec::new(),
+                        paragraphs: Vec::new(),
+                    };
+                    loop {
+                        match next_event(reader)? {
+                            Event::Start(inner) if inner.local_name().as_ref() == b"p" => {
+                                list.paragraphs
+                                    .push(parse_paragraph(reader, &inner, warnings)?);
+                            }
+                            Event::End(inner) if inner.local_name().as_ref() == b"subList" => break,
+                            Event::Eof => break,
+                            _ => {}
+                        }
+                    }
+                    generic.paragraph_lists.push(list);
+                } else {
+                    read_attrs(&e);
+                    if n == end_name {
+                        depth += 1;
+                    }
+                }
+            }
+            Event::End(e) if e.local_name().as_ref() == end_name => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+
+    // 가로/세로 선은 한 축이 0일 수 있으므로 w 또는 h만 있어도 받는다.
+    if w != 0 || h != 0 || !points.is_empty() {
+        generic.gso_shapes.push(ShapeGeom {
+            kind,
+            x,
+            y,
+            w,
+            h,
+            points,
+            fill,
+            border_color,
+            border_width,
+        });
     }
     Ok(())
 }
