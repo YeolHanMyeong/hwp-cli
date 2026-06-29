@@ -24,6 +24,52 @@ use crate::shape::{InlineItem, shape_range};
 /// 기본 탭 간격 (40pt = 4000 HWPUNIT).
 const TAB_INTERVAL_PT: f32 = 40.0;
 
+/// 연결 글상자 후보가 없을 때의 단 사이 가로 간격 근사값(pt).
+const COL_GAP_PT: f32 = 14.0;
+
+/// 글상자 내부 문단을 단(컬럼)별 범위로 나눈다. 한 줄의 v_pos가 직전 줄보다 작아지면
+/// (한컴이 단 나누기로 흘린 것) 새 단으로 본다. 줄 배치 없는 문단은 현재 단에 둔다.
+fn split_columns(paras: &[&Paragraph]) -> Vec<std::ops::Range<usize>> {
+    let mut cols = Vec::new();
+    let mut start = 0usize;
+    let mut prev: Option<i32> = None;
+    for (i, p) in paras.iter().enumerate() {
+        if let Some(v) = p.line_segs.first().map(|s| s.v_pos) {
+            if prev.is_some_and(|pv| v < pv) {
+                cols.push(start..i);
+                start = i;
+            }
+            prev = Some(v);
+        }
+    }
+    cols.push(start..paras.len());
+    cols
+}
+
+/// 연결 글상자의 이음단 위치(pt). 같은 폭·높이·세로오프셋을 갖고 더 오른쪽에 있는
+/// 떠 있는 gso 박스들을 가로 순으로 모은다(연결 글상자 = 다음 단).
+fn continuation_columns(para: &Paragraph, base: &crate::gso::GsoBox) -> Vec<(f32, f32)> {
+    const TOL: i32 = 200; // 2pt 허용
+    let mut v: Vec<(f32, f32)> = para
+        .controls
+        .iter()
+        .filter_map(|c| match c {
+            Control::Generic(g) if g.ctrl_id == *b"gso " => {
+                let b = crate::gso::parse_gso_box(&g.data)?;
+                let same = (b.width - base.width).abs() < TOL
+                    && (b.height - base.height).abs() < TOL
+                    && (b.vert_offset - base.vert_offset).abs() < TOL;
+                (same && !b.treat_as_char() && b.horz_offset > base.horz_offset)
+                    .then_some((b.horz_offset as f32 / 100.0, b.vert_offset as f32 / 100.0))
+            }
+            _ => None,
+        })
+        .collect();
+    v.sort_by(|a, b| a.0.total_cmp(&b.0));
+    v.dedup();
+    v
+}
+
 /// A4 기본값 (PAGE_DEF가 없는 비정상 문서 방어).
 fn default_page() -> PageDef {
     PageDef {
@@ -346,6 +392,7 @@ fn layout_para_objects(
 ) -> f32 {
     let mut bottom = content_bottom;
     let mut object_y = anchor_top;
+
     for control in &para.controls {
         match control {
             Control::Table(table) => {
@@ -391,21 +438,43 @@ fn layout_para_objects(
                         false,
                     )
                 };
-                let mut inner = by;
-                for list in &g.paragraph_lists {
-                    inner = layout_box_paragraphs(
+
+                // 다단/연결 글상자: 내부 문단의 v_pos 리셋(단 나누기)으로 단을 분할한다.
+                // 단 0은 이 박스, 단 1+는 연결 글상자(같은 크기·세로위치, 더 오른쪽
+                // 떠 있는 gso 박스) 위치로 흐른다. 없으면 가로로 한 단 진행(근사).
+                let flat: Vec<&Paragraph> =
+                    g.paragraph_lists.iter().flat_map(|l| l.paragraphs.iter()).collect();
+                let columns = split_columns(&flat);
+                let cont = if columns.len() > 1 && !inline {
+                    continuation_columns(para, &b)
+                } else {
+                    Vec::new()
+                };
+
+                let mut max_bottom = by;
+                for (k, range) in columns.iter().enumerate() {
+                    let (cx, cy) = if k == 0 {
+                        (bx, by)
+                    } else if let Some(&o) = cont.get(k - 1) {
+                        o
+                    } else {
+                        (bx + k as f32 * (bw + COL_GAP_PT), by)
+                    };
+                    let inner = layout_box_para_iter(
                         doc,
                         store,
                         page,
-                        &list.paragraphs,
-                        bx,
-                        inner,
+                        flat[range.clone()].iter().copied(),
+                        cx,
+                        cy,
                         bw,
                         warnings,
                     );
+                    max_bottom = max_bottom.max(inner);
                 }
+
                 if inline {
-                    let used = (inner - by).max(bh);
+                    let used = (max_bottom - by).max(bh);
                     bottom = bottom.max(by + used);
                     object_y += used;
                 }
@@ -541,7 +610,30 @@ fn layout_box_paragraphs(
     width: f32,
     warnings: &mut Vec<String>,
 ) -> f32 {
+    layout_box_para_iter(doc, store, page, paras.iter(), origin_x, origin_y, width, warnings)
+}
+
+/// `layout_box_paragraphs`의 반복자 버전 — 단(컬럼)으로 분할된 조각도 받는다.
+///
+/// 캐시된 lineseg v_pos는 한컴 배치 그대로 존중한다(흐름 커서로 끌어내리지 않음 —
+/// 끌어내리면 키 큰 글상자에서 줄마다 드리프트가 누적돼 페이지 밖으로 넘친다).
+/// `flow_floor`는 "흐름으로 배치된 콘텐츠"(캐시 없는 폴백 문단, 표/이미지 블록 개체,
+/// 우리 줄바꿈이 캐시와 어긋나 캐시 자리 아래로 넘친 줄)만 바닥을 올려, 뒤따르는
+/// 캐시 문단이 그 위로 겹치지 않게 한다.
+#[allow(clippy::too_many_arguments)]
+fn layout_box_para_iter<'a>(
+    doc: &Document,
+    store: &mut FontStore,
+    page: &mut PageList,
+    paras: impl Iterator<Item = &'a Paragraph>,
+    origin_x: f32,
+    origin_y: f32,
+    width: f32,
+    warnings: &mut Vec<String>,
+) -> f32 {
     let mut content_bottom = origin_y;
+    // 흐름 하한: 캐시 줄은 올리지 않고, 흐름 배치 콘텐츠만 올린다 (함수 doc 참고).
+    let mut flow_floor = origin_y;
     for para in paras {
         let mut para_top: Option<f32> = None;
 
@@ -563,6 +655,8 @@ fn layout_box_paragraphs(
                 );
                 content_bottom = last_y + max_size * 0.4;
             }
+            // 폴백(캐시 없는) 문단은 흐름 배치 — 이후 캐시 문단이 넘지 않게 바닥을 올린다.
+            flow_floor = flow_floor.max(content_bottom);
         } else {
             for (i, seg) in para.line_segs.iter().enumerate() {
                 let line_start = seg.text_start;
@@ -590,7 +684,8 @@ fn layout_box_paragraphs(
 
                 let gap_pt = seg.baseline_gap as f32 / 100.0;
                 let stored = origin_y + (seg.v_pos + seg.baseline_gap) as f32 / 100.0;
-                let baseline_y = stored.max(content_bottom + gap_pt);
+                // 캐시 v_pos를 존중: 흐름 하한 위로만 보정(흐름 커서로 끌어내리지 않음).
+                let baseline_y = stored.max(flow_floor + gap_pt);
                 if i == 0 {
                     para_top = Some(baseline_y - gap_pt);
                 }
@@ -611,10 +706,17 @@ fn layout_box_paragraphs(
                     line_advance,
                 );
                 content_bottom = last_y + (seg.line_height as f32 / 100.0 - gap_pt).max(0.0);
+                // 우리 줄바꿈이 캐시와 어긋나 이 줄이 캐시 자리 아래로 넘쳤다면(단일 seg
+                // 문단의 추가 줄바꿈 등) 흐름 하한을 올려 다음 캐시 문단 겹침을 막는다.
+                // 다중 seg 줄은 wrap_width=INFINITY → last_y == baseline_y → 올리지 않음.
+                if last_y > baseline_y {
+                    flow_floor = flow_floor.max(content_bottom);
+                }
             }
         }
 
-        // 셀 안의 중첩 표
+        // 셀 안의 중첩 표/이미지 — 바닥을 늘렸으면 흐름 하한도 올려 후속 캐시 문단 겹침 방지.
+        let before_objects = content_bottom;
         content_bottom = layout_para_objects(
             doc,
             store,
@@ -625,6 +727,9 @@ fn layout_box_paragraphs(
             content_bottom,
             warnings,
         );
+        if content_bottom > before_objects {
+            flow_floor = flow_floor.max(content_bottom);
+        }
     }
     content_bottom
 }

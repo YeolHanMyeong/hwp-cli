@@ -183,3 +183,44 @@ fn 빈_문서_렌더() {
     assert_eq!(out.pages.len(), 1);
     assert_eq!(dark_pixels(&out.pages[0]), 0, "빈 문서는 흰 페이지");
 }
+
+/// 연결 다단 글상자: annual_report "At a Glance"(5쪽)는 월 텍스트가 왼쪽→오른쪽 단으로
+/// 흐른다. (1) 글자 베이스라인이 페이지 하단을 넘지 않아야 하고(흐름 드리프트/잘림 회귀
+/// 방지), (2) 오른쪽 단(x≈300pt)에 본문이 배치돼야 한다(다단 흐름). 폰트 무관 — 배치는
+/// 캐시 v_pos·글상자 위치가 좌우한다.
+#[test]
+fn 글상자_연결_다단_배치() {
+    let Some(path) = fixture_or_skip("hwp5/annual_report.hwp") else {
+        return;
+    };
+    let doc = hwp5::read_document(&path).unwrap().document;
+    let mut store = hwp_render::FontStore::new();
+    let mut warns = Vec::new();
+    let list = hwp_render::layout::layout_document(&doc, &mut store, &mut warns);
+    assert!(list.pages.len() >= 5, "annual_report 는 5쪽 이상: {}", list.pages.len());
+
+    let page = &list.pages[4]; // 5쪽 (0-기반)
+    let glyphs: Vec<(f32, f32)> = page
+        .items
+        .iter()
+        .filter_map(|it| match it {
+            hwp_render::display::Item::Glyphs { x, y, .. } => Some((*x, *y)),
+            _ => None,
+        })
+        .collect();
+    assert!(!glyphs.is_empty(), "5쪽에 글자가 있어야 한다");
+
+    // (1) 세로 넘침 없음
+    let max_y = glyphs.iter().map(|(_, y)| *y).fold(0.0_f32, f32::max);
+    assert!(
+        max_y <= page.height_pt,
+        "5쪽 글자 베이스라인({max_y:.1}pt)이 페이지 하단({:.1}pt)을 넘음 — 글상자 드리프트",
+        page.height_pt
+    );
+
+    // (2) 오른쪽 단 배치 (연결 다단 글상자가 둘째 단을 우측으로 흘림)
+    let right_col = glyphs
+        .iter()
+        .any(|(x, y)| (280.0..330.0).contains(x) && (200.0..800.0).contains(y));
+    assert!(right_col, "오른쪽 단(x≈300pt)에 본문이 없음 — 다단 글상자 미배치");
+}
