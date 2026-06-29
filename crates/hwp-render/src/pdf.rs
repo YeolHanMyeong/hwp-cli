@@ -7,9 +7,12 @@
 //! 이미지는 JPEG는 원본을 DCTDecode로, 그 외는 [`image`]로 디코드해 RGB(+SMask)로
 //! 임베드한다. 좌표는 DisplayList(좌상단·y아래) → PDF(좌하단·y위)로 뒤집는다.
 //!
-//! glyf(트루타입) 폰트는 CIDFontType2/FontFile2로 완전 지원한다. CFF(OTF) 폰트는
-//! CIDFontType0/FontFile3(OpenType)로 best-effort 임베드한다(드묾 — 한글 폰트는
-//! 대부분 glyf).
+//! 폰트 아웃라인 종류별 임베드:
+//! - glyf(트루타입): CIDFontType2 + FontFile2(Length1).
+//! - CFF(OTF, `CFF ` 테이블): CIDFontType0 + FontFile3(Subtype=OpenType).
+//!   둘 다 서브셋 + Identity-H + ToUnicode로 동일하게 처리한다(렌더·검색·복사
+//!   poppler로 검증, tests/pdf_cff.rs). 서브셋 실패 시 전체 폰트를 같은 구조로
+//!   임베드한다(CID=GID).
 
 use std::collections::HashMap;
 use std::io::Write as _;
