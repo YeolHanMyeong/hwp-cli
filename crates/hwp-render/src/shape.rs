@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use hwp_model::{CharShape, Document, HwpChar, Paragraph, ctrl_char};
+use hwp_model::{CharShape, Document, HwpChar, LANG_COUNT, Paragraph, ctrl_char};
 
 use crate::fonts::{FontStore, LoadedFont};
 
@@ -238,4 +238,28 @@ fn shape_piece(
         text: text.to_string(),
         start_wchar,
     })
+}
+
+/// 임의 문자열을 기본 글자모양으로 셰이핑한다(수식 근사 등 합성 텍스트용).
+/// 한글이 섞이면 한글 슬롯, 아니면 라틴 슬롯 폰트를 쓴다.
+pub fn shape_plain(
+    store: &mut FontStore,
+    doc: &Document,
+    text: &str,
+    size_pt: f32,
+    color: u32,
+) -> Option<ShapedRun> {
+    let cs = CharShape {
+        base_size: (size_pt * 100.0) as i32,
+        ratios: [100; LANG_COUNT],
+        rel_sizes: [100; LANG_COUNT],
+        text_color: color,
+        ..CharShape::default()
+    };
+    let lang = if text.chars().any(|c| ('가'..='힣').contains(&c)) {
+        0
+    } else {
+        1
+    };
+    shape_piece(store, doc, Some(&cs), lang, text, 0)
 }

@@ -11,9 +11,9 @@
 //!   (`hp:subList` 문단은 텍스트 추출을 위해 재귀 수집)
 
 use hwp_model::{
-    Cell, CharShapeId, Control, GenericControl, GradientSpec, HwpChar, HwpUnit, LineSeg, PageDef,
-    ParaShapeId, Paragraph, ParagraphList, Section, SectionDef, ShapeGeom, ShapeKind, StyleId,
-    Table,
+    Cell, CharShapeId, Control, Equation, GenericControl, GradientSpec, HwpChar, HwpUnit, LineSeg,
+    PageDef, ParaShapeId, Paragraph, ParagraphList, Section, SectionDef, ShapeGeom, ShapeKind,
+    StyleId, Table,
 };
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -155,6 +155,19 @@ fn parse_paragraph(
                         push_ext_ctrl(&mut para, &mut wchar_pos, 11, *b"tbl ");
                         para.controls.push(Control::Table(table));
                     }
+                    b"equation" => {
+                        let eq = parse_equation(reader, e, empty)?;
+                        push_ext_ctrl(&mut para, &mut wchar_pos, 11, *b"eqed");
+                        para.controls.push(Control::Generic(GenericControl {
+                            ctrl_id: *b"eqed",
+                            data: Vec::new(),
+                            paragraph_lists: Vec::new(),
+                            extras: Vec::new(),
+                            raw_children: Vec::new(),
+                            gso_shapes: Vec::new(),
+                            equation: Some(eq),
+                        }));
+                    }
                     b"linesegarray" => {
                         if !empty {
                             parse_linesegs(reader, &mut para)?;
@@ -185,6 +198,7 @@ fn parse_paragraph(
                             extras: Vec::new(),
                             raw_children: Vec::new(),
                             gso_shapes: Vec::new(),
+                            equation: None,
                         };
                         if !empty {
                             if let Some(kind) = shape_kind(&name) {
@@ -456,6 +470,7 @@ fn parse_ctrl(
                     extras: Vec::new(),
                     raw_children: Vec::new(),
                     gso_shapes: Vec::new(),
+                    equation: None,
                 };
                 if matches!(event, Event::Start(_)) {
                     collect_sub_lists(reader, &name, &mut generic, warnings)?;
@@ -921,6 +936,72 @@ fn collect_shape(
         });
     }
     Ok(())
+}
+
+/// `<hp:equation>` — 수식. 스크립트(`script` 속성 또는 `<hp:script>` 자식)와
+/// 크기(hp:sz)·위치(hp:pos)를 모은다. 렌더러는 상자+텍스트로 근사한다.
+fn parse_equation(
+    reader: &mut XmlReader<'_>,
+    start: &BytesStart<'_>,
+    empty: bool,
+) -> Result<Equation> {
+    let mut script = attr(start, "script").unwrap_or_default();
+    let (mut width, mut height, mut x, mut y) = (0i32, 0i32, 0i32, 0i32);
+    let mut inline = true;
+    if !empty {
+        loop {
+            let ev = next_event(reader)?;
+            match &ev {
+                Event::Start(e) | Event::Empty(e) => {
+                    let is_start = matches!(ev, Event::Start(_));
+                    match e.local_name().as_ref() {
+                        b"script" if is_start => script = read_element_text(reader, b"script")?,
+                        b"sz" => {
+                            width = attr_i32(e, "width").unwrap_or(width);
+                            height = attr_i32(e, "height").unwrap_or(height);
+                        }
+                        b"pos" => {
+                            inline = attr(e, "treatAsChar").as_deref() == Some("1");
+                            x = attr_offset_i32(e, "horzOffset").unwrap_or(0);
+                            y = attr_offset_i32(e, "vertOffset").unwrap_or(0);
+                        }
+                        _ => {}
+                    }
+                }
+                Event::End(e) if e.local_name().as_ref() == b"equation" => break,
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+    }
+    Ok(Equation {
+        script: script.trim().to_string(),
+        width,
+        height,
+        inline,
+        x,
+        y,
+    })
+}
+
+/// 주어진 요소가 닫힐 때까지 텍스트를 모은다.
+fn read_element_text(reader: &mut XmlReader<'_>, end: &[u8]) -> Result<String> {
+    let mut out = String::new();
+    loop {
+        match next_event(reader)? {
+            Event::Text(t) => {
+                let s = t.xml10_content().map_err(|e| HwpxError::Xml {
+                    entry: "section".to_string(),
+                    message: e.to_string(),
+                })?;
+                out.push_str(&s);
+            }
+            Event::End(e) if e.local_name().as_ref() == end => break,
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(out)
 }
 
 /// hp:lineShape `style` → 선 종류 코드(0=실선,1=파선,2=점선,3=일점쇄선,4=이점쇄선,5=긴파선).

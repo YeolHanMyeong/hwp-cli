@@ -460,6 +460,7 @@ fn inject_section_controls(para: &mut Paragraph) {
             extras: Vec::new(),
             raw_children: Vec::new(),
             gso_shapes: Vec::new(),
+            equation: None,
         }),
     );
     let ext = |ctrl_id: [u8; 4], idx: u32| {

@@ -208,6 +208,24 @@ pub struct GenericControl {
     /// hwp5 도형은 raw_children에서 렌더 시점 파싱하므로 비어 있다.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gso_shapes: Vec<ShapeGeom>,
+    /// 수식(hp:equation) — 렌더 전용(box+스크립트 근사). 없으면 None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equation: Option<Equation>,
+}
+
+/// 수식 개체 — 렌더러가 상자+스크립트 텍스트로 근사한다.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Equation {
+    /// HWP 수식 스크립트 원문.
+    pub script: String,
+    /// 크기(HWPUNIT). 0이면 렌더러가 추정.
+    pub width: i32,
+    pub height: i32,
+    /// 글자처럼 취급(인라인)이면 true.
+    pub inline: bool,
+    /// 떠 있는 경우 페이지 절대 오프셋(HWPUNIT).
+    pub x: i32,
+    pub y: i32,
 }
 
 /// 도형 종류 (hwpx 그리기 개체).
