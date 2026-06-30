@@ -284,8 +284,50 @@ fn tool_edit(args: &Value) -> Result<Vec<Value>, String> {
             summary.push(format!("필드 {name:?}={value:?}: {n}건"));
         }
     }
+    if let Some(arr) = args.get("set_format").and_then(Value::as_array) {
+        for f in arr {
+            let pattern = f
+                .get("pattern")
+                .and_then(Value::as_str)
+                .ok_or("set_format 항목에 pattern 필요")?;
+            let fmt = hwp_convert::CharFormat {
+                bold: f.get("bold").and_then(Value::as_bool),
+                italic: f.get("italic").and_then(Value::as_bool),
+                underline: f.get("underline").and_then(Value::as_bool),
+                strike: f.get("strike").and_then(Value::as_bool),
+                size_pt: f.get("size").and_then(Value::as_f64).map(|v| v as f32),
+                color: f
+                    .get("color")
+                    .and_then(Value::as_str)
+                    .and_then(crate::commands::edit::parse_color),
+            };
+            let n = hwp_convert::set_char_format(&mut doc, pattern, &fmt);
+            summary.push(format!("글자서식 {pattern:?}: {n}건"));
+        }
+    }
+    if let Some(arr) = args.get("set_align").and_then(Value::as_array) {
+        for a in arr {
+            let pattern = a
+                .get("pattern")
+                .and_then(Value::as_str)
+                .ok_or("set_align 항목에 pattern 필요")?;
+            let align = match a.get("align").and_then(Value::as_str).unwrap_or("left") {
+                "right" => 2,
+                "center" => 3,
+                "justify" | "both" => 0,
+                "distribute" => 4,
+                "divide" => 5,
+                _ => 1, // left
+            };
+            let n = hwp_convert::set_para_align(&mut doc, pattern, align);
+            summary.push(format!("문단정렬 {pattern:?}: {n}건"));
+        }
+    }
     if summary.is_empty() {
-        return Err("적용할 편집이 없습니다 (replace/set_cell 확인)".to_string());
+        return Err(
+            "적용할 편집이 없습니다 (replace/set_cell/set_field/set_format/set_align 확인)"
+                .to_string(),
+        );
     }
 
     crate::commands::convert::write_by_ext(&doc, Path::new(output), true, false)
@@ -407,7 +449,17 @@ fn tool_defs() -> Vec<Value> {
                     "required": ["table", "row", "col", "text"]}, "description": "표 셀 설정(0-기반)"},
                 "set_field": {"type": "array", "items": {"type": "object", "properties": {
                     "name": {"type": "string"}, "value": {"type": "string"}},
-                    "required": ["name", "value"]}, "description": "필드/누름틀 채우기(이름으로)"}
+                    "required": ["name", "value"]}, "description": "필드/누름틀 채우기(이름으로)"},
+                "set_format": {"type": "array", "items": {"type": "object", "properties": {
+                    "pattern": {"type": "string"}, "bold": {"type": "boolean"},
+                    "italic": {"type": "boolean"}, "underline": {"type": "boolean"},
+                    "strike": {"type": "boolean"}, "size": {"type": "number", "description": "pt"},
+                    "color": {"type": "string", "description": "#RRGGBB 또는 색이름"}},
+                    "required": ["pattern"]}, "description": "글자 서식(매칭 텍스트)"},
+                "set_align": {"type": "array", "items": {"type": "object", "properties": {
+                    "pattern": {"type": "string"},
+                    "align": {"type": "string", "enum": ["left", "right", "center", "justify", "distribute", "divide"]}},
+                    "required": ["pattern", "align"]}, "description": "문단 정렬(매칭 문단)"}
             }, "required": ["input", "output"]}
         }),
         json!({

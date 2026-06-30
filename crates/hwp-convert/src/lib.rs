@@ -3,6 +3,7 @@
 pub mod base64;
 pub mod edit;
 pub mod field;
+pub mod format;
 pub mod from_markdown;
 pub mod markdown;
 
@@ -10,6 +11,7 @@ use hwp_model::Document;
 
 pub use edit::{replace_text, set_cell};
 pub use field::{FieldInfo, list_fields, set_field};
+pub use format::{CharFormat, set_char_format, set_para_align};
 pub use from_markdown::{default_header, from_markdown};
 pub use markdown::to_markdown;
 

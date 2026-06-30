@@ -102,7 +102,7 @@ fn replace_in_chars(para: &mut Paragraph, from: &str, to: &str, budget: &mut usi
 
 /// 연속된 Text 문자열에서 `start_idx` 이후 `from`의 첫 위치를 찾는다.
 /// 반환: (chars 벡터 내 시작 인덱스, 문단 내 WCHAR 오프셋).
-fn find_match(chars: &[HwpChar], from: &str, start_idx: usize) -> Option<(usize, u32)> {
+pub(crate) fn find_match(chars: &[HwpChar], from: &str, start_idx: usize) -> Option<(usize, u32)> {
     let mut wpos: u32 = chars[..start_idx.min(chars.len())]
         .iter()
         .map(HwpChar::wchar_width)

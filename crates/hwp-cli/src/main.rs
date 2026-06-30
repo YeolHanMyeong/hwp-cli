@@ -117,6 +117,12 @@ enum Cmd {
         /// 필드/누름틀 채우기 "이름=값" (반복 가능 — hwp fields로 이름 확인)
         #[arg(long = "set-field")]
         set_field: Vec<String>,
+        /// 글자 서식 "찾기:속성=값,…" (예: "제목:bold=on,size=16,color=#FF0000")
+        #[arg(long = "set-format")]
+        set_format: Vec<String>,
+        /// 문단 정렬 "찾기=정렬" (left/right/center/justify/distribute)
+        #[arg(long = "set-align")]
+        set_align: Vec<String>,
         /// 쓰기 후 재읽기로 검증
         #[arg(long)]
         verify: bool,
@@ -231,8 +237,19 @@ fn main() -> anyhow::Result<()> {
             replace,
             set_cell,
             set_field,
+            set_format,
+            set_align,
             verify,
-        } => commands::edit::run(&input, &output, &replace, &set_cell, &set_field, verify),
+        } => commands::edit::run(
+            &input,
+            &output,
+            &replace,
+            &set_cell,
+            &set_field,
+            &set_format,
+            &set_align,
+            verify,
+        ),
         Cmd::Fields { file, json } => commands::fields::run(&file, json),
     }
 }
