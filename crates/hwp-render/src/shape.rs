@@ -3,6 +3,7 @@
 //! 파이프라인: 문자 모양 경계 → HWP 언어 분류 재분할 → 폰트 해석 →
 //! rustybuzz 셰이핑 → 자간/장평 후처리.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use hwp_model::{CharShape, Document, HwpChar, LANG_COUNT, Paragraph, ctrl_char};
@@ -106,6 +107,18 @@ pub fn shape_range(
     range: (u32, u32),
     warnings: &mut Vec<String>,
 ) -> Vec<InlineItem> {
+    shape_range_notes(store, doc, para, range, &HashMap::new(), warnings)
+}
+
+/// `shape_range`에 각주/미주 마커(ctrl_index→번호)를 더한 버전. 본문 경로만 사용.
+pub fn shape_range_notes(
+    store: &mut FontStore,
+    doc: &Document,
+    para: &Paragraph,
+    range: (u32, u32),
+    marks: &HashMap<u32, u32>,
+    warnings: &mut Vec<String>,
+) -> Vec<InlineItem> {
     // 1. (문자모양, 언어) 경계로 텍스트 조각 수집
     struct Piece {
         shape_id: u16,
@@ -147,7 +160,16 @@ pub fn shape_range(
                         start: pos + 8,
                     });
                 }
-                _ => {} // 컨트롤은 v1 렌더 제외
+                // 각주/미주 앵커: 윗첨자 번호 마커를 본문 위치에 넣는다.
+                HwpChar::ExtCtrl {
+                    ctrl_index: Some(ci),
+                    ..
+                } if marks.contains_key(ci) => {
+                    if let Some(run) = note_mark_run(store, doc, para, pos, marks[ci]) {
+                        items.push((pieces.len(), InlineItem::Run(run)));
+                    }
+                }
+                _ => {} // 그 외 컨트롤은 v1 렌더 제외
             }
         }
         pos += w;
@@ -262,4 +284,36 @@ pub fn shape_plain(
         1
     };
     shape_piece(store, doc, Some(&cs), lang, text, 0)
+}
+
+/// 각주/미주 본문 마커(윗첨자 번호). 주변 글자모양을 따라 ~65% 크기로 줄이고
+/// 베이스라인을 위로 올린다. 글리프↔WCHAR 매핑(start_wchar)은 앵커 위치로 둔다.
+fn note_mark_run(
+    store: &mut FontStore,
+    doc: &Document,
+    para: &Paragraph,
+    pos: u32,
+    number: u32,
+) -> Option<ShapedRun> {
+    let base_id = shape_id_at(para, pos);
+    let base = doc.header.char_shapes.get(base_id as usize).cloned();
+    let base_size = base
+        .as_ref()
+        .map(|c| if c.base_size > 0 { c.base_size } else { 1000 })
+        .unwrap_or(1000);
+    let mut cs = base.unwrap_or_else(|| CharShape {
+        ratios: [100; LANG_COUNT],
+        rel_sizes: [100; LANG_COUNT],
+        ..CharShape::default()
+    });
+    cs.base_size = ((base_size as f32) * 0.65).max(500.0) as i32;
+    cs.attr = 0; // 마커엔 굵게/기울임 등 합성 효과 불필요
+    let text = number.to_string();
+    let mut run = shape_piece(store, doc, Some(&cs), 1, &text, pos)?;
+    // 윗첨자: 위로 올림(y-up 좌표, 백엔드가 baseline-y에서 y_offset만큼 올림).
+    let raise = (base_size as f32 / 100.0) * 0.34;
+    for g in &mut run.glyphs {
+        g.y_offset += raise;
+    }
+    Some(run)
 }

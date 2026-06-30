@@ -19,7 +19,8 @@ use hwp_model::{Control, Document, HwpUnit, PageDef, Paragraph, Table};
 
 use crate::display::{DisplayList, Item, PageList, PathCmd, Stroke};
 use crate::fonts::FontStore;
-use crate::shape::{InlineItem, shape_range};
+use crate::footnote::{self, Note};
+use crate::shape::{InlineItem, shape_range, shape_range_notes};
 
 /// 기본 탭 간격 (40pt = 4000 HWPUNIT).
 const TAB_INTERVAL_PT: f32 = 40.0;
@@ -145,6 +146,11 @@ pub fn layout_document(
             body_width,
         };
 
+        // 각주/미주: 구역 전체에 번호를 매기고, 페이지마다 앵커가 든 노트를 모아
+        // 하단에 그린다.
+        let notes = footnote::collect_notes(&section.paragraphs);
+        let mut page_notes: Vec<&Note> = Vec::new();
+
         for para in &section.paragraphs {
             skipped_controls += para
                 .controls
@@ -153,7 +159,8 @@ pub fn layout_document(
                     let rendered = matches!(
                         c,
                         Control::SectionDef(_) | Control::Table(_) | Control::Picture(_)
-                    ) || [*b"cold", *b"head", *b"foot"].contains(&c.ctrl_id())
+                    ) || [*b"cold", *b"head", *b"foot", *b"fn  ", *b"en  "]
+                        .contains(&c.ctrl_id())
                         // 글상자(텍스트) + 도형(선/사각형/타원/호/다각형)은 렌더한다.
                         || matches!(c, Control::Generic(g)
                             if g.ctrl_id == *b"gso "
@@ -170,6 +177,11 @@ pub fn layout_document(
             // 본문 넘침: 직전 콘텐츠가 본문 하한을 지났으면 새 페이지
             // (lineseg 없는 생성 문서의 기본 페이지네이션)
             if content_bottom > body_bottom && paras_on_page > 0 {
+                render_page_notes(
+                    doc, store, &mut page, &page_notes, body_left, body_width, body_bottom,
+                    warnings,
+                );
+                page_notes.clear();
                 furniture.render(doc, store, &mut page, warnings);
                 pages.push(std::mem::replace(
                     &mut page,
@@ -187,6 +199,11 @@ pub fn layout_document(
             // 쪽 나누기 (PARA_HEADER break_type bit2 / hp:p pageBreak)
             // — 글상자만 있어 items가 비어도 문단을 거쳤으면 분할한다
             if para.header.break_type & 0x04 != 0 && paras_on_page > 0 {
+                render_page_notes(
+                    doc, store, &mut page, &page_notes, body_left, body_width, body_bottom,
+                    warnings,
+                );
+                page_notes.clear();
                 furniture.render(doc, store, &mut page, warnings);
                 pages.push(std::mem::replace(
                     &mut page,
@@ -202,6 +219,10 @@ pub fn layout_document(
             }
             paras_on_page += 1;
 
+            // 본문 각주/미주 마커(윗첨자 번호)와 이 페이지에 속할 노트 수집.
+            let marks = footnote::para_marks(&notes, para);
+            page_notes.extend(footnote::para_notes(&notes, para));
+
             // 이 문단의 첫 줄 상단 (표 앵커 위치)
             let mut para_top: Option<f32> = None;
 
@@ -211,7 +232,7 @@ pub fn layout_document(
                     content_bottom += 16.0; // 빈 문단 높이 근사
                 } else {
                     let end = para.wchar_len();
-                    let items = shape_range(store, doc, para, (0, end), warnings);
+                    let items = shape_range_notes(store, doc, para, (0, end), &marks, warnings);
                     let max_size = items_max_size(&items).unwrap_or(10.0);
                     let baseline_y = content_bottom + max_size * 1.2;
                     para_top = Some(content_bottom);
@@ -265,7 +286,8 @@ pub fn layout_document(
                     continue;
                 }
 
-                let mut items = shape_range(store, doc, para, (line_start, line_end), warnings);
+                let mut items =
+                    shape_range_notes(store, doc, para, (line_start, line_end), &marks, warnings);
                 let natural_width: f32 = items_width(&items);
 
                 // 정렬 보정 (가운데/오른쪽 + 양쪽정렬은 마지막 줄 빼고 글자 사이로 잉여 분배).
@@ -325,6 +347,10 @@ pub fn layout_document(
                 "렌더 미지원 컨트롤 {skipped_controls}개 생략 (글상자/도형 등 — 후속 마일스톤)"
             ));
         }
+        render_page_notes(
+            doc, store, &mut page, &page_notes, body_left, body_width, body_bottom, warnings,
+        );
+        page_notes.clear();
         furniture.render(doc, store, &mut page, warnings);
         pages.push(page);
     }
@@ -384,6 +410,154 @@ impl Furniture<'_> {
                 );
             }
         }
+    }
+}
+
+/// 페이지 하단에 각주/미주 영역을 그린다(구분선 + 번호 + 내용).
+/// 블록 하단이 본문 하한(body_bottom)에 닿도록 위로 올려 배치한다.
+#[allow(clippy::too_many_arguments)]
+fn render_page_notes(
+    doc: &Document,
+    store: &mut FontStore,
+    page: &mut PageList,
+    notes: &[&Note],
+    body_left: f32,
+    body_width: f32,
+    body_bottom: f32,
+    warnings: &mut Vec<String>,
+) {
+    if notes.is_empty() {
+        return;
+    }
+    // 1) 스크래치 페이지에 y=0부터 노트를 쌓아 총 높이를 잰다.
+    let mut scratch = PageList {
+        width_pt: page.width_pt,
+        height_pt: page.height_pt,
+        items: Vec::new(),
+    };
+    let mut y = 0.0f32;
+    for note in notes {
+        y = render_one_note(doc, store, &mut scratch, note, body_left, body_width, y, warnings);
+        y += 3.0; // 노트 사이 간격
+    }
+    // 2) 블록 하단이 body_bottom에 닿도록 위로 올린다(본문과 겹치면 그대로 둠).
+    let top = (body_bottom - y).max(0.0);
+    let sep_gap = 5.0;
+    page.items.push(Item::Line {
+        x1: body_left,
+        y1: top - sep_gap,
+        x2: body_left + body_width * 0.34,
+        y2: top - sep_gap,
+        color: 0x0000_0000,
+        width: 0.5,
+    });
+    // 3) 스크래치 아이템을 top만큼 내려 본 페이지에 합친다.
+    for item in scratch.items.drain(..) {
+        page.items.push(translate_item(item, 0.0, top));
+    }
+}
+
+/// 노트 하나(번호 마커 + 내용 문단)를 (x, y)에 그리고 다음 y(하단)를 반환.
+#[allow(clippy::too_many_arguments)]
+fn render_one_note(
+    doc: &Document,
+    store: &mut FontStore,
+    page: &mut PageList,
+    note: &Note,
+    x: f32,
+    width: f32,
+    y: f32,
+    warnings: &mut Vec<String>,
+) -> f32 {
+    let marker_size = 8.0;
+    let indent = 16.0_f32.min(width * 0.25);
+    let label = format!("{})", note.number);
+    let baseline = y + marker_size;
+    if let Some(run) = crate::shape::shape_plain(store, doc, &label, marker_size, 0) {
+        page.items.push(Item::Glyphs {
+            x,
+            y: baseline,
+            run,
+        });
+    }
+    // 내용 문단들(자체 char_shape 크기 사용). 여러 문단은 세로로 누적.
+    let mut bottom = y;
+    for list in &note.content.paragraph_lists {
+        bottom = layout_box_paragraphs(
+            doc,
+            store,
+            page,
+            &list.paragraphs,
+            x + indent,
+            bottom,
+            width - indent,
+            warnings,
+        );
+    }
+    bottom.max(baseline + marker_size * 0.3)
+}
+
+/// Item을 (dx, dy)만큼 평행이동한 사본.
+fn translate_item(item: Item, dx: f32, dy: f32) -> Item {
+    match item {
+        Item::Glyphs { x, y, run } => Item::Glyphs {
+            x: x + dx,
+            y: y + dy,
+            run,
+        },
+        Item::Rect { x, y, w, h, fill } => Item::Rect {
+            x: x + dx,
+            y: y + dy,
+            w,
+            h,
+            fill,
+        },
+        Item::Line {
+            x1,
+            y1,
+            x2,
+            y2,
+            color,
+            width,
+        } => Item::Line {
+            x1: x1 + dx,
+            y1: y1 + dy,
+            x2: x2 + dx,
+            y2: y2 + dy,
+            color,
+            width,
+        },
+        Item::Image { x, y, w, h, data } => Item::Image {
+            x: x + dx,
+            y: y + dy,
+            w,
+            h,
+            data,
+        },
+        Item::Path {
+            commands,
+            fill,
+            stroke,
+        } => Item::Path {
+            commands: commands
+                .into_iter()
+                .map(|c| translate_cmd(c, dx, dy))
+                .collect(),
+            fill,
+            stroke,
+        },
+    }
+}
+
+/// PathCmd를 (dx, dy)만큼 평행이동.
+fn translate_cmd(c: PathCmd, dx: f32, dy: f32) -> PathCmd {
+    match c {
+        PathCmd::MoveTo(x, y) => PathCmd::MoveTo(x + dx, y + dy),
+        PathCmd::LineTo(x, y) => PathCmd::LineTo(x + dx, y + dy),
+        PathCmd::CubicTo(a, b, c, d, e, f) => {
+            PathCmd::CubicTo(a + dx, b + dy, c + dx, d + dy, e + dx, f + dy)
+        }
+        PathCmd::Close => PathCmd::Close,
     }
 }
 

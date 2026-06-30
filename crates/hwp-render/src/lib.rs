@@ -11,6 +11,7 @@ pub mod diff;
 pub mod display;
 pub mod error;
 pub mod fonts;
+pub mod footnote;
 pub mod gso;
 pub mod layout;
 pub mod lineseg;
