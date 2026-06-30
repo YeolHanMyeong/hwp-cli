@@ -68,6 +68,21 @@ fn lang_slot(name: &str) -> Option<usize> {
     })
 }
 
+/// hwpx numFormat 문자열 → NumFmt(모르면 십진).
+fn num_fmt(s: &str) -> hwp_model::NumFmt {
+    use hwp_model::NumFmt;
+    match s {
+        "HANGUL_SYLLABLE" => NumFmt::HangulSyllable,
+        "HANGUL_JAMO" => NumFmt::HangulJamo,
+        "CIRCLED_DIGIT" => NumFmt::CircledDigit,
+        "LATIN_CAPITAL" | "LATIN_UPPER" => NumFmt::LatinUpper,
+        "LATIN_SMALL" | "LATIN_LOWER" => NumFmt::LatinLower,
+        "ROMAN_CAPITAL" | "ROMAN_UPPER" => NumFmt::RomanUpper,
+        "ROMAN_SMALL" | "ROMAN_LOWER" => NumFmt::RomanLower,
+        _ => NumFmt::Digit,
+    }
+}
+
 /// hwp5 ParaShape::alignment()과 같은 인코딩으로 정렬 매핑.
 fn alignment_code(s: &str) -> u32 {
     match s {
@@ -91,6 +106,7 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
     let mut current_char: Option<CharShape> = None;
     let mut current_para: Option<ParaShape> = None;
     let mut current_border: Option<BorderFill> = None;
+    let mut current_numbering: Option<Vec<hwp_model::NumLevel>> = None;
     // hp:switch의 case/default 중복 — 첫 분기(신형 한글이 읽는 값)만 취한다
     let mut para_margin_done = false;
     let mut para_ls_done = false;
@@ -208,8 +224,50 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
                             let visible = matches!(shape.as_deref(), Some(s) if s != "NONE" && !s.contains("3D"));
                             if visible {
                                 cs.attr |= 1 << 18;
-                                cs.strike = true;
                             }
+                        }
+                    }
+                    // 위/아래 첨자(hwp5 attr bit15/16 — 스펙).
+                    b"supscript" => {
+                        if let Some(cs) = &mut current_char {
+                            cs.attr |= 1 << 15;
+                        }
+                    }
+                    b"subscript" => {
+                        if let Some(cs) = &mut current_char {
+                            cs.attr |= 1 << 16;
+                        }
+                    }
+                    // 그림자(hwp5 attr bits11~12) + 색/간격.
+                    b"shadow" => {
+                        if let Some(cs) = &mut current_char
+                            && attr(e, "type").as_deref() != Some("NONE")
+                        {
+                            cs.attr |= 1 << 11;
+                            if let Some(c) = attr(e, "color") {
+                                cs.shadow_color = parse_color(&c);
+                            }
+                            let gx = attr_i32(e, "offsetX").unwrap_or(0).clamp(-128, 127) as i8;
+                            let gy = attr_i32(e, "offsetY").unwrap_or(0).clamp(-128, 127) as i8;
+                            cs.shadow_gap = (gx, gy);
+                        }
+                    }
+                    // 외곽선(bit8~10) / 양각(bit13) / 음각(bit14).
+                    b"outline" => {
+                        if let Some(cs) = &mut current_char
+                            && attr(e, "type").as_deref() != Some("NONE")
+                        {
+                            cs.attr |= 1 << 8;
+                        }
+                    }
+                    b"emboss" => {
+                        if let Some(cs) = &mut current_char {
+                            cs.attr |= 1 << 13;
+                        }
+                    }
+                    b"engrave" => {
+                        if let Some(cs) = &mut current_char {
+                            cs.attr |= 1 << 14;
                         }
                     }
                     b"paraPr" => {
@@ -243,6 +301,51 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
                         {
                             ps.attr1 |= alignment_code(&h) << 2;
                         }
+                    }
+                    // 문단 머리(목록): type→attr1 bit23~24, level→bit25~27, idRef→numbering_id.
+                    b"heading" => {
+                        if let Some(ps) = &mut current_para {
+                            let ty = match attr(e, "type").as_deref() {
+                                Some("OUTLINE") => 1u32,
+                                Some("NUMBER") => 2,
+                                Some("BULLET") => 3,
+                                _ => 0,
+                            };
+                            ps.attr1 |= ty << 23;
+                            if ty != 0 {
+                                let level = attr_u32(e, "level").unwrap_or(1).clamp(1, 7);
+                                ps.attr1 |= level << 25;
+                                ps.numbering_id = attr_u16(e, "idRef").unwrap_or(0);
+                            }
+                        }
+                    }
+                    // 번호 정의 시작 + 수준별 형식.
+                    b"numbering" => {
+                        current_numbering = Some(Vec::new());
+                        if empty {
+                            header.numbering_levels.push(Vec::new());
+                            current_numbering = None;
+                        }
+                    }
+                    b"paraHead" => {
+                        if let Some(levels) = &mut current_numbering {
+                            let level = attr_u32(e, "level").unwrap_or(1).clamp(1, 10) as usize;
+                            let nl = hwp_model::NumLevel {
+                                start: attr_u32(e, "start").unwrap_or(1),
+                                fmt: num_fmt(attr(e, "numFormat").as_deref().unwrap_or("DIGIT")),
+                            };
+                            if levels.len() < level {
+                                levels.resize(level, hwp_model::NumLevel::default());
+                            }
+                            levels[level - 1] = nl;
+                        }
+                    }
+                    // 글머리표 정의: char 속성(없으면 기본 •).
+                    b"bullet" => {
+                        let ch = attr(e, "char")
+                            .and_then(|s| s.chars().next())
+                            .unwrap_or('•');
+                        header.bullet_chars.push(ch);
                     }
                     b"intent" | b"left" | b"right" | b"prev" | b"next" => {
                         if let Some(ps) = &mut current_para
@@ -350,6 +453,19 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
                                 .push(current_border.take().expect("방금 생성"));
                         }
                     }
+                    // 대각선 방향: <hh:slash>/<hh:backSlash> type≠NONE이면 hwp5 attr 비트로 합성
+                    // (slash=bit2, backSlash=bit5 — 렌더러 diagonal_dirs와 동일 인코딩).
+                    b"slash" | b"backSlash" => {
+                        if let Some(bf) = &mut current_border
+                            && attr(e, "type").is_some_and(|t| !t.eq_ignore_ascii_case("NONE"))
+                        {
+                            bf.attr |= if e.local_name().as_ref() == b"slash" {
+                                0x4
+                            } else {
+                                0x20
+                            };
+                        }
+                    }
                     b"leftBorder" | b"rightBorder" | b"topBorder" | b"bottomBorder" => {
                         if let Some(bf) = &mut current_border {
                             let idx = match e.local_name().as_ref() {
@@ -408,6 +524,11 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
                 b"paraPr" => {
                     if let Some(ps) = current_para.take() {
                         header.para_shapes.push(ps);
+                    }
+                }
+                b"numbering" => {
+                    if let Some(levels) = current_numbering.take() {
+                        header.numbering_levels.push(levels);
                     }
                 }
                 _ => {}

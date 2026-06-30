@@ -301,7 +301,8 @@ fn fill_replaces_slots() {
 
 #[test]
 fn edit_add_row_then_fill() {
-    // 양식(2행 표) → 행 3개 추가 + 같은 호출에서 셀 채움 → hwp5. cat으로 내용 확인.
+    // 양식(2행 표) → 행 3개 추가(pass 1) → 추가 행 셀 채움(pass 2) → hwp5. cat으로 확인.
+    // edit 순서상 구조편집(add-row)은 set-cell 뒤에 적용되므로 두 번에 나눠 호출한다.
     let md = tmp("hwp_cli_addrow.md");
     std::fs::write(&md, "| 품목 | 수량 |\n|------|------|\n| | |\n").unwrap();
     let form = tmp("hwp_cli_addrow_form.hwp");
@@ -315,15 +316,29 @@ fn edit_add_row_then_fill() {
             .unwrap()
             .success()
     );
-    let out = tmp("hwp_cli_addrow_out.hwp");
-    let r = hwp()
+    // pass 1: 행 3개 추가
+    let rows = tmp("hwp_cli_addrow_rows.hwp");
+    let r1 = hwp()
         .arg("edit")
         .arg(&form)
         .arg("-o")
+        .arg(&rows)
+        .args(["--add-row", "0", "--add-row", "0", "--add-row", "0"])
+        .output()
+        .unwrap();
+    assert!(
+        r1.status.success(),
+        "edit --add-row: {}",
+        String::from_utf8_lossy(&r1.stderr)
+    );
+    // pass 2: 추가된 행 셀 채움
+    let out = tmp("hwp_cli_addrow_out.hwp");
+    let r2 = hwp()
+        .arg("edit")
+        .arg(&rows)
+        .arg("-o")
         .arg(&out)
         .args([
-            "--add-row",
-            "0:3",
             "--set-cell",
             "0:1:0=노트북",
             "--set-cell",
@@ -333,9 +348,9 @@ fn edit_add_row_then_fill() {
         .output()
         .unwrap();
     assert!(
-        r.status.success(),
-        "edit --add-row: {}",
-        String::from_utf8_lossy(&r.stderr)
+        r2.status.success(),
+        "edit --set-cell: {}",
+        String::from_utf8_lossy(&r2.stderr)
     );
     let cat = hwp().arg("cat").arg(&out).output().unwrap();
     let text = String::from_utf8_lossy(&cat.stdout);
@@ -343,7 +358,7 @@ fn edit_add_row_then_fill() {
         text.contains("노트북") && text.contains("키보드"),
         "내용: {text}"
     );
-    for f in [&md, &form, &out] {
+    for f in [&md, &form, &rows, &out] {
         let _ = std::fs::remove_file(f);
     }
 }

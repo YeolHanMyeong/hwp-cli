@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use hwp_model::{BinDataId, BinRef, Document, GenericControl, OpaqueRecord, ShapeGeom, ShapeKind};
 
-use crate::display::{Fill, Gradient, Item, PageList, PathCmd, path_bbox};
+use crate::display::{Fill, Gradient, Item, PageList, PathCmd, Stroke, path_bbox};
 
 // hwp5 레코드 raw 태그 (HWPTAG_BEGIN = 0x10).
 const SHAPE_COMPONENT: u16 = 0x4C; // 76
@@ -48,11 +48,35 @@ pub fn draw_ir_shapes(shapes: &[ShapeGeom], page: &mut PageList) {
         if commands.len() < 2 {
             continue;
         }
-        let fill = (s.fill != 0xFFFF_FFFF).then_some(Fill::Solid(s.fill));
-        let stroke = (s.border_width > 0)
-            .then_some((s.border_color, (s.border_width as f32 / 100.0).max(0.1)));
+        let fill = match &s.fill_gradient {
+            Some(g) if g.stops.len() >= 2 => Some(Fill::Gradient(Gradient {
+                radial: g.radial,
+                angle_deg: g.angle_deg,
+                stops: g.stops.clone(),
+            })),
+            _ => (s.fill != 0xFFFF_FFFF).then_some(Fill::Solid(s.fill)),
+        };
+        let stroke = (s.border_width > 0).then(|| {
+            let w = (s.border_width as f32 / 100.0).max(0.1);
+            Stroke {
+                color: s.border_color,
+                width: w,
+                dash: dash_pattern(s.border_style, w),
+            }
+        });
         if fill.is_none() && stroke.is_none() {
             continue;
+        }
+        // 선 화살촉(시작/끝) — 끝점 방향으로 채운 삼각형. Line에만.
+        if matches!(s.kind, ShapeKind::Line) && (s.arrow_start != 0 || s.arrow_end != 0) {
+            let aw = (s.border_width as f32 / 100.0).max(1.0);
+            for head in arrowheads(&commands, s.arrow_start != 0, s.arrow_end != 0, aw) {
+                page.items.push(Item::Path {
+                    commands: head,
+                    fill: Some(Fill::Solid(s.border_color)),
+                    stroke: None,
+                });
+            }
         }
         page.items.push(Item::Path {
             commands,
@@ -60,6 +84,71 @@ pub fn draw_ir_shapes(shapes: &[ShapeGeom], page: &mut PageList) {
             stroke,
         });
     }
+}
+
+/// 선 종류 → 점선 패턴(on, off, …) pt. 0/그 외=실선(빈 벡터). 굵기 비례.
+fn dash_pattern(style: u8, width: f32) -> Vec<f32> {
+    let u = width.max(0.5);
+    match style {
+        1 => vec![3.0 * u, 2.0 * u],                                     // 파선
+        2 => vec![1.0 * u, 2.0 * u],                                     // 점선
+        3 => vec![3.0 * u, 2.0 * u, 1.0 * u, 2.0 * u],                   // 일점쇄선
+        4 => vec![3.0 * u, 2.0 * u, 1.0 * u, 2.0 * u, 1.0 * u, 2.0 * u], // 이점쇄선
+        5 => vec![6.0 * u, 3.0 * u],                                     // 긴 파선
+        _ => Vec::new(),
+    }
+}
+
+/// 열린 경로(선)의 양 끝에 채운 삼각형 화살촉 경로를 만든다.
+/// commands의 첫 점(시작)·끝 점(끝)과 인접 점으로 방향을 구한다.
+fn arrowheads(commands: &[PathCmd], start: bool, end: bool, width: f32) -> Vec<Vec<PathCmd>> {
+    let pts: Vec<(f32, f32)> = commands
+        .iter()
+        .filter_map(|c| match *c {
+            PathCmd::MoveTo(x, y) | PathCmd::LineTo(x, y) => Some((x, y)),
+            PathCmd::CubicTo(_, _, _, _, x, y) => Some((x, y)),
+            PathCmd::Close => None,
+        })
+        .collect();
+    if pts.len() < 2 {
+        return Vec::new();
+    }
+    let size = (width * 4.0).max(5.0);
+    let mut out = Vec::new();
+    if end {
+        let tip = pts[pts.len() - 1];
+        let prev = pts[pts.len() - 2];
+        if let Some(h) = arrow_triangle(tip, prev, size) {
+            out.push(h);
+        }
+    }
+    if start {
+        let tip = pts[0];
+        let next = pts[1];
+        if let Some(h) = arrow_triangle(tip, next, size) {
+            out.push(h);
+        }
+    }
+    out
+}
+
+/// tip을 꼭짓점으로, from→tip 방향을 향하는 이등변 삼각형 화살촉.
+fn arrow_triangle(tip: (f32, f32), from: (f32, f32), size: f32) -> Option<Vec<PathCmd>> {
+    let (dx, dy) = (tip.0 - from.0, tip.1 - from.1);
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1e-3 {
+        return None;
+    }
+    let (ux, uy) = (dx / len, dy / len); // 진행 방향(끝점 쪽)
+    let (px, py) = (-uy, ux); // 수직
+    let back = (tip.0 - ux * size, tip.1 - uy * size);
+    let half = size * 0.4;
+    Some(vec![
+        PathCmd::MoveTo(tip.0, tip.1),
+        PathCmd::LineTo(back.0 + px * half, back.1 + py * half),
+        PathCmd::LineTo(back.0 - px * half, back.1 - py * half),
+        PathCmd::Close,
+    ])
 }
 
 fn ir_shape_path(s: &ShapeGeom) -> Vec<PathCmd> {
@@ -81,13 +170,25 @@ fn ir_shape_path(s: &ShapeGeom) -> Vec<PathCmd> {
         cmds
     };
     match s.kind {
-        ShapeKind::Rect => vec![
-            PathCmd::MoveTo(x0, y0),
-            PathCmd::LineTo(x0 + w, y0),
-            PathCmd::LineTo(x0 + w, y0 + h),
-            PathCmd::LineTo(x0, y0 + h),
-            PathCmd::Close,
-        ],
+        ShapeKind::Rect => {
+            let (x0, y0, w, h) = (x0 as f64, y0 as f64, w as f64, h as f64);
+            let radius = (s.round_ratio.min(100) as f64 / 100.0) * (w.abs().min(h.abs()) / 2.0);
+            if radius > 0.1 {
+                rounded_quad_path(
+                    [(x0, y0), (x0 + w, y0), (x0 + w, y0 + h), (x0, y0 + h)],
+                    radius,
+                    &|x, y| (x as f32, y as f32),
+                )
+            } else {
+                vec![
+                    PathCmd::MoveTo(x0 as f32, y0 as f32),
+                    PathCmd::LineTo((x0 + w) as f32, y0 as f32),
+                    PathCmd::LineTo((x0 + w) as f32, (y0 + h) as f32),
+                    PathCmd::LineTo(x0 as f32, (y0 + h) as f32),
+                    PathCmd::Close,
+                ]
+            }
+        }
         ShapeKind::Ellipse | ShapeKind::Arc => {
             let (cx, cy) = ((x0 + w / 2.0) as f64, (y0 + h / 2.0) as f64);
             ellipse_path(
@@ -191,7 +292,7 @@ fn draw_component(
                 page.items.push(Item::Path {
                     commands,
                     fill: style.fill.clone(),
-                    stroke: style.stroke,
+                    stroke: style.stroke.clone(),
                 });
             }
             SHAPE_COMPONENT => draw_component(child, origin, doc, page, warns, depth + 1),
@@ -233,7 +334,7 @@ impl Mat {
 
 struct Style {
     m: Mat,
-    stroke: Option<(u32, f32)>,
+    stroke: Option<Stroke>,
     fill: Option<Fill>,
     /// 이미지 채움 — 도형 경계 상자에 깐다.
     image: Option<Arc<Vec<u8>>>,
@@ -293,7 +394,7 @@ fn parse_style(d: &[u8], doc: &Document) -> Option<Style> {
         (rd_u32(d, bo), rd_i32(d, bo + 4), rd_u32(d, bo + 8))
     {
         if lattr & 0x3F != 0 {
-            stroke = Some((color, (width as f32 / 100.0).max(0.1)));
+            stroke = Some(Stroke::solid(color, (width as f32 / 100.0).max(0.1)));
         }
         let fo = bo + 13;
         if let Some(ft) = rd_u32(d, fo) {
@@ -392,10 +493,19 @@ fn geometry(tag: u16, d: &[u8], s: &Style, origin: (f64, f64)) -> Option<Vec<Pat
             Some(vec![PathCmd::MoveTo(a, b), PathCmd::LineTo(c, e)])
         }
         SC_RECTANGLE => {
-            // BYTE 곡률% + 4×(x,y). (곡률>0 둥근모서리는 미지원 — 직각 근사)
+            // BYTE 곡률% + 4×(x,y). 곡률>0이면 둥근 모서리(원호 근사).
+            let curv = (*d.first()? as u32).min(100);
+            let corners = [p(1)?, p(9)?, p(17)?, p(25)?];
+            if curv > 0 {
+                let e01 = dist(corners[0], corners[1]);
+                let e12 = dist(corners[1], corners[2]);
+                let radius = (curv as f64 / 100.0) * (e01.min(e12) / 2.0);
+                if radius > 1.0 {
+                    return Some(rounded_quad_path(corners, radius, &to_pt));
+                }
+            }
             let mut cmds = Vec::with_capacity(6);
-            for i in 0..4 {
-                let (x, y) = p(1 + i * 8)?;
+            for (i, &(x, y)) in corners.iter().enumerate() {
                 let (px, py) = to_pt(x, y);
                 cmds.push(if i == 0 {
                     PathCmd::MoveTo(px, py)
@@ -464,6 +574,70 @@ fn geometry(tag: u16, d: &[u8], s: &Style, origin: (f64, f64)) -> Option<Vec<Pat
         }
         _ => None,
     }
+}
+
+/// 두 점 사이 유클리드 거리.
+fn dist(a: (f64, f64), b: (f64, f64)) -> f64 {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    (dx * dx + dy * dy).sqrt()
+}
+
+/// 둥근 모서리 사각형(임의 4점) 경로. corners는 순서대로 이은 4점,
+/// radius는 corners와 같은 좌표계의 모서리 반경. map으로 출력 좌표 변환.
+/// 각 모서리는 90° 원호를 큐빅 베지에(KAPPA)로 근사한다.
+fn rounded_quad_path(
+    corners: [(f64, f64); 4],
+    radius: f64,
+    map: &impl Fn(f64, f64) -> (f32, f32),
+) -> Vec<PathCmd> {
+    let unit = |from: (f64, f64), to: (f64, f64)| -> (f64, f64) {
+        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 1e-9 {
+            (0.0, 0.0)
+        } else {
+            (dx / len, dy / len)
+        }
+    };
+    // 각 모서리의 진입(이전 변 쪽)·이탈(다음 변 쪽) 점. 인접 변 길이의
+    // 절반으로 반경을 캡해 곡선 겹침을 막는다.
+    let mut t_in = [(0.0, 0.0); 4];
+    let mut t_out = [(0.0, 0.0); 4];
+    for i in 0..4 {
+        let c = corners[i];
+        let prev = corners[(i + 3) % 4];
+        let next = corners[(i + 1) % 4];
+        let r_prev = radius.min(dist(c, prev) / 2.0);
+        let r_next = radius.min(dist(c, next) / 2.0);
+        let up = unit(c, prev);
+        let un = unit(c, next);
+        t_in[i] = (c.0 + up.0 * r_prev, c.1 + up.1 * r_prev);
+        t_out[i] = (c.0 + un.0 * r_next, c.1 + un.1 * r_next);
+    }
+    let m = |p: (f64, f64)| map(p.0, p.1);
+    let mut cmds = Vec::with_capacity(13);
+    let (sx, sy) = m(t_out[0]);
+    cmds.push(PathCmd::MoveTo(sx, sy));
+    for i in 1..=4 {
+        let idx = i % 4;
+        let (ax, ay) = m(t_in[idx]);
+        cmds.push(PathCmd::LineTo(ax, ay));
+        let c = corners[idx];
+        let cp1 = (
+            t_in[idx].0 + (c.0 - t_in[idx].0) * KAPPA,
+            t_in[idx].1 + (c.1 - t_in[idx].1) * KAPPA,
+        );
+        let cp2 = (
+            t_out[idx].0 + (c.0 - t_out[idx].0) * KAPPA,
+            t_out[idx].1 + (c.1 - t_out[idx].1) * KAPPA,
+        );
+        let (c1x, c1y) = m(cp1);
+        let (c2x, c2y) = m(cp2);
+        let (ox, oy) = m(t_out[idx]);
+        cmds.push(PathCmd::CubicTo(c1x, c1y, c2x, c2y, ox, oy));
+    }
+    cmds.push(PathCmd::Close);
+    cmds
 }
 
 /// 중심 C와 두 축 벡터(a1, a2)로 타원을 4개 큐빅 베지에로 근사.
@@ -597,8 +771,13 @@ mod tests {
             h: 15000,
             points: Vec::new(),
             fill: 0x0000_CCFF,
+            fill_gradient: None,
             border_color: 0x00FF_0000,
             border_width: 100,
+            round_ratio: 0,
+            border_style: 0,
+            arrow_start: 0,
+            arrow_end: 0,
         };
         draw_ir_shapes(&[rect], &mut page);
         assert_eq!(page.items.len(), 1);
@@ -631,11 +810,59 @@ mod tests {
             h: 1000,
             points: Vec::new(),
             fill: 0xFFFF_FFFF,
+            fill_gradient: None,
             border_color: 0xFFFF_FFFF,
             border_width: 0,
+            round_ratio: 0,
+            border_style: 0,
+            arrow_start: 0,
+            arrow_end: 0,
         };
         draw_ir_shapes(&[invisible], &mut p2);
         assert!(p2.items.is_empty(), "보이지 않는 도형은 생략");
+    }
+
+    #[test]
+    fn ir_그러데이션_채움() {
+        use hwp_model::GradientSpec;
+        let mut page = PageList {
+            width_pt: 600.0,
+            height_pt: 800.0,
+            items: Vec::new(),
+        };
+        // fill_gradient가 있으면 단색 fill을 무시하고 Gradient로 채운다.
+        let shape = ShapeGeom {
+            kind: ShapeKind::Rect,
+            x: 0,
+            y: 0,
+            w: 10000,
+            h: 10000,
+            points: Vec::new(),
+            fill: 0x0000_00FF, // 무시되어야 함
+            fill_gradient: Some(GradientSpec {
+                radial: false,
+                angle_deg: 90.0,
+                stops: vec![(0.0, 0x0000_00FF), (1.0, 0x00FF_0000)],
+            }),
+            border_color: 0xFFFF_FFFF,
+            border_width: 0,
+            round_ratio: 0,
+            border_style: 0,
+            arrow_start: 0,
+            arrow_end: 0,
+        };
+        draw_ir_shapes(&[shape], &mut page);
+        assert_eq!(page.items.len(), 1);
+        let Item::Path { fill, .. } = &page.items[0] else {
+            panic!("Path가 아님");
+        };
+        let Some(Fill::Gradient(g)) = fill else {
+            panic!("Gradient 채움이어야 함");
+        };
+        assert!(!g.radial);
+        assert_eq!(g.stops.len(), 2);
+        assert_eq!(g.stops[0].1, 0x0000_00FF);
+        assert_eq!(g.stops[1].1, 0x00FF_0000);
     }
 
     #[test]
@@ -654,5 +881,135 @@ mod tests {
             assert!(g.radial);
             assert!((g.stops[0].0 - 0.0).abs() < 0.01);
         }
+    }
+
+    #[test]
+    fn 둥근모서리_사각형_경로() {
+        use hwp_model::{ShapeGeom, ShapeKind};
+        let base = ShapeGeom {
+            kind: ShapeKind::Rect,
+            x: 0,
+            y: 0,
+            w: 20000, // 200pt
+            h: 10000, // 100pt
+            points: Vec::new(),
+            fill: 0x0000_00FF,
+            fill_gradient: None,
+            border_color: 0xFFFF_FFFF,
+            border_width: 0,
+            round_ratio: 0,
+            border_style: 0,
+            arrow_start: 0,
+            arrow_end: 0,
+        };
+        // 직각: Move + Line×3 + Close = 5개, CubicTo 없음.
+        let sharp = ir_shape_path(&base);
+        assert_eq!(sharp.len(), 5);
+        assert!(!sharp.iter().any(|c| matches!(c, PathCmd::CubicTo(..))));
+
+        // 곡률 50%: 네 모서리 원호(CubicTo 4개) + 변(LineTo 4개) + Move + Close.
+        let round = ir_shape_path(&ShapeGeom {
+            round_ratio: 50,
+            ..base.clone()
+        });
+        let cubics = round
+            .iter()
+            .filter(|c| matches!(c, PathCmd::CubicTo(..)))
+            .count();
+        assert_eq!(cubics, 4, "네 모서리마다 원호 1개");
+        assert!(matches!(round.last(), Some(PathCmd::Close)));
+        // 반경 = 50% × min(200,100)/2 = 25pt. 시작점은 우상단으로 가는 변 위
+        // (모서리에서 radius만큼 떨어진 점) → x ≈ radius(25), y = 0.
+        let PathCmd::MoveTo(sx, sy) = round[0] else {
+            panic!("MoveTo로 시작해야");
+        };
+        assert!((sx - 25.0).abs() < 0.5, "시작 x≈25, 실제 {sx}");
+        assert!((sy - 0.0).abs() < 0.5, "시작 y≈0, 실제 {sy}");
+
+        // 곡률 100%: 반경 = min/2 = 50pt (캡), 여전히 CubicTo 4개.
+        let full = ir_shape_path(&ShapeGeom {
+            round_ratio: 100,
+            ..base
+        });
+        assert_eq!(
+            full.iter()
+                .filter(|c| matches!(c, PathCmd::CubicTo(..)))
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn 점선_패턴_매핑() {
+        assert!(dash_pattern(0, 1.0).is_empty(), "실선");
+        assert_eq!(dash_pattern(1, 1.0).len(), 2, "파선 2구간");
+        assert_eq!(dash_pattern(3, 1.0).len(), 4, "일점쇄선 4구간");
+        assert_eq!(dash_pattern(4, 1.0).len(), 6, "이점쇄선 6구간");
+        // 굵기 비례: 굵을수록 간격도 커진다.
+        assert!(dash_pattern(1, 4.0)[0] > dash_pattern(1, 1.0)[0]);
+    }
+
+    #[test]
+    fn 화살촉_삼각형_방향() {
+        // 수평선 (0,10)→(100,10): 끝(오른쪽)에 화살촉, 시작(왼쪽)에 화살촉.
+        let line = vec![PathCmd::MoveTo(0.0, 10.0), PathCmd::LineTo(100.0, 10.0)];
+        let heads = arrowheads(&line, true, true, 1.0);
+        assert_eq!(heads.len(), 2, "양끝 화살촉");
+        // 첫 화살촉 = 끝점(오른쪽), 꼭짓점 x≈100.
+        let PathCmd::MoveTo(tx, ty) = heads[0][0] else {
+            panic!("MoveTo");
+        };
+        assert!((tx - 100.0).abs() < 0.1 && (ty - 10.0).abs() < 0.1);
+        // 삼각형: Move+Line+Line+Close.
+        assert!(matches!(heads[0].last(), Some(PathCmd::Close)));
+        assert_eq!(heads[0].len(), 4);
+        // 끝 화살촉의 밑변은 꼭짓점보다 왼쪽(x<100).
+        let PathCmd::LineTo(bx, _) = heads[0][1] else {
+            panic!("LineTo");
+        };
+        assert!(bx < 100.0, "밑변은 진행 반대쪽");
+
+        // 화살촉 없음 → 빈 벡터.
+        assert!(arrowheads(&line, false, false, 1.0).is_empty());
+    }
+
+    #[test]
+    fn ir_선_점선_화살표_적용() {
+        use hwp_model::{ShapeGeom, ShapeKind};
+        let mut page = PageList {
+            width_pt: 600.0,
+            height_pt: 800.0,
+            items: Vec::new(),
+        };
+        let line = ShapeGeom {
+            kind: ShapeKind::Line,
+            x: 0,
+            y: 0,
+            w: 10000,
+            h: 0,
+            points: Vec::new(),
+            fill: 0xFFFF_FFFF,
+            fill_gradient: None,
+            border_color: 0x0000_0000,
+            border_width: 200,
+            round_ratio: 0,
+            border_style: 1, // 파선
+            arrow_start: 0,
+            arrow_end: 1, // 끝 화살촉
+        };
+        draw_ir_shapes(&[line], &mut page);
+        // 선 path 1개 + 화살촉 path 1개 = 2.
+        assert_eq!(page.items.len(), 2);
+        // 화살촉(채움 있음, 선 없음)이 먼저 push된다.
+        let Item::Path { fill, stroke, .. } = &page.items[0] else {
+            panic!("Path");
+        };
+        assert!(fill.is_some() && stroke.is_none(), "화살촉=채움 삼각형");
+        // 선 path는 점선(dash) 적용.
+        let Item::Path { stroke, .. } = &page.items[1] else {
+            panic!("Path");
+        };
+        let s = stroke.as_ref().expect("선 stroke");
+        assert!(!s.dash.is_empty(), "파선 dash 적용");
     }
 }

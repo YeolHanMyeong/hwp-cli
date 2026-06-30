@@ -340,6 +340,25 @@ fn tool_edit(args: &Value) -> Result<Vec<Value>, String> {
             summary.push(format!("셀 표{table}({row},{col})={text:?}"));
         }
     }
+    // 누름틀 생성은 set_field보다 먼저 — 같은 호출에서 생성→채우기 가능.
+    if let Some(arr) = args.get("create_field").and_then(Value::as_array) {
+        for f in arr {
+            let anchor = f
+                .get("anchor")
+                .and_then(Value::as_str)
+                .ok_or("create_field 항목에 anchor 필요")?;
+            let name = f
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("create_field 항목에 name 필요")?;
+            let value = f.get("value").and_then(Value::as_str).unwrap_or("");
+            if hwp_convert::create_field(&mut doc, anchor, name, value) {
+                summary.push(format!("누름틀 생성 {anchor:?}→{name:?}"));
+            } else {
+                summary.push(format!("경고: 앵커 {anchor:?} 못 찾음"));
+            }
+        }
+    }
     if let Some(arr) = args.get("set_field").and_then(Value::as_array) {
         for f in arr {
             let name = f
@@ -351,14 +370,115 @@ fn tool_edit(args: &Value) -> Result<Vec<Value>, String> {
             summary.push(format!("필드 {name:?}={value:?}: {n}건"));
         }
     }
+    if let Some(arr) = args.get("set_format").and_then(Value::as_array) {
+        for f in arr {
+            let pattern = f
+                .get("pattern")
+                .and_then(Value::as_str)
+                .ok_or("set_format 항목에 pattern 필요")?;
+            let fmt = hwp_convert::CharFormat {
+                bold: f.get("bold").and_then(Value::as_bool),
+                italic: f.get("italic").and_then(Value::as_bool),
+                underline: f.get("underline").and_then(Value::as_bool),
+                strike: f.get("strike").and_then(Value::as_bool),
+                size_pt: f.get("size").and_then(Value::as_f64).map(|v| v as f32),
+                color: f
+                    .get("color")
+                    .and_then(Value::as_str)
+                    .and_then(crate::commands::edit::parse_color),
+            };
+            let n = hwp_convert::set_char_format(&mut doc, pattern, &fmt);
+            summary.push(format!("글자서식 {pattern:?}: {n}건"));
+        }
+    }
+    if let Some(arr) = args.get("set_align").and_then(Value::as_array) {
+        for a in arr {
+            let pattern = a
+                .get("pattern")
+                .and_then(Value::as_str)
+                .ok_or("set_align 항목에 pattern 필요")?;
+            let align = match a.get("align").and_then(Value::as_str).unwrap_or("left") {
+                "right" => 2,
+                "center" => 3,
+                "justify" | "both" => 0,
+                "distribute" => 4,
+                "divide" => 5,
+                _ => 1, // left
+            };
+            let n = hwp_convert::set_para_align(&mut doc, pattern, align);
+            summary.push(format!("문단정렬 {pattern:?}: {n}건"));
+        }
+    }
+    let mut structural = false;
+    if let Some(arr) = args.get("insert_para").and_then(Value::as_array) {
+        for p in arr {
+            let anchor = p
+                .get("anchor")
+                .and_then(Value::as_str)
+                .ok_or("insert_para 항목에 anchor 필요")?;
+            let text = p.get("text").and_then(Value::as_str).unwrap_or("");
+            let before = p.get("before").and_then(Value::as_bool).unwrap_or(false);
+            structural = true;
+            if hwp_convert::insert_paragraph(&mut doc, anchor, text, before) {
+                summary.push(format!(
+                    "문단삽입 {anchor:?} {}",
+                    if before { "앞" } else { "뒤" }
+                ));
+            } else {
+                summary.push(format!("경고: 앵커 {anchor:?} 못 찾음"));
+            }
+        }
+    }
+    if let Some(arr) = args.get("delete_para").and_then(Value::as_array) {
+        for p in arr {
+            let matching = p
+                .get("matching")
+                .and_then(Value::as_str)
+                .ok_or("delete_para 항목에 matching 필요")?;
+            structural = true;
+            let n = hwp_convert::delete_paragraph(&mut doc, matching);
+            summary.push(format!("문단삭제 {matching:?}: {n}건"));
+        }
+    }
+    if let Some(arr) = args.get("add_row").and_then(Value::as_array) {
+        for r in arr {
+            let table = r.get("table").and_then(Value::as_u64).unwrap_or(0) as usize;
+            structural = true;
+            hwp_convert::add_table_row(&mut doc, table)?;
+            summary.push(format!("표{table} 행 추가"));
+        }
+    }
+    if let Some(arr) = args.get("delete_row").and_then(Value::as_array) {
+        for r in arr {
+            let table = r.get("table").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let row = r.get("row").and_then(Value::as_u64).unwrap_or(0) as u16;
+            structural = true;
+            hwp_convert::delete_table_row(&mut doc, table, row)?;
+            summary.push(format!("표{table} 행{row} 삭제"));
+        }
+    }
     if summary.is_empty() {
         return Err(
-            "적용할 편집이 없습니다 (replace/add_rows/set_cell/set_field 확인)".to_string(),
+            "적용할 편집이 없습니다 (replace/add_rows/set_cell/set_field/create_field/set_format/set_align/insert_para/delete_para/add_row/delete_row 확인)"
+                .to_string(),
         );
     }
 
-    crate::commands::convert::write_by_ext(&doc, Path::new(output), true, false)
-        .map_err(|e| e.to_string())?;
+    let out_path = Path::new(output);
+    let is_hwp = out_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+        == Some("hwp");
+    if structural && is_hwp {
+        // 구조 편집 hwp는 삽입 불변식을 세우려 합성 경로를 강제한다.
+        crate::commands::convert::write_hwp_structural(&doc, out_path)
+            .map_err(|e| e.to_string())?;
+    } else {
+        crate::commands::convert::write_by_ext(&doc, out_path, true, false)
+            .map_err(|e| e.to_string())?;
+    }
     Ok(vec![text_content(&format!(
         "편집 완료: {input} → {output}\n{}",
         summary.join("\n")
@@ -481,7 +601,33 @@ fn tool_defs() -> Vec<Value> {
                     "required": ["table", "row", "col", "text"]}, "description": "표 셀 설정(0-기반)"},
                 "set_field": {"type": "array", "items": {"type": "object", "properties": {
                     "name": {"type": "string"}, "value": {"type": "string"}},
-                    "required": ["name", "value"]}, "description": "필드/누름틀 채우기(이름으로)"}
+                    "required": ["name", "value"]}, "description": "필드/누름틀 채우기(이름으로)"},
+                "create_field": {"type": "array", "items": {"type": "object", "properties": {
+                    "anchor": {"type": "string"}, "name": {"type": "string"}, "value": {"type": "string"}},
+                    "required": ["anchor", "name"]}, "description": "앵커 텍스트 뒤에 %clk 누름틀 생성(이름·선택 표시값; set_field로 채움)"},
+                "set_format": {"type": "array", "items": {"type": "object", "properties": {
+                    "pattern": {"type": "string"}, "bold": {"type": "boolean"},
+                    "italic": {"type": "boolean"}, "underline": {"type": "boolean"},
+                    "strike": {"type": "boolean"}, "size": {"type": "number", "description": "pt"},
+                    "color": {"type": "string", "description": "#RRGGBB 또는 색이름"}},
+                    "required": ["pattern"]}, "description": "글자 서식(매칭 텍스트)"},
+                "set_align": {"type": "array", "items": {"type": "object", "properties": {
+                    "pattern": {"type": "string"},
+                    "align": {"type": "string", "enum": ["left", "right", "center", "justify", "distribute", "divide"]}},
+                    "required": ["pattern", "align"]}, "description": "문단 정렬(매칭 문단)"},
+                "insert_para": {"type": "array", "items": {"type": "object", "properties": {
+                    "anchor": {"type": "string"}, "text": {"type": "string"},
+                    "before": {"type": "boolean", "description": "true면 앵커 문단 앞(기본 뒤)"}},
+                    "required": ["anchor", "text"]}, "description": "문단 삽입(앵커 문단 앞/뒤, 모양 상속)"},
+                "delete_para": {"type": "array", "items": {"type": "object", "properties": {
+                    "matching": {"type": "string"}},
+                    "required": ["matching"]}, "description": "매칭 텍스트가 든 문단 삭제(최소 1문단 유지)"},
+                "add_row": {"type": "array", "items": {"type": "object", "properties": {
+                    "table": {"type": "integer"}},
+                    "required": ["table"]}, "description": "N번째 표 끝에 빈 행 추가(0-기반)"},
+                "delete_row": {"type": "array", "items": {"type": "object", "properties": {
+                    "table": {"type": "integer"}, "row": {"type": "integer"}},
+                    "required": ["table", "row"]}, "description": "N번째 표의 R행 삭제(0-기반)"}
             }, "required": ["input", "output"]}
         }),
         json!({

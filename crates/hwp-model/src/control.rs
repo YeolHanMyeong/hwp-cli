@@ -208,6 +208,24 @@ pub struct GenericControl {
     /// hwp5 도형은 raw_children에서 렌더 시점 파싱하므로 비어 있다.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gso_shapes: Vec<ShapeGeom>,
+    /// 수식(hp:equation) — 렌더 전용(box+스크립트 근사). 없으면 None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equation: Option<Equation>,
+}
+
+/// 수식 개체 — 렌더러가 상자+스크립트 텍스트로 근사한다.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Equation {
+    /// HWP 수식 스크립트 원문.
+    pub script: String,
+    /// 크기(HWPUNIT). 0이면 렌더러가 추정.
+    pub width: i32,
+    pub height: i32,
+    /// 글자처럼 취급(인라인)이면 true.
+    pub inline: bool,
+    /// 떠 있는 경우 페이지 절대 오프셋(HWPUNIT).
+    pub x: i32,
+    pub y: i32,
 }
 
 /// 도형 종류 (hwpx 그리기 개체).
@@ -233,12 +251,40 @@ pub struct ShapeGeom {
     /// 선/다각형/곡선의 점(HWPUNIT, 경계 상자 원점 기준).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub points: Vec<(i32, i32)>,
-    /// 채움색 COLORREF(없음=0xFFFFFFFF).
+    /// 채움색 COLORREF(없음=0xFFFFFFFF). fill_gradient가 Some면 무시.
     pub fill: u32,
+    /// 그러데이션 채움(있으면 fill보다 우선).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_gradient: Option<GradientSpec>,
     /// 테두리 색 COLORREF(없음=0xFFFFFFFF).
     pub border_color: u32,
     /// 테두리 굵기 HWPUNIT(0이면 선 없음).
     pub border_width: i32,
+    /// 둥근 사각형 모서리 곡률(%, 0=직각). Rect에만 의미.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub round_ratio: u8,
+    /// 테두리 선 종류: 0=실선, 1=파선, 2=점선, 3=일점쇄선, 4=이점쇄선, 5=긴파선.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub border_style: u8,
+    /// 선 시작 화살촉: 0=없음, 그 외=화살촉. Line에만 의미.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub arrow_start: u8,
+    /// 선 끝 화살촉: 0=없음, 그 외=화살촉. Line에만 의미.
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub arrow_end: u8,
+}
+
+fn is_zero_u8(v: &u8) -> bool {
+    *v == 0
+}
+
+/// 그러데이션 채움 명세(렌더러 display::Gradient로 변환).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GradientSpec {
+    pub radial: bool,
+    pub angle_deg: f32,
+    /// (위치 0..1, COLORREF). 위치 오름차순.
+    pub stops: Vec<(f32, u32)>,
 }
 
 /// LIST_HEADER 하나가 여는 문단 리스트.

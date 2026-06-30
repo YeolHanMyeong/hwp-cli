@@ -110,8 +110,25 @@ fn parse_id_mapping_child(
             }
         },
         tag::TAB_DEF => header.tab_defs.push(raw_entry(node)),
-        tag::NUMBERING => header.numberings.push(raw_entry(node)),
-        tag::BULLET => header.bullets.push(raw_entry(node)),
+        tag::NUMBERING => {
+            header.numberings.push(raw_entry(node));
+            // 렌더 전용: 원시 포맷 레이아웃은 불확실하므로 v1은 십진 7수준 기본.
+            header
+                .numbering_levels
+                .push(vec![hwp_model::NumLevel::default(); 7]);
+        }
+        tag::BULLET => {
+            // 글머리 문자 = BULLET offset+8의 WCHAR(UTF-16LE).
+            let ch = node
+                .data
+                .get(8..10)
+                .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                .and_then(|u| char::from_u32(u32::from(u)))
+                .filter(|c| !c.is_control())
+                .unwrap_or('•');
+            header.bullets.push(raw_entry(node));
+            header.bullet_chars.push(ch);
+        }
         tag::PARA_SHAPE => match parse_para_shape(&node.data) {
             Ok(ps) => header.para_shapes.push(ps),
             Err(e) => {
@@ -228,8 +245,6 @@ fn parse_char_shape(data: &[u8]) -> Result<CharShape> {
         offsets,
         base_size,
         attr,
-        // HWP5 raw 비트(18~20)는 DIFFSPEC라 취소선으로 신뢰하지 않음 (가짜 취소선 방지).
-        strike: false,
         shadow_gap,
         text_color,
         underline_color,

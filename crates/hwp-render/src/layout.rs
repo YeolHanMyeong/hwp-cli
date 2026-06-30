@@ -17,9 +17,10 @@
 
 use hwp_model::{Control, Document, HwpUnit, PageDef, Paragraph, Table};
 
-use crate::display::{DisplayList, Item, PageList};
+use crate::display::{DisplayList, Item, PageList, PathCmd, Stroke};
 use crate::fonts::FontStore;
-use crate::shape::{InlineItem, shape_range};
+use crate::footnote::{self, Note};
+use crate::shape::{InlineItem, shape_range, shape_range_notes};
 
 /// 기본 탭 간격 (40pt = 4000 HWPUNIT).
 const TAB_INTERVAL_PT: f32 = 40.0;
@@ -101,29 +102,14 @@ pub fn layout_document(
                 warnings.push("PAGE_DEF 없음 — A4 기본값 사용".to_string());
                 default_page()
             });
-        // 가로(landscape, attr bit0): 용지를 90° 돌려 폭↔높이 스왑.
-        let landscape = page_def.attr & 1 != 0;
-        let (w, h) = if landscape {
-            (
-                page_def.height.to_pt() as f32,
-                page_def.width.to_pt() as f32,
-            )
-        } else {
-            (
-                page_def.width.to_pt() as f32,
-                page_def.height.to_pt() as f32,
-            )
-        };
-        // 본문 폭 계산의 기준 용지 폭(HWPUNIT) — landscape면 height가 폭이 된다.
-        let paper_w_hu = if landscape {
-            page_def.height.0
-        } else {
-            page_def.width.0
-        };
+        let (w, h) = (
+            page_def.width.to_pt() as f32,
+            page_def.height.to_pt() as f32,
+        );
         let body_left = page_def.margin_left.to_pt() as f32;
         let body_top = (page_def.margin_top.0 + page_def.margin_header.0) as f32 / 100.0;
         let body_width =
-            (paper_w_hu - page_def.margin_left.0 - page_def.margin_right.0) as f32 / 100.0;
+            (page_def.width.0 - page_def.margin_left.0 - page_def.margin_right.0) as f32 / 100.0;
         // 본문 영역 하한 (넘침 분할 기준)
         let body_bottom = h - (page_def.margin_bottom.0 + page_def.margin_footer.0) as f32 / 100.0;
 
@@ -160,6 +146,13 @@ pub fn layout_document(
             body_width,
         };
 
+        // 각주/미주: 구역 전체에 번호를 매기고, 페이지마다 앵커가 든 노트를 모아
+        // 하단에 그린다.
+        let notes = footnote::collect_notes(&section.paragraphs);
+        let mut page_notes: Vec<&Note> = Vec::new();
+        // 목록(번호/불릿) 카운터 — 구역 단위, 문서 순서로 진행.
+        let mut list_state = crate::list::ListState::default();
+
         for para in &section.paragraphs {
             skipped_controls += para
                 .controls
@@ -168,14 +161,17 @@ pub fn layout_document(
                     let rendered = matches!(
                         c,
                         Control::SectionDef(_) | Control::Table(_) | Control::Picture(_)
-                    ) || [*b"cold", *b"head", *b"foot"].contains(&c.ctrl_id())
+                    ) || [*b"cold", *b"head", *b"foot", *b"fn  ", *b"en  "]
+                        .contains(&c.ctrl_id())
                         // 글상자(텍스트) + 도형(선/사각형/타원/호/다각형)은 렌더한다.
                         || matches!(c, Control::Generic(g)
                             if g.ctrl_id == *b"gso "
                                 && (!g.paragraph_lists.is_empty()
                                     || crate::shape_draw::has_shape(&g.raw_children)))
                         // hwpx 구조화 도형(rect/ellipse/...).
-                        || matches!(c, Control::Generic(g) if !g.gso_shapes.is_empty());
+                        || matches!(c, Control::Generic(g) if !g.gso_shapes.is_empty())
+                        // 수식(hp:equation).
+                        || matches!(c, Control::Generic(g) if g.equation.is_some());
                     !rendered
                 })
                 .count();
@@ -183,6 +179,17 @@ pub fn layout_document(
             // 본문 넘침: 직전 콘텐츠가 본문 하한을 지났으면 새 페이지
             // (lineseg 없는 생성 문서의 기본 페이지네이션)
             if content_bottom > body_bottom && paras_on_page > 0 {
+                render_page_notes(
+                    doc,
+                    store,
+                    &mut page,
+                    &page_notes,
+                    body_left,
+                    body_width,
+                    body_bottom,
+                    warnings,
+                );
+                page_notes.clear();
                 furniture.render(doc, store, &mut page, warnings);
                 pages.push(std::mem::replace(
                     &mut page,
@@ -200,6 +207,17 @@ pub fn layout_document(
             // 쪽 나누기 (PARA_HEADER break_type bit2 / hp:p pageBreak)
             // — 글상자만 있어 items가 비어도 문단을 거쳤으면 분할한다
             if para.header.break_type & 0x04 != 0 && paras_on_page > 0 {
+                render_page_notes(
+                    doc,
+                    store,
+                    &mut page,
+                    &page_notes,
+                    body_left,
+                    body_width,
+                    body_bottom,
+                    warnings,
+                );
+                page_notes.clear();
                 furniture.render(doc, store, &mut page, warnings);
                 pages.push(std::mem::replace(
                     &mut page,
@@ -215,6 +233,15 @@ pub fn layout_document(
             }
             paras_on_page += 1;
 
+            // 본문 각주/미주 마커(윗첨자 번호)와 이 페이지에 속할 노트 수집.
+            let marks = footnote::para_marks(&notes, para);
+            page_notes.extend(footnote::para_notes(&notes, para));
+            let tabs = crate::tab::tab_stops(doc, para);
+            let geom = para_geometry(doc, para);
+            let links = crate::shape::hyperlink_ranges(para);
+            // 목록 마커(불릿/번호) — 문서 순서로 카운터 진행(목록 아니면 None).
+            let marker = list_state.marker(doc, para);
+
             // 이 문단의 첫 줄 상단 (표 앵커 위치)
             let mut para_top: Option<f32> = None;
 
@@ -224,19 +251,39 @@ pub fn layout_document(
                     content_bottom += 16.0; // 빈 문단 높이 근사
                 } else {
                     let end = para.wchar_len();
-                    let items = shape_range(store, doc, para, (0, end), warnings);
+                    let mut items = shape_range_notes(store, doc, para, (0, end), &marks, warnings);
+                    crate::shape::apply_link_style(&mut items, &links);
                     let max_size = items_max_size(&items).unwrap_or(10.0);
-                    let baseline_y = content_bottom + max_size * 1.2;
-                    para_top = Some(content_bottom);
+                    // 문단 들여쓰기/여백/위 간격(폴백 전용 — 캐시는 col_start에 반영됨).
+                    let left = body_left + geom.left;
+                    let avail = (body_width - geom.left - geom.right).max(4.0);
+                    let baseline_y = content_bottom + geom.spacing_top + max_size * 1.2;
+                    para_top = Some(content_bottom + geom.spacing_top);
+                    // 한 줄에 들어가는 가운데/오른쪽 정렬은 폴백에서도 보정한다.
+                    let natural = items_width(&items);
+                    let align = doc
+                        .header
+                        .para_shapes
+                        .get(para.para_shape.0 as usize)
+                        .map_or(1, |p| p.alignment());
+                    let x = if natural <= avail && (align == 2 || align == 3) {
+                        left + (avail - natural) * if align == 3 { 0.5 } else { 1.0 }
+                    } else {
+                        left
+                    };
+                    if let Some(m) = &marker {
+                        render_list_marker(&mut page, store, doc, m, left, baseline_y, max_size);
+                    }
                     let last_y = place_wrapped(
                         &mut page,
                         items,
-                        body_left,
+                        x,
                         baseline_y,
-                        body_width,
+                        avail,
                         max_size * 1.6,
+                        &tabs,
                     );
-                    content_bottom = last_y + max_size * 0.4;
+                    content_bottom = last_y + max_size * 0.4 + geom.spacing_bottom;
                 }
                 content_bottom = layout_para_objects(
                     doc,
@@ -278,7 +325,9 @@ pub fn layout_document(
                     continue;
                 }
 
-                let mut items = shape_range(store, doc, para, (line_start, line_end), warnings);
+                let mut items =
+                    shape_range_notes(store, doc, para, (line_start, line_end), &marks, warnings);
+                crate::shape::apply_link_style(&mut items, &links);
                 let natural_width: f32 = items_width(&items);
 
                 // 정렬 보정 (가운데/오른쪽 + 양쪽정렬은 마지막 줄 빼고 글자 사이로 잉여 분배).
@@ -316,9 +365,20 @@ pub fn layout_document(
                 let x = body_left + seg.col_start as f32 / 100.0 + shift;
                 if i == 0 {
                     para_top = Some(baseline_y - baseline_gap_pt);
+                    if let Some(m) = &marker {
+                        let size = items_max_size(&items).unwrap_or(line_height_pt.max(8.0));
+                        render_list_marker(&mut page, store, doc, m, x, baseline_y, size);
+                    }
                 }
-                let last_y =
-                    place_wrapped(&mut page, items, x, baseline_y, wrap_width, line_advance);
+                let last_y = place_wrapped(
+                    &mut page,
+                    items,
+                    x,
+                    baseline_y,
+                    wrap_width,
+                    line_advance,
+                    &tabs,
+                );
                 content_bottom = last_y + (line_height_pt - baseline_gap_pt).max(0.0);
             }
 
@@ -338,6 +398,17 @@ pub fn layout_document(
                 "렌더 미지원 컨트롤 {skipped_controls}개 생략 (글상자/도형 등 — 후속 마일스톤)"
             ));
         }
+        render_page_notes(
+            doc,
+            store,
+            &mut page,
+            &page_notes,
+            body_left,
+            body_width,
+            body_bottom,
+            warnings,
+        );
+        page_notes.clear();
         furniture.render(doc, store, &mut page, warnings);
         pages.push(page);
     }
@@ -397,6 +468,180 @@ impl Furniture<'_> {
                 );
             }
         }
+    }
+}
+
+/// 페이지 하단에 각주/미주 영역을 그린다(구분선 + 번호 + 내용).
+/// 블록 하단이 본문 하한(body_bottom)에 닿도록 위로 올려 배치한다.
+#[allow(clippy::too_many_arguments)]
+fn render_page_notes(
+    doc: &Document,
+    store: &mut FontStore,
+    page: &mut PageList,
+    notes: &[&Note],
+    body_left: f32,
+    body_width: f32,
+    body_bottom: f32,
+    warnings: &mut Vec<String>,
+) {
+    if notes.is_empty() {
+        return;
+    }
+    // 1) 스크래치 페이지에 y=0부터 노트를 쌓아 총 높이를 잰다.
+    let mut scratch = PageList {
+        width_pt: page.width_pt,
+        height_pt: page.height_pt,
+        items: Vec::new(),
+    };
+    let mut y = 0.0f32;
+    for note in notes {
+        y = render_one_note(
+            doc,
+            store,
+            &mut scratch,
+            note,
+            body_left,
+            body_width,
+            y,
+            warnings,
+        );
+        y += 3.0; // 노트 사이 간격
+    }
+    // 2) 블록 하단이 body_bottom에 닿도록 위로 올린다(본문과 겹치면 그대로 둠).
+    let top = (body_bottom - y).max(0.0);
+    let sep_gap = 5.0;
+    page.items.push(Item::Line {
+        x1: body_left,
+        y1: top - sep_gap,
+        x2: body_left + body_width * 0.34,
+        y2: top - sep_gap,
+        color: 0x0000_0000,
+        width: 0.5,
+    });
+    // 3) 스크래치 아이템을 top만큼 내려 본 페이지에 합친다.
+    for item in scratch.items.drain(..) {
+        page.items.push(translate_item(item, 0.0, top));
+    }
+}
+
+/// 노트 하나(번호 마커 + 내용 문단)를 (x, y)에 그리고 다음 y(하단)를 반환.
+#[allow(clippy::too_many_arguments)]
+fn render_one_note(
+    doc: &Document,
+    store: &mut FontStore,
+    page: &mut PageList,
+    note: &Note,
+    x: f32,
+    width: f32,
+    y: f32,
+    warnings: &mut Vec<String>,
+) -> f32 {
+    let marker_size = 8.0;
+    let indent = 16.0_f32.min(width * 0.25);
+    let label = format!("{})", note.number);
+    let baseline = y + marker_size;
+    if let Some(run) = crate::shape::shape_plain(store, doc, &label, marker_size, 0) {
+        page.items.push(Item::Glyphs {
+            x,
+            y: baseline,
+            run,
+        });
+    }
+    // 내용 문단들(자체 char_shape 크기 사용). 여러 문단은 세로로 누적.
+    let mut bottom = y;
+    for list in &note.content.paragraph_lists {
+        bottom = layout_box_paragraphs(
+            doc,
+            store,
+            page,
+            &list.paragraphs,
+            x + indent,
+            bottom,
+            width - indent,
+            warnings,
+        );
+    }
+    bottom.max(baseline + marker_size * 0.3)
+}
+
+/// 목록 마커(불릿/번호)를 텍스트 시작 왼쪽(매달린 위치)에 그린다.
+fn render_list_marker(
+    page: &mut PageList,
+    store: &mut FontStore,
+    doc: &Document,
+    marker: &str,
+    text_left: f32,
+    baseline: f32,
+    size: f32,
+) {
+    if let Some(run) = crate::shape::shape_plain(store, doc, marker, size, 0) {
+        let w = run.width_pt;
+        let x = (text_left - w - size * 0.3).max(0.0);
+        push_run(page, x, baseline, run);
+    }
+}
+
+/// Item을 (dx, dy)만큼 평행이동한 사본.
+fn translate_item(item: Item, dx: f32, dy: f32) -> Item {
+    match item {
+        Item::Glyphs { x, y, run } => Item::Glyphs {
+            x: x + dx,
+            y: y + dy,
+            run,
+        },
+        Item::Rect { x, y, w, h, fill } => Item::Rect {
+            x: x + dx,
+            y: y + dy,
+            w,
+            h,
+            fill,
+        },
+        Item::Line {
+            x1,
+            y1,
+            x2,
+            y2,
+            color,
+            width,
+        } => Item::Line {
+            x1: x1 + dx,
+            y1: y1 + dy,
+            x2: x2 + dx,
+            y2: y2 + dy,
+            color,
+            width,
+        },
+        Item::Image { x, y, w, h, data } => Item::Image {
+            x: x + dx,
+            y: y + dy,
+            w,
+            h,
+            data,
+        },
+        Item::Path {
+            commands,
+            fill,
+            stroke,
+        } => Item::Path {
+            commands: commands
+                .into_iter()
+                .map(|c| translate_cmd(c, dx, dy))
+                .collect(),
+            fill,
+            stroke,
+        },
+    }
+}
+
+/// PathCmd를 (dx, dy)만큼 평행이동.
+fn translate_cmd(c: PathCmd, dx: f32, dy: f32) -> PathCmd {
+    match c {
+        PathCmd::MoveTo(x, y) => PathCmd::MoveTo(x + dx, y + dy),
+        PathCmd::LineTo(x, y) => PathCmd::LineTo(x + dx, y + dy),
+        PathCmd::CubicTo(a, b, c, d, e, f) => {
+            PathCmd::CubicTo(a + dx, b + dy, c + dx, d + dy, e + dx, f + dy)
+        }
+        PathCmd::Close => PathCmd::Close,
     }
 }
 
@@ -532,6 +777,46 @@ fn layout_para_objects(
             Control::Generic(g) if !g.gso_shapes.is_empty() => {
                 crate::shape_draw::draw_ir_shapes(&g.gso_shapes, page);
             }
+            // 수식(hp:equation) — 상자+스크립트 텍스트로 근사.
+            Control::Generic(g) if g.equation.is_some() => {
+                let eq = g.equation.as_ref().expect("is_some");
+                let w = (eq.width as f32 / 100.0).max(24.0);
+                let h = (eq.height as f32 / 100.0).max(14.0);
+                let (bx, by, inline) = if eq.inline {
+                    (x, object_y, true)
+                } else {
+                    (eq.x as f32 / 100.0, eq.y as f32 / 100.0, false)
+                };
+                // 옅은 회색 점선 상자(수식 영역).
+                page.items.push(Item::Path {
+                    commands: vec![
+                        PathCmd::MoveTo(bx, by),
+                        PathCmd::LineTo(bx + w, by),
+                        PathCmd::LineTo(bx + w, by + h),
+                        PathCmd::LineTo(bx, by + h),
+                        PathCmd::Close,
+                    ],
+                    fill: None,
+                    stroke: Some(Stroke {
+                        color: 0x00C0_C0C0,
+                        width: 0.5,
+                        dash: vec![2.0, 2.0],
+                    }),
+                });
+                // 스크립트를 사람이 읽을 수 있게 근사 변환해 상자 안에 배치.
+                let text = prettify_equation(&eq.script);
+                if !text.is_empty() {
+                    let size = (h * 0.55).clamp(7.0, 14.0);
+                    if let Some(run) = crate::shape::shape_plain(store, doc, &text, size, 0) {
+                        let ty = by + h * 0.5 + size * 0.33;
+                        push_run(page, bx + 2.0, ty, run);
+                    }
+                }
+                if inline {
+                    object_y += h;
+                    bottom = bottom.max(by + h);
+                }
+            }
             _ => {}
         }
     }
@@ -539,23 +824,6 @@ fn layout_para_objects(
 }
 
 /// 표 하나를 (x, y)에 배치하고 높이를 반환한다.
-/// 셀 여백 (왼/오른/위/아래) pt — 셀 지정 → 표 기본 → 한글 기본.
-fn cell_margins(table: &Table, cell: &hwp_model::Cell) -> (f32, f32, f32, f32) {
-    let m = if cell.margins.iter().any(|&v| v > 0) {
-        cell.margins
-    } else if table.inner_margins.iter().any(|&v| v > 0) {
-        table.inner_margins
-    } else {
-        DEFAULT_CELL_MARGINS
-    };
-    (
-        m[0] as f32 / 100.0,
-        m[1] as f32 / 100.0,
-        m[2] as f32 / 100.0,
-        m[3] as f32 / 100.0,
-    )
-}
-
 fn layout_table(
     doc: &Document,
     store: &mut FontStore,
@@ -583,61 +851,11 @@ fn layout_table(
     fill_unknown(&mut col_w, 60.0);
     fill_unknown(&mut row_h, 18.0);
 
-    // 측정 패스: 실제 내용 높이로 행 높이를 확장한다(저장된 cell.height는 한글의 줄바꿈
-    // 기준이라, 셰이핑/합성 줄바꿈이 더 많은 줄을 만들면 내용이 다음 행을 침범해 겹친다 —
-    // 실측 높이와 max로 행을 늘려 방지). 스크래치 페이지에 그려 높이만 잰다. 실측 내용
-    // 높이는 세로정렬에 재사용한다(재측정 회피).
-    let mut spanned: Vec<(usize, usize, f32)> = Vec::new(); // (시작행, 스팬, 필요높이)
-    let mut content_h_by_cell: Vec<f32> = Vec::with_capacity(table.cells.len());
-    for cell in &table.cells {
-        let (c, r) = (cell.col as usize, cell.row as usize);
-        if c >= cols || r >= rows {
-            content_h_by_cell.push(0.0);
-            continue;
-        }
-        let cw: f32 = col_w[c..(c + cell.col_span as usize).min(cols)]
-            .iter()
-            .sum();
-        let (ml, mr, mt, mb) = cell_margins(table, cell);
-        let mut scratch = PageList {
-            width_pt: page.width_pt,
-            height_pt: page.height_pt,
-            items: Vec::new(),
-        };
-        let mut scratch_warn = Vec::new();
-        let content_h = layout_box_paragraphs(
-            doc,
-            store,
-            &mut scratch,
-            &cell.paragraphs,
-            0.0,
-            0.0,
-            (cw - ml - mr).max(4.0),
-            &mut scratch_warn,
-        );
-        content_h_by_cell.push(content_h);
-        let needed = content_h + mt + mb;
-        let span = (cell.row_span as usize).max(1);
-        if span == 1 {
-            row_h[r] = row_h[r].max(needed);
-        } else {
-            spanned.push((r, span, needed));
-        }
-    }
-    // row_span>1 셀: 스팬 행 합이 부족하면 마지막 스팬 행에 부족분을 더한다.
-    for (r, span, needed) in spanned {
-        let end = (r + span).min(rows);
-        let cur: f32 = row_h[r..end].iter().sum();
-        if end > r && needed > cur {
-            row_h[end - 1] += needed - cur;
-        }
-    }
-
     // 누적 오프셋
     let col_x: Vec<f32> = prefix_sums(&col_w, x);
     let row_y: Vec<f32> = prefix_sums(&row_h, y);
 
-    for (ci, cell) in table.cells.iter().enumerate() {
+    for cell in &table.cells {
         let (c, r) = (cell.col as usize, cell.row as usize);
         if c >= cols || r >= rows {
             warnings.push(format!("셀 주소가 표 범위를 벗어남: ({r},{c})"));
@@ -668,23 +886,26 @@ fn layout_table(
             });
         }
 
-        // 2) 내용 — 셀 여백(셀 지정 → 표 기본 → 한글 기본) + 세로정렬
-        let (ml, mr, mt, mb) = cell_margins(table, cell);
-        // 세로정렬: list_attr bits5-6 (0=위, 1=가운데, 2=아래). 실측 내용 높이로 오프셋.
-        let content_h = content_h_by_cell.get(ci).copied().unwrap_or(0.0);
-        let avail = (ch - mt - mb - content_h).max(0.0);
-        let voff = match (cell.list_attr >> 5) & 0x3 {
-            1 => avail * 0.5,
-            2 => avail,
-            _ => 0.0,
+        // 2) 내용 — 셀 여백(셀 지정 → 표 기본 → 한글 기본) 적용
+        let margins = if cell.margins.iter().any(|&m| m > 0) {
+            cell.margins
+        } else if table.inner_margins.iter().any(|&m| m > 0) {
+            table.inner_margins
+        } else {
+            DEFAULT_CELL_MARGINS
         };
+        let (ml, mr, mt) = (
+            margins[0] as f32 / 100.0,
+            margins[1] as f32 / 100.0,
+            margins[2] as f32 / 100.0,
+        );
         layout_box_paragraphs(
             doc,
             store,
             page,
             &cell.paragraphs,
             cx + ml,
-            cy + mt + voff,
+            cy + mt,
             (cw - ml - mr).max(4.0),
             warnings,
         );
@@ -709,9 +930,115 @@ fn layout_table(
                     });
                 }
             }
+
+            // 4) 대각선/역대각선 — slash/backSlash 비트가 켜졌을 때만(병합 셀은 전체 영역 가로지름).
+            //    diagonal 선은 스타일/색만 제공하므로 방향 비트가 없으면 그리지 않는다.
+            let (slash, backslash) = diagonal_dirs(bf.attr);
+            if (slash || backslash) && bf.diagonal.is_visible() {
+                let dw = bf.diagonal.width_mm() * 72.0 / 25.4;
+                if backslash {
+                    page.items.push(Item::Line {
+                        x1: cx,
+                        y1: cy,
+                        x2: cx + cw,
+                        y2: cy + ch,
+                        color: bf.diagonal.color,
+                        width: dw,
+                    });
+                }
+                if slash {
+                    page.items.push(Item::Line {
+                        x1: cx,
+                        y1: cy + ch,
+                        x2: cx + cw,
+                        y2: cy,
+                        color: bf.diagonal.color,
+                        width: dw,
+                    });
+                }
+            }
         }
     }
     row_h.iter().sum()
+}
+
+/// BORDER_FILL 속성 비트 → (대각선 `/`, 역대각선 `\`) 그릴지.
+/// slash=bit2~4, backSlash=bit5~7. 둘 다 0이면 대각선 없음.
+fn diagonal_dirs(attr: u16) -> (bool, bool) {
+    let slash = (attr >> 2) & 0x7 != 0;
+    let backslash = (attr >> 5) & 0x7 != 0;
+    (slash, backslash)
+}
+
+/// HWP 수식 스크립트를 사람이 읽을 수 있는 근사 문자열로 변환한다.
+/// 그룹 중괄호는 제거, 그리스/연산자 토큰을 유니코드 기호로 매핑한다.
+/// (정밀 수식 조판이 아닌 box+text 근사 — 가독성 우선.)
+fn prettify_equation(script: &str) -> String {
+    let spaced = script.replace(['{', '}'], " ");
+    spaced
+        .split_whitespace()
+        .map(map_eqn_token)
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// 수식 토큰 하나 → 유니코드 기호(모르면 원문). 빈 문자열=버림(글꼴 명령 등).
+fn map_eqn_token(tok: &str) -> String {
+    let mapped = match tok {
+        "over" => "/",
+        "times" => "×",
+        "div" => "÷",
+        "cdot" => "·",
+        "pm" => "±",
+        "mp" => "∓",
+        "sqrt" | "root" => "√",
+        "sum" | "SUM" => "Σ",
+        "int" | "INT" => "∫",
+        "prod" | "PROD" => "∏",
+        "inf" | "infinity" => "∞",
+        "partial" => "∂",
+        "nabla" => "∇",
+        "<=" | "leq" => "≤",
+        ">=" | "geq" => "≥",
+        "!=" | "neq" => "≠",
+        "~=" | "approx" => "≈",
+        "->" | "to" | "rightarrow" => "→",
+        "<-" | "leftarrow" => "←",
+        "in" => "∈",
+        "notin" => "∉",
+        "degree" => "°",
+        "dot" => "·",
+        "alpha" => "α",
+        "beta" => "β",
+        "gamma" => "γ",
+        "delta" => "δ",
+        "epsilon" => "ε",
+        "theta" => "θ",
+        "lambda" => "λ",
+        "mu" => "μ",
+        "nu" => "ν",
+        "pi" => "π",
+        "rho" => "ρ",
+        "sigma" => "σ",
+        "tau" => "τ",
+        "phi" => "φ",
+        "psi" => "ψ",
+        "omega" => "ω",
+        "GAMMA" => "Γ",
+        "DELTA" => "Δ",
+        "THETA" => "Θ",
+        "LAMBDA" => "Λ",
+        "PI" => "Π",
+        "SIGMA" => "Σ",
+        "PHI" => "Φ",
+        "PSI" => "Ψ",
+        "OMEGA" => "Ω",
+        // 글꼴/그룹 명령은 버린다.
+        "LEFT" | "RIGHT" | "rm" | "it" | "bold" | "ITALIC" => "",
+        other => return other.to_string(),
+    };
+    mapped.to_string()
 }
 
 /// 상자(셀) 안 문단들을 배치한다. origin은 텍스트 영역 좌상단(pt).
@@ -762,6 +1089,7 @@ fn layout_box_para_iter<'a>(
     let mut flow_floor = origin_y;
     for para in paras {
         let mut para_top: Option<f32> = None;
+        let tabs = crate::tab::tab_stops(doc, para);
 
         if para.line_segs.is_empty() {
             if para.chars.is_empty() {
@@ -770,16 +1098,25 @@ fn layout_box_para_iter<'a>(
                 let end = para.wchar_len();
                 let items = shape_range(store, doc, para, (0, end), warnings);
                 let max_size = items_max_size(&items).unwrap_or(10.0);
-                para_top = Some(content_bottom);
-                let last_y = place_wrapped(
-                    page,
-                    items,
-                    origin_x,
-                    content_bottom + max_size * 1.2,
-                    width,
-                    max_size * 1.6,
-                );
-                content_bottom = last_y + max_size * 0.4;
+                let geom = para_geometry(doc, para);
+                let left = origin_x + geom.left;
+                let avail = (width - geom.left - geom.right).max(4.0);
+                let baseline_y = content_bottom + geom.spacing_top + max_size * 1.2;
+                para_top = Some(content_bottom + geom.spacing_top);
+                let natural = items_width(&items);
+                let align = doc
+                    .header
+                    .para_shapes
+                    .get(para.para_shape.0 as usize)
+                    .map_or(1, |p| p.alignment());
+                let x = if natural <= avail && (align == 2 || align == 3) {
+                    left + (avail - natural) * if align == 3 { 0.5 } else { 1.0 }
+                } else {
+                    left
+                };
+                let last_y =
+                    place_wrapped(page, items, x, baseline_y, avail, max_size * 1.6, &tabs);
+                content_bottom = last_y + max_size * 0.4 + geom.spacing_bottom;
             }
             // 폴백(캐시 없는) 문단은 흐름 배치 — 이후 캐시 문단이 넘지 않게 바닥을 올린다.
             flow_floor = flow_floor.max(content_bottom);
@@ -833,6 +1170,7 @@ fn layout_box_para_iter<'a>(
                     baseline_y,
                     wrap_width,
                     line_advance,
+                    &tabs,
                 );
                 content_bottom = last_y + (seg.line_height as f32 / 100.0 - gap_pt).max(0.0);
                 // 우리 줄바꿈이 캐시와 어긋나 이 줄이 캐시 자리 아래로 넘쳤다면(단일 seg
@@ -981,6 +1319,29 @@ fn justify_line(items: &mut [InlineItem], slack: f32) {
     }
 }
 
+/// 문단 기하(pt) — 폴백 경로에서 적용할 들여쓰기/여백/간격.
+/// (캐시 lineseg 경로는 col_start/v_pos에 이미 반영돼 있어 쓰지 않는다.)
+#[derive(Default, Clone, Copy)]
+struct ParaGeom {
+    /// 왼쪽 시작 가산(margin_left + 첫 줄 들여쓰기, 음수=내어쓰기 v1 무시).
+    left: f32,
+    right: f32,
+    spacing_top: f32,
+    spacing_bottom: f32,
+}
+
+fn para_geometry(doc: &Document, para: &Paragraph) -> ParaGeom {
+    match doc.header.para_shapes.get(para.para_shape.0 as usize) {
+        Some(p) => ParaGeom {
+            left: (p.margin_left as f32 / 100.0).max(0.0) + (p.indent as f32 / 100.0).max(0.0),
+            right: (p.margin_right as f32 / 100.0).max(0.0),
+            spacing_top: (p.spacing_top as f32 / 100.0).max(0.0),
+            spacing_bottom: (p.spacing_bottom as f32 / 100.0).max(0.0),
+        },
+        None => ParaGeom::default(),
+    }
+}
+
 fn items_width(items: &[InlineItem]) -> f32 {
     let mut x = 0.0f32;
     for item in items {
@@ -1033,6 +1394,7 @@ fn push_run(page: &mut PageList, x: f32, y: f32, run: crate::shape::ShapedRun) {
 
 /// 인라인 항목들을 배치한다. `max_width`를 넘으면 글리프 단위 그리디
 /// 줄바꿈(`f32::INFINITY`면 비활성). 마지막 베이스라인 y를 반환한다.
+#[allow(clippy::too_many_arguments)]
 fn place_wrapped(
     page: &mut PageList,
     items: Vec<InlineItem>,
@@ -1040,6 +1402,7 @@ fn place_wrapped(
     first_baseline_y: f32,
     max_width: f32,
     line_advance: f32,
+    tabs: &[f32],
 ) -> f32 {
     let limit = x0 + max_width;
     let mut x = x0;
@@ -1097,12 +1460,81 @@ fn place_wrapped(
                 }
             }
             InlineItem::Tab => {
-                let rel = x - x0;
-                x = x0 + (rel / TAB_INTERVAL_PT).floor() * TAB_INTERVAL_PT + TAB_INTERVAL_PT;
+                x = x0 + crate::tab::next_tab(tabs, x - x0, TAB_INTERVAL_PT);
             }
         }
     }
     y
+}
+
+#[cfg(test)]
+mod para_geom_tests {
+    use super::para_geometry;
+    use hwp_model::{Document, ParaShape, ParaShapeId, Paragraph};
+
+    #[test]
+    fn 문단_기하_단위변환() {
+        let mut doc = Document::default();
+        doc.header.para_shapes.push(ParaShape {
+            margin_left: 4000,
+            margin_right: 2000,
+            indent: 3000,
+            spacing_top: 1200,
+            spacing_bottom: 600,
+            ..ParaShape::default()
+        });
+        let para = Paragraph {
+            para_shape: ParaShapeId(0),
+            ..Paragraph::default()
+        };
+        let g = para_geometry(&doc, &para);
+        assert_eq!(g.left, 70.0); // (margin_left 4000 + indent 3000)/100
+        assert_eq!(g.right, 20.0);
+        assert_eq!(g.spacing_top, 12.0);
+        assert_eq!(g.spacing_bottom, 6.0);
+        // 음수 들여쓰기(내어쓰기)는 v1에서 0 처리 → left = margin만.
+        doc.header.para_shapes[0].indent = -1000;
+        assert_eq!(para_geometry(&doc, &para).left, 40.0);
+        // para_shape 범위 밖이면 0.
+        let p2 = Paragraph {
+            para_shape: ParaShapeId(99),
+            ..Paragraph::default()
+        };
+        assert_eq!(para_geometry(&doc, &p2).left, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod diagonal_tests {
+    use super::diagonal_dirs;
+
+    #[test]
+    fn 수식_스크립트_근사() {
+        use super::prettify_equation;
+        // 중괄호 제거 + 그리스/연산자/기호 매핑.
+        assert_eq!(prettify_equation("x ^{2} + y"), "x ^ 2 + y");
+        assert_eq!(prettify_equation("alpha + beta times gamma"), "α + β × γ");
+        assert_eq!(prettify_equation("sqrt {x over y}"), "√ x / y");
+        assert_eq!(prettify_equation("a <= b >= c != d"), "a ≤ b ≥ c ≠ d");
+        // 글꼴/그룹 명령은 버림.
+        assert_eq!(prettify_equation("LEFT ( a RIGHT )"), "( a )");
+        // 모르는 토큰은 원문 유지.
+        assert_eq!(prettify_equation("foo_bar"), "foo_bar");
+    }
+
+    #[test]
+    fn 대각선_방향_비트() {
+        // 둘 다 0 → 대각선 없음.
+        assert_eq!(diagonal_dirs(0), (false, false));
+        // 3D/그림자(bit0,1)만 켜져도 대각선 아님.
+        assert_eq!(diagonal_dirs(0b11), (false, false));
+        // slash(bit2~4) → `/`.
+        assert_eq!(diagonal_dirs(0x4), (true, false));
+        // backSlash(bit5~7) → `\`.
+        assert_eq!(diagonal_dirs(0x20), (false, true));
+        // 둘 다(X자).
+        assert_eq!(diagonal_dirs(0x4 | 0x20), (true, true));
+    }
 }
 
 #[cfg(test)]
@@ -1140,6 +1572,11 @@ mod justify_tests {
             underline: false,
             strike: false,
             underline_color: 0xFFFF_FFFF,
+            shade_color: 0xFFFF_FFFF,
+            shadow: None,
+            outline: false,
+            emboss: false,
+            engrave: false,
             glyphs,
             width_pt: advs.iter().sum(),
             text: text.to_string(),

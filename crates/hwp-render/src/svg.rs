@@ -81,12 +81,74 @@ fn render_page(page: &PageList) -> String {
                 let font_key = run.font.data.as_ptr() as usize;
                 let color = hex_color(run.color);
                 let skew_c = if run.italic { 0.2126 * s } else { 0.0 };
-                let stroke = if run.bold {
-                    // 합성 굵게 4.5% (한컴 굵게 대조 보정)
-                    format!(r#" stroke="{color}" stroke-width="{:.1}""#, 0.045 * upem)
+                // 외곽선=채움없이 윤곽선만, 굵게=채움+스트로크, 기본=채움.
+                let main_attr = if run.outline {
+                    format!(
+                        r#" fill="none" stroke="{color}" stroke-width="{:.1}""#,
+                        0.025 * upem
+                    )
+                } else if run.bold {
+                    format!(
+                        r#" fill="{color}" stroke="{color}" stroke-width="{:.1}""#,
+                        0.03 * upem
+                    )
                 } else {
-                    String::new()
+                    format!(r#" fill="{color}""#)
                 };
+
+                // 글자 음영(배경 하이라이트) — 글리프 뒤 사각형.
+                if run.shade_color != 0xFFFF_FFFF {
+                    let _ = writeln!(
+                        out,
+                        r#"<rect x="{:.2}" y="{:.2}" width="{:.2}" height="{:.2}" fill="{}"/>"#,
+                        x,
+                        y - run.size_pt * 0.8,
+                        run.width_pt,
+                        run.size_pt,
+                        hex_color(run.shade_color)
+                    );
+                }
+                // 그림자 — 본문 전에 오프셋 복사.
+                if let Some(sc) = run.shadow {
+                    let sd = run.size_pt * 0.06;
+                    let shc = hex_color(sc);
+                    let mut pen_x = *x;
+                    for glyph in &run.glyphs {
+                        let d = outline_cache
+                            .entry((font_key, glyph.id))
+                            .or_insert_with(|| glyph_path(&face, glyph.id))
+                            .clone();
+                        if let Some(d) = d {
+                            let (a, dd) = (s * run.x_scale, -s);
+                            let (e, f) = (pen_x + glyph.x_offset + sd, y - glyph.y_offset + sd);
+                            let _ = writeln!(
+                                out,
+                                r#"<path transform="matrix({a:.4} 0 {skew_c:.4} {dd:.4} {e:.2} {f:.2})" d="{d}" fill="{shc}"/>"#
+                            );
+                        }
+                        pen_x += glyph.x_advance;
+                    }
+                }
+                // 양각/음각 — 흰 하이라이트 사본 오프셋(양각=좌상, 음각=우하).
+                if run.emboss || run.engrave {
+                    let rd = run.size_pt * 0.05 * if run.emboss { -1.0 } else { 1.0 };
+                    let mut pen_x = *x;
+                    for glyph in &run.glyphs {
+                        let d = outline_cache
+                            .entry((font_key, glyph.id))
+                            .or_insert_with(|| glyph_path(&face, glyph.id))
+                            .clone();
+                        if let Some(d) = d {
+                            let (a, dd) = (s * run.x_scale, -s);
+                            let (e, f) = (pen_x + glyph.x_offset + rd, y - glyph.y_offset + rd);
+                            let _ = writeln!(
+                                out,
+                                r##"<path transform="matrix({a:.4} 0 {skew_c:.4} {dd:.4} {e:.2} {f:.2})" d="{d}" fill="#ffffff"/>"##
+                            );
+                        }
+                        pen_x += glyph.x_advance;
+                    }
+                }
 
                 let mut pen_x = *x;
                 for glyph in &run.glyphs {
@@ -99,7 +161,7 @@ fn render_page(page: &PageList) -> String {
                         let (e, f) = (pen_x + glyph.x_offset, y - glyph.y_offset);
                         let _ = writeln!(
                             out,
-                            r#"<path transform="matrix({a:.4} 0 {skew_c:.4} {dd:.4} {e:.2} {f:.2})" d="{d}" fill="{color}"{stroke}/>"#
+                            r#"<path transform="matrix({a:.4} 0 {skew_c:.4} {dd:.4} {e:.2} {f:.2})" d="{d}"{main_attr}/>"#
                         );
                     }
                     pen_x += glyph.x_advance;
@@ -136,8 +198,19 @@ fn render_page(page: &PageList) -> String {
                     }
                 };
                 let stroke_attr = match stroke {
-                    Some((c, w)) => {
-                        format!(r#" stroke="{}" stroke-width="{:.2}""#, hex_color(*c), w)
+                    Some(s) => {
+                        let dash = if s.dash.len() >= 2 {
+                            let arr: Vec<String> =
+                                s.dash.iter().map(|v| format!("{v:.2}")).collect();
+                            format!(r#" stroke-dasharray="{}""#, arr.join(","))
+                        } else {
+                            String::new()
+                        };
+                        format!(
+                            r#" stroke="{}" stroke-width="{:.2}"{dash}"#,
+                            hex_color(s.color),
+                            s.width
+                        )
                     }
                     None => String::new(),
                 };

@@ -7,9 +7,12 @@
 //! 이미지는 JPEG는 원본을 DCTDecode로, 그 외는 [`image`]로 디코드해 RGB(+SMask)로
 //! 임베드한다. 좌표는 DisplayList(좌상단·y아래) → PDF(좌하단·y위)로 뒤집는다.
 //!
-//! glyf(트루타입) 폰트는 CIDFontType2/FontFile2로 완전 지원한다. CFF(OTF) 폰트는
-//! CIDFontType0/FontFile3(OpenType)로 best-effort 임베드한다(드묾 — 한글 폰트는
-//! 대부분 glyf).
+//! 폰트 아웃라인 종류별 임베드:
+//! - glyf(트루타입): CIDFontType2 + FontFile2(Length1).
+//! - CFF(OTF, `CFF ` 테이블): CIDFontType0 + FontFile3(Subtype=OpenType).
+//!   둘 다 서브셋 + Identity-H + ToUnicode로 동일하게 처리한다(렌더·검색·복사
+//!   poppler로 검증, tests/pdf_cff.rs). 서브셋 실패 시 전체 폰트를 같은 구조로
+//!   임베드한다(CID=GID).
 
 use std::collections::HashMap;
 use std::io::Write as _;
@@ -22,15 +25,15 @@ use pdf_writer::{Content, Filter, Finish, Name, Pdf, Rect, Ref, Str};
 use rustybuzz::ttf_parser;
 use subsetter::{GlyphRemapper, subset};
 
-use crate::display::{DisplayList, Fill, Gradient, Item, PathCmd, path_bbox};
+use crate::display::{DisplayList, Fill, Gradient, Item, PathCmd, Stroke, path_bbox};
 use crate::error::RenderError;
 use crate::fonts::LoadedFont;
 use crate::shape::ShapedRun;
 
 /// 합성 기울임 탄젠트 (png.rs/svg.rs와 동일, ≈12°).
 const ITALIC_SKEW: f32 = 0.2126;
-/// 합성 굵게 스트로크 굵기 (글자 크기 대비, png.rs와 동일). 한컴 굵게 대조 보정.
-const BOLD_STROKE: f32 = 0.045;
+/// 합성 굵게 스트로크 굵기 (글자 크기 대비, png.rs와 동일).
+const BOLD_STROKE: f32 = 0.03;
 
 /// 문서 전체를 단일 멀티페이지 PDF 바이트로 렌더링한다.
 pub fn render_pdf(list: &DisplayList, warnings: &mut Vec<String>) -> Result<Vec<u8>, RenderError> {
@@ -181,7 +184,49 @@ pub fn render_pdf(list: &DisplayList, warnings: &mut Vec<String>) -> Result<Vec<
                 },
                 Item::Glyphs { x, y, run } => {
                     if let Some(&idx) = font_index.get(&font_key(&run.font)) {
-                        write_glyph_run(&mut content, &fonts[idx], *x, *y, h, run);
+                        // 글자 음영(배경 하이라이트) — 글리프 뒤 사각형.
+                        if run.shade_color != 0xFFFF_FFFF {
+                            let (sr, sg, sb) = colorref_rgb(run.shade_color);
+                            content.set_fill_rgb(sr, sg, sb);
+                            content.rect(
+                                *x,
+                                h - (*y + run.size_pt * 0.2),
+                                run.width_pt,
+                                run.size_pt,
+                            );
+                            content.fill_nonzero();
+                        }
+                        // 그림자 — 본문 전에 오프셋 복사.
+                        if let Some(sc) = run.shadow {
+                            let d = run.size_pt * 0.06;
+                            write_glyph_run(&mut content, &fonts[idx], *x, *y, h, run, sc, d, d);
+                        }
+                        // 양각/음각 — 흰 하이라이트 사본 오프셋(양각=좌상, 음각=우하).
+                        if run.emboss || run.engrave {
+                            let d = run.size_pt * 0.05 * if run.emboss { -1.0 } else { 1.0 };
+                            write_glyph_run(
+                                &mut content,
+                                &fonts[idx],
+                                *x,
+                                *y,
+                                h,
+                                run,
+                                0x00FF_FFFF,
+                                d,
+                                d,
+                            );
+                        }
+                        write_glyph_run(
+                            &mut content,
+                            &fonts[idx],
+                            *x,
+                            *y,
+                            h,
+                            run,
+                            run.color,
+                            0.0,
+                            0.0,
+                        );
                     }
                 }
                 Item::Path {
@@ -189,6 +234,7 @@ pub fn render_pdf(list: &DisplayList, warnings: &mut Vec<String>) -> Result<Vec<
                     fill,
                     stroke,
                 } => {
+                    let dashed = stroke.as_ref().is_some_and(|s| s.dash.len() >= 2);
                     // 그러데이션 채움: 경로로 클립한 뒤 색 띠/원으로 채운다(실제 그러데이션).
                     if let Some(Fill::Gradient(grad)) = fill {
                         content.save_state();
@@ -198,19 +244,15 @@ pub fn render_pdf(list: &DisplayList, warnings: &mut Vec<String>) -> Result<Vec<
                         pdf_gradient_bands(&mut content, grad, commands, h);
                         content.restore_state();
                         // 테두리(선)는 별도로 다시 그린다.
-                        if let Some((sc, w)) = stroke {
-                            let (r, g, b) = colorref_rgb(*sc);
-                            content.set_stroke_rgb(r, g, b);
-                            content.set_line_width(w.max(0.1));
+                        if let Some(s) = stroke {
+                            apply_stroke(&mut content, s);
                             pdf_emit_path(&mut content, commands, h);
                             content.stroke();
                         }
                     } else {
                         pdf_emit_path(&mut content, commands, h);
-                        if let Some((sc, w)) = stroke {
-                            let (r, g, b) = colorref_rgb(*sc);
-                            content.set_stroke_rgb(r, g, b);
-                            content.set_line_width(w.max(0.1));
+                        if let Some(s) = stroke {
+                            apply_stroke(&mut content, s);
                         }
                         let solid = match fill {
                             Some(Fill::Solid(c)) => Some(*c),
@@ -235,6 +277,10 @@ pub fn render_pdf(list: &DisplayList, warnings: &mut Vec<String>) -> Result<Vec<
                                 content.end_path();
                             }
                         }
+                    }
+                    // 점선 상태가 이후 항목(표 테두리 등)으로 새지 않도록 실선 복원.
+                    if dashed {
+                        content.set_dash_pattern([], 0.0);
                     }
                 }
             }
@@ -461,6 +507,8 @@ fn write_page(pdf: &mut Pdf, plan: &PagePlan, page_tree_id: Ref, fonts: &[FontIn
 
 /// 글리프 런을 텍스트 객체로 그린다. 각 글리프를 셰이핑 좌표에 명시 배치해
 /// png/svg 백엔드와 위치를 일치시킨다.
+/// 글리프 런을 PDF 텍스트로 그린다. color로 채우고 (dx, dy)만큼 평행이동(그림자용).
+#[allow(clippy::too_many_arguments)]
 fn write_glyph_run(
     content: &mut Content,
     f: &FontInfo,
@@ -468,13 +516,21 @@ fn write_glyph_run(
     y: f32,
     page_h: f32,
     run: &ShapedRun,
+    color: u32,
+    dx: f32,
+    dy: f32,
 ) {
     content.begin_text();
     content.set_font(Name(f.res_name.as_bytes()), run.size_pt);
     content.set_horizontal_scaling(run.x_scale * 100.0); // 장평(Tz)
-    let (r, g, b) = colorref_rgb(run.color);
+    let (r, g, b) = colorref_rgb(color);
     content.set_fill_rgb(r, g, b);
-    if run.bold {
+    if run.outline {
+        // 외곽선 = 윤곽선만(채움 없음).
+        content.set_text_rendering_mode(TextRenderingMode::Stroke);
+        content.set_stroke_rgb(r, g, b);
+        content.set_line_width(run.size_pt * 0.025);
+    } else if run.bold {
         // 합성 굵게 = 채움+스트로크.
         content.set_text_rendering_mode(TextRenderingMode::FillStroke);
         content.set_stroke_rgb(r, g, b);
@@ -484,18 +540,18 @@ fn write_glyph_run(
     }
     let shear = if run.italic { ITALIC_SKEW } else { 0.0 };
 
-    let mut pen_x = x;
+    let mut pen_x = x + dx;
     for gl in &run.glyphs {
         let gid = out_gid(f.subset_ok, &f.remapper, gl.id);
         // Tm: 크기·장평은 Tf/Tz가 적용, 여기선 기울임 시어(c)·베이스라인 이동만.
-        // y 뒤집기: PDF는 y-위 → page_h - (y - y_offset).
+        // y 뒤집기: PDF는 y-위 → page_h - (y - y_offset). 그림자는 dy만큼 더 내린다.
         content.set_text_matrix([
             1.0,
             0.0,
             shear,
             1.0,
             pen_x + gl.x_offset,
-            page_h - (y - gl.y_offset),
+            page_h - (y - gl.y_offset) - dy,
         ]);
         let code = gid.to_be_bytes();
         content.show(Str(&code));
@@ -536,6 +592,16 @@ fn subset_tag(mut i: usize) -> String {
         i /= 26;
     }
     s
+}
+
+/// 선 스타일(색·굵기·점선)을 콘텐츠 상태에 적용한다.
+fn apply_stroke(content: &mut Content, s: &Stroke) {
+    let (r, g, b) = colorref_rgb(s.color);
+    content.set_stroke_rgb(r, g, b);
+    content.set_line_width(s.width.max(0.1));
+    if s.dash.len() >= 2 {
+        content.set_dash_pattern(s.dash.iter().copied(), 0.0);
+    }
 }
 
 /// 경로 명령을 PDF 콘텐츠로(y 뒤집기 h-y).

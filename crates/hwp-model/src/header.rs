@@ -20,6 +20,12 @@ pub struct DocHeader {
     pub tab_defs: Vec<RawEntry>,
     pub numberings: Vec<RawEntry>,
     pub bullets: Vec<RawEntry>,
+    /// 렌더 전용: `bullets`와 병렬인 글머리 문자(없으면 비어 있음 — 기본 `•`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bullet_chars: Vec<char>,
+    /// 렌더 전용: `numberings`와 병렬인 수준별 번호 형식(없으면 십진 기본).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub numbering_levels: Vec<Vec<NumLevel>>,
     pub para_shapes: Vec<ParaShape>,
     pub styles: Vec<Style>,
     /// ID_MAPPINGS 원본 카운트 배열 (버전별 길이 보존 — 쓰기 시 유도값과 대조)
@@ -76,12 +82,8 @@ pub struct CharShape {
     pub offsets: [i8; LANG_COUNT],
     /// 기준 크기 (HWPUNIT — 10pt = 1000)
     pub base_size: i32,
-    /// 속성 비트 (기울임/굵게/밑줄 등). 취소선 비트(18~20)는 DIFFSPEC라 신뢰하지 않음 — `strike` 참조.
+    /// 속성 비트 (기울임/굵게/밑줄/취소선 등)
     pub attr: u32,
-    /// 취소선 표시 여부 (의미 플래그). HWP5는 raw 비트가 불신뢰라 항상 false,
-    /// HWPX는 visible `<hp:strikeout>`(NONE/3D 제외)일 때만 true. 바이너리에 쓰지 않음.
-    #[serde(default)]
-    pub strike: bool,
     pub shadow_gap: (i8, i8),
     /// COLORREF (0x00BBGGRR)
     pub text_color: u32,
@@ -114,15 +116,49 @@ impl CharShape {
         self.underline_kind() == 1
     }
 
-    /// 취소선 여부 (명시적 `strike` 플래그 기반).
-    ///
-    /// HWP5 속성의 "취소선" 비트(18~20)는 **스펙 이견(DIFFSPEC) 영역**이라 신뢰할 수 없다 —
-    /// pyhwp(레퍼런스)는 취소선을 비트로 모델링하지 않고, bits 18~20을 취소선으로 읽으면 한글이
-    /// **평문으로 렌더하는** 실문서(보도자료 등)에 가짜 취소선이 그어진다(한글 PrvImage 대조 확인).
-    /// 따라서 HWP5 reader는 raw 비트로 strike를 켜지 않는다. HWPX reader만 명시적 `<hp:strikeout>`
-    /// 의 visible shape(NONE/3D 제외)일 때 `strike`를 켠다. `attr`는 보존(바이트 동일 왕복 무영향).
+    /// 취소선 (bits 18~20).
     pub fn has_strike(&self) -> bool {
-        self.strike
+        (self.attr >> 18) & 0x7 != 0
+    }
+
+    /// 글자 음영(배경 하이라이트)이 있는지. 0xFFFFFFFF=없음 관례.
+    pub fn has_shade(&self) -> bool {
+        self.shade_color != 0xFFFF_FFFF
+    }
+
+    /// 외곽선 종류 (bits 8~10, 0=없음). 스펙 표.
+    pub fn has_outline(&self) -> bool {
+        (self.attr >> 8) & 0x7 != 0
+    }
+
+    /// 그림자 종류 (bits 11~12).
+    pub fn has_shadow(&self) -> bool {
+        (self.attr >> 11) & 0x3 != 0
+    }
+
+    /// 양각 (bit 13).
+    pub fn is_emboss(&self) -> bool {
+        self.attr & (1 << 13) != 0
+    }
+
+    /// 음각 (bit 14).
+    pub fn is_engrave(&self) -> bool {
+        self.attr & (1 << 14) != 0
+    }
+
+    /// 위첨자 (bit 15).
+    pub fn is_superscript(&self) -> bool {
+        self.attr & (1 << 15) != 0
+    }
+
+    /// 아래첨자 (bit 16).
+    pub fn is_subscript(&self) -> bool {
+        self.attr & (1 << 16) != 0
+    }
+
+    /// 언어 슬롯의 수동 글자 위치(첨자 오프셋) % (-100~100). 위=양수.
+    pub fn char_offset(&self, lang: usize) -> i8 {
+        self.offsets.get(lang).copied().unwrap_or(0)
     }
 }
 
@@ -160,6 +196,54 @@ impl ParaShape {
     pub fn alignment(&self) -> u8 {
         ((self.attr1 >> 2) & 0x7) as u8
     }
+
+    /// 문단 머리 종류 (bit23~24): 0=없음, 1=개요, 2=번호, 3=글머리표(불릿).
+    pub fn head_type(&self) -> u8 {
+        ((self.attr1 >> 23) & 0x3) as u8
+    }
+
+    /// 문단 수준 (bit25~27): 1~7.
+    pub fn head_level(&self) -> u8 {
+        (((self.attr1 >> 25) & 0x7) as u8).clamp(1, 7)
+    }
+}
+
+/// 번호 매기기 한 수준의 형식.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NumLevel {
+    /// 시작 번호.
+    pub start: u32,
+    pub fmt: NumFmt,
+}
+
+impl Default for NumLevel {
+    fn default() -> Self {
+        Self {
+            start: 1,
+            fmt: NumFmt::Digit,
+        }
+    }
+}
+
+/// 번호 표기 형식.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NumFmt {
+    /// 1, 2, 3
+    Digit,
+    /// 가, 나, 다
+    HangulSyllable,
+    /// ㄱ, ㄴ, ㄷ
+    HangulJamo,
+    /// ①, ②, ③
+    CircledDigit,
+    /// A, B, C
+    LatinUpper,
+    /// a, b, c
+    LatinLower,
+    /// I, II, III
+    RomanUpper,
+    /// i, ii, iii
+    RomanLower,
 }
 
 /// STYLE — 스타일 하나.
@@ -249,5 +333,66 @@ impl BorderFill {
     /// 그릴 배경색 (없음 표식 제외).
     pub fn visible_bg(&self) -> Option<u32> {
         self.bg_color.filter(|&c| c != 0xFFFF_FFFF)
+    }
+}
+
+#[cfg(test)]
+mod char_effect_tests {
+    use super::*;
+
+    #[test]
+    fn 글자효과_접근자() {
+        // 음영: 0xFFFFFFFF=없음, 그 외=있음.
+        let none = CharShape {
+            shade_color: 0xFFFF_FFFF,
+            ..CharShape::default()
+        };
+        assert!(!none.has_shade());
+        let shaded = CharShape {
+            shade_color: 0x0000_FFFF,
+            ..CharShape::default()
+        };
+        assert!(shaded.has_shade());
+
+        // 위/아래 첨자(bit15/16), 그림자(bits11~12), 외곽선(8~10), 양각13/음각14.
+        let sup = CharShape {
+            attr: 1 << 15,
+            ..CharShape::default()
+        };
+        assert!(sup.is_superscript() && !sup.is_subscript() && !sup.has_shadow());
+        let sub = CharShape {
+            attr: 1 << 16,
+            ..CharShape::default()
+        };
+        assert!(sub.is_subscript() && !sub.is_superscript());
+        let shadow = CharShape {
+            attr: 1 << 11,
+            ..CharShape::default()
+        };
+        assert!(shadow.has_shadow() && !shadow.is_emboss());
+        let outline = CharShape {
+            attr: 1 << 8,
+            ..CharShape::default()
+        };
+        assert!(outline.has_outline());
+        let emboss = CharShape {
+            attr: 1 << 13,
+            ..CharShape::default()
+        };
+        assert!(emboss.is_emboss() && !emboss.has_shadow() && !emboss.is_engrave());
+        let engrave = CharShape {
+            attr: 1 << 14,
+            ..CharShape::default()
+        };
+        assert!(engrave.is_engrave() && !engrave.is_emboss());
+
+        // 수동 글자위치(offsets%).
+        let mut cs = CharShape::default();
+        cs.offsets[1] = 30;
+        assert_eq!(cs.char_offset(1), 30);
+        assert_eq!(cs.char_offset(0), 0);
+        // 기본값은 전부 효과 없음.
+        let d = CharShape::default();
+        assert!(!d.is_superscript() && !d.is_subscript() && !d.has_shadow());
     }
 }

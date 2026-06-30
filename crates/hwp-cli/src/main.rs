@@ -15,6 +15,8 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+// CLI 명령 enum은 시작 시 한 번만 생성 — 변형 크기 차이는 무의미. Edit가 옵션이 많아 큼.
+#[allow(clippy::large_enum_variant)]
 enum Cmd {
     /// 파일 정보 표시: 포맷/버전/속성/스트림 목록
     Info {
@@ -123,10 +125,6 @@ enum Cmd {
         /// 텍스트 치환 "찾기=>바꾸기" (반복 가능, 모든 일치 치환)
         #[arg(long)]
         replace: Vec<String>,
-        /// 표 행 추가 "표:N" 또는 "표:템플릿행:N" (반복 가능, 0-기반). 마지막 행을
-        /// 복제해 빈 행 N개 추가 — 새 행(인덱스 기존행수부터)은 --set-cell로 채운다.
-        #[arg(long = "add-row")]
-        add_row: Vec<String>,
         /// 표 셀 설정 "표:행:열=값" (반복 가능, 0-기반 인덱스)
         #[arg(long = "set-cell")]
         set_cell: Vec<String>,
@@ -139,6 +137,30 @@ enum Cmd {
         /// 메모(주석) 추가 "텍스트" (hwpx 출력 전용, 실험적, 반복 가능)
         #[arg(long = "add-memo")]
         add_memo: Vec<String>,
+        /// 누름틀 생성 "앵커=>이름" 또는 "앵커=>이름=값" — 앵커 텍스트 뒤에 %clk 필드 삽입 (반복 가능)
+        #[arg(long = "create-field")]
+        create_field: Vec<String>,
+        /// 글자 서식 "찾기:속성=값,…" (예: "제목:bold=on,size=16,color=#FF0000")
+        #[arg(long = "set-format")]
+        set_format: Vec<String>,
+        /// 문단 정렬 "찾기=정렬" (left/right/center/justify/distribute)
+        #[arg(long = "set-align")]
+        set_align: Vec<String>,
+        /// 문단 삽입 "앵커=>텍스트" — 앵커가 있는 문단 뒤에 새 문단 (반복 가능)
+        #[arg(long = "insert-para")]
+        insert_para: Vec<String>,
+        /// 문단 삽입(앞) "앵커=>텍스트" — 앵커가 있는 문단 앞에 새 문단 (반복 가능)
+        #[arg(long = "insert-para-before")]
+        insert_para_before: Vec<String>,
+        /// 문단 삭제 "텍스트" — 텍스트가 있는 문단 삭제 (반복 가능)
+        #[arg(long = "delete-para")]
+        delete_para: Vec<String>,
+        /// 표 행 추가 "표" — N번째 표 끝에 빈 행 (반복 가능, 0-기반)
+        #[arg(long = "add-row")]
+        add_row: Vec<String>,
+        /// 표 행 삭제 "표:행" — N번째 표의 R행 (반복 가능, 0-기반)
+        #[arg(long = "delete-row")]
+        delete_row: Vec<String>,
         /// 쓰기 후 재읽기로 검증
         #[arg(long)]
         verify: bool,
@@ -318,14 +340,35 @@ fn main() -> anyhow::Result<()> {
             input,
             output,
             replace,
-            add_row,
             set_cell,
             set_field,
             set_meta,
             add_memo,
+            create_field,
+            set_format,
+            set_align,
+            insert_para,
+            insert_para_before,
+            delete_para,
+            add_row,
+            delete_row,
             verify,
         } => commands::edit::run(
-            &input, &output, &replace, &add_row, &set_cell, &set_field, &set_meta, &add_memo,
+            &input,
+            &output,
+            &replace,
+            &set_cell,
+            &set_field,
+            &set_meta,
+            &add_memo,
+            &create_field,
+            &set_format,
+            &set_align,
+            &insert_para,
+            &insert_para_before,
+            &delete_para,
+            &add_row,
+            &delete_row,
             verify,
         ),
         Cmd::Fields { file, json } => commands::fields::run(&file, json),

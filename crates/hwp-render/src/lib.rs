@@ -11,14 +11,17 @@ pub mod diff;
 pub mod display;
 pub mod error;
 pub mod fonts;
+pub mod footnote;
 pub mod gso;
 pub mod layout;
 pub mod lineseg;
+pub mod list;
 pub mod pdf;
 pub mod png;
 pub mod shape;
 pub mod shape_draw;
 pub mod svg;
+pub mod tab;
 
 use hwp_model::Document;
 
