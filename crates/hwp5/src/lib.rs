@@ -25,10 +25,12 @@ pub mod error;
 pub mod file_header;
 pub mod read;
 pub mod record;
+pub mod summary;
 pub mod write;
 
 pub use container::Hwp5Container;
 pub use error::Hwp5Error;
 pub use file_header::FileHeader;
 pub use read::{ReadResult, read_document};
+pub use summary::parse_summary;
 pub use write::{WriteOptions, write_document};

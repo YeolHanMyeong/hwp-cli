@@ -208,6 +208,7 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
                             let visible = matches!(shape.as_deref(), Some(s) if s != "NONE" && !s.contains("3D"));
                             if visible {
                                 cs.attr |= 1 << 18;
+                                cs.strike = true;
                             }
                         }
                     }

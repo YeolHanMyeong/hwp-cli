@@ -60,11 +60,19 @@ pub fn read_document(path: &Path) -> Result<ReadResult> {
         }
     }
 
+    // 문서 메타데이터 (요약 정보 — 최선 노력: 없거나 손상돼도 진단 계속)
+    let metadata = container
+        .read_stream_raw("/\u{5}HwpSummaryInformation")
+        .ok()
+        .map(|raw| crate::summary::parse_summary(&raw))
+        .unwrap_or_default();
+
     let document = Document {
         meta: DocMeta {
             source_format: "hwp5".to_string(),
             source_version: container.file_header().version.to_string(),
         },
+        metadata,
         header,
         sections,
         bin_streams,

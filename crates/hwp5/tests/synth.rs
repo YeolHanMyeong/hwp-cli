@@ -150,6 +150,75 @@ fn 표_빈셀_포함_모든_셀_nparas_1이상() {
     }
 }
 
+/// 표 행 추가(add_rows)로 늘린 표가 한글 합성 규격을 만족해야 한다.
+///
+/// 양식 채우기에서 행/칸을 추가(`hwp edit --add-row`, `hwp fill --data tables`)한
+/// 표는 새 셀이 빈 문단이라도 nparas≥1·문단끝·nchars bit31을 지켜야 하고,
+/// row_cell_counts(행별 셀 수)가 행 수·셀 수와 정합해야 한다(hwp5 extract assert).
+/// 어긋나면 한글이 '손상'으로 거부한다.
+#[test]
+fn 행_추가_표_합성_규격_충족() {
+    let mut doc = hwp_convert::from_markdown("| 품목 | 수량 |\n| --- | --- |\n| | |\n");
+    // 빈 행 3개 추가 후 일부 채움(양식 변형 시나리오).
+    hwp_convert::add_rows(&mut doc, 0, None, 3).unwrap();
+    hwp_convert::set_cell(&mut doc, 0, 1, 0, "노트북").unwrap();
+    hwp_convert::set_cell(&mut doc, 0, 1, 1, "5").unwrap();
+    // 행 4는 비워 둔 채(빈 셀 규격 검증).
+    let out = tmp("synth_grown_table.hwp");
+    hwp5::write_document(&doc, &out, &hwp5::WriteOptions::default()).unwrap();
+
+    // 1) 재읽기 IR: 표가 5행으로 늘고 row_cell_counts 정합.
+    let reread = hwp5::read_document(&out).unwrap().document;
+    let table = reread.sections[0]
+        .paragraphs
+        .iter()
+        .flat_map(|p| &p.controls)
+        .find_map(|c| match c {
+            hwp_model::Control::Table(t) => Some(t),
+            _ => None,
+        })
+        .expect("표 재읽기");
+    assert_eq!(table.rows, 5, "행 수 = 원래 2 + 추가 3");
+    assert_eq!(
+        table.row_cell_counts.len(),
+        table.rows as usize,
+        "row_cell_counts 길이 == 행 수"
+    );
+    assert_eq!(
+        table
+            .row_cell_counts
+            .iter()
+            .map(|c| *c as usize)
+            .sum::<usize>(),
+        table.cells.len(),
+        "row_cell_counts 합 == 셀 수"
+    );
+
+    // 2) 모든 셀 LIST_HEADER nparas ≥ 1 (빈 새 셀 포함 — 한글 손상 방지).
+    let mut c = hwp5::Hwp5Container::open(&out).unwrap();
+    let bt = c.read_record_stream("/BodyText/Section0").unwrap();
+    let list_headers = all_records(&bt, 0x48);
+    assert_eq!(
+        list_headers.len(),
+        table.cells.len(),
+        "셀 수 == LIST_HEADER 수"
+    );
+    for (i, lh) in list_headers.iter().enumerate() {
+        let nparas = i32::from_le_bytes([lh[0], lh[1], lh[2], lh[3]]);
+        assert!(
+            nparas >= 1,
+            "추가 셀 LIST_HEADER #{i}: nparas={nparas} (한글 손상)"
+        );
+    }
+
+    // 3) 채운 셀은 본문에 반영(노트북/5), 빈 새 행은 빈 셀로 남음.
+    let text = reread.plain_text();
+    assert!(
+        text.contains("노트북") && text.contains('5'),
+        "채운 셀 반영: {text:?}"
+    );
+}
+
 /// 빈 문단(빈 표 셀 포함)은 PARA_TEXT 레코드를 갖지 않아야 한다.
 ///
 /// 정품(work_report·한라대 정품) 실측: 빈 문단은 nchars=1 + PARA_CHAR_SHAPE +

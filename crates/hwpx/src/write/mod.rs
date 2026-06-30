@@ -97,7 +97,7 @@ pub fn write_document_with(
     put(
         &mut zip,
         "Contents/content.hpf",
-        templates::content_hpf(sections.len(), &bin_meta).as_bytes(),
+        templates::content_hpf(sections.len(), &bin_meta, &doc.metadata).as_bytes(),
     )?;
     put(&mut zip, "Contents/header.xml", header_xml.as_bytes())?;
     for (i, xml) in sections.iter().enumerate() {

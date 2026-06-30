@@ -5,9 +5,39 @@
 
 use std::path::Path;
 
+use hwp_model::Metadata;
 use serde_json::{Value, json};
 
 use crate::format::{FileFormat, detect};
+
+/// 메타데이터를 JSON 객체로 (모든 필드가 비면 `null`).
+fn metadata_json(meta: &Metadata) -> Value {
+    if meta.is_empty() {
+        return Value::Null;
+    }
+    json!({
+        "title": meta.title,
+        "author": meta.author,
+        "subject": meta.subject,
+        "keywords": meta.keywords,
+    })
+}
+
+/// 문서 메타데이터를 본문 파싱 없이 최선 노력으로 읽는다(요약 정보 / content.hpf만).
+fn read_metadata(path: &Path, format: FileFormat) -> Metadata {
+    match format {
+        FileFormat::Hwp5 => hwp5::Hwp5Container::open(path)
+            .ok()
+            .and_then(|mut c| c.read_stream_raw("/\u{5}HwpSummaryInformation").ok())
+            .map(|raw| hwp5::parse_summary(&raw))
+            .unwrap_or_default(),
+        FileFormat::Hwpx => hwpx::HwpxPackage::open(path)
+            .ok()
+            .and_then(|mut p| p.read_entry_string("Contents/content.hpf").ok())
+            .map(|xml| hwpx::parse_content_meta(&xml))
+            .unwrap_or_default(),
+    }
+}
 
 /// 컨테이너 계층 진단을 JSON으로 만든다 (CLI `--json`과 MCP가 공유).
 pub fn info_json(path: &Path) -> anyhow::Result<Value> {
@@ -25,6 +55,7 @@ pub fn info_json(path: &Path) -> anyhow::Result<Value> {
                 "encrypted": header.is_encrypted(),
                 "distribution": header.is_distribution(),
                 "sections": container.body_sections().len(),
+                "metadata": metadata_json(&read_metadata(path, FileFormat::Hwp5)),
                 "streams": streams.iter().map(|s| json!({
                     "path": s.path,
                     "size": s.size,
@@ -41,12 +72,28 @@ pub fn info_json(path: &Path) -> anyhow::Result<Value> {
                 "format": "hwpx",
                 "version": version.iter().cloned().collect::<std::collections::BTreeMap<_, _>>(),
                 "sections": sections.len(),
+                "metadata": metadata_json(&read_metadata(path, FileFormat::Hwpx)),
                 "entries": entries.iter().map(|e| json!({
                     "name": e.name,
                     "size": e.size,
                     "compressed_size": e.compressed_size,
                 })).collect::<Vec<_>>(),
             }))
+        }
+    }
+}
+
+/// 메타데이터를 사람용 텍스트로 출력 (비어 있으면 아무것도 출력 안 함).
+fn print_metadata(meta: &Metadata) {
+    let rows = [
+        ("제목", &meta.title),
+        ("지은이", &meta.author),
+        ("주제", &meta.subject),
+        ("키워드", &meta.keywords),
+    ];
+    for (label, val) in rows {
+        if let Some(v) = val.as_deref().filter(|v| !v.is_empty()) {
+            println!("{label}:   {v}");
         }
     }
 }
@@ -80,6 +127,7 @@ fn info_hwp5_text(path: &Path) -> anyhow::Result<()> {
         }
     );
     println!("섹션:   {}개", container.body_sections().len());
+    print_metadata(&read_metadata(path, FileFormat::Hwp5));
     println!("스트림: {}개", streams.len());
     for s in &streams {
         println!("  {:<40} {:>10} B", printable(&s.path), s.size);
@@ -100,6 +148,7 @@ fn info_hwpx_text(path: &Path) -> anyhow::Result<()> {
         println!("버전:   {}", pairs.join(" "));
     }
     println!("섹션:   {}개", sections.len());
+    print_metadata(&read_metadata(path, FileFormat::Hwpx));
     println!("엔트리: {}개", entries.len());
     for e in &entries {
         println!("  {:<40} {:>10} B", e.name, e.size);

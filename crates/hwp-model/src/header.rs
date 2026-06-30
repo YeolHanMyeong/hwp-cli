@@ -76,8 +76,12 @@ pub struct CharShape {
     pub offsets: [i8; LANG_COUNT],
     /// 기준 크기 (HWPUNIT — 10pt = 1000)
     pub base_size: i32,
-    /// 속성 비트 (기울임/굵게/밑줄/취소선 등)
+    /// 속성 비트 (기울임/굵게/밑줄 등). 취소선 비트(18~20)는 DIFFSPEC라 신뢰하지 않음 — `strike` 참조.
     pub attr: u32,
+    /// 취소선 표시 여부 (의미 플래그). HWP5는 raw 비트가 불신뢰라 항상 false,
+    /// HWPX는 visible `<hp:strikeout>`(NONE/3D 제외)일 때만 true. 바이너리에 쓰지 않음.
+    #[serde(default)]
+    pub strike: bool,
     pub shadow_gap: (i8, i8),
     /// COLORREF (0x00BBGGRR)
     pub text_color: u32,
@@ -110,9 +114,15 @@ impl CharShape {
         self.underline_kind() == 1
     }
 
-    /// 취소선 (bits 18~20).
+    /// 취소선 여부 (명시적 `strike` 플래그 기반).
+    ///
+    /// HWP5 속성의 "취소선" 비트(18~20)는 **스펙 이견(DIFFSPEC) 영역**이라 신뢰할 수 없다 —
+    /// pyhwp(레퍼런스)는 취소선을 비트로 모델링하지 않고, bits 18~20을 취소선으로 읽으면 한글이
+    /// **평문으로 렌더하는** 실문서(보도자료 등)에 가짜 취소선이 그어진다(한글 PrvImage 대조 확인).
+    /// 따라서 HWP5 reader는 raw 비트로 strike를 켜지 않는다. HWPX reader만 명시적 `<hp:strikeout>`
+    /// 의 visible shape(NONE/3D 제외)일 때 `strike`를 켠다. `attr`는 보존(바이트 동일 왕복 무영향).
     pub fn has_strike(&self) -> bool {
-        (self.attr >> 18) & 0x7 != 0
+        self.strike
     }
 }
 

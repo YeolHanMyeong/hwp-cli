@@ -583,6 +583,7 @@ dependencies = [
  "hwp-model",
  "pulldown-cmark",
  "serde_json",
+ "zip",
 ]
 
 [[package]]

@@ -228,6 +228,8 @@ fn parse_char_shape(data: &[u8]) -> Result<CharShape> {
         offsets,
         base_size,
         attr,
+        // HWP5 raw 비트(18~20)는 DIFFSPEC라 취소선으로 신뢰하지 않음 (가짜 취소선 방지).
+        strike: false,
         shadow_gap,
         text_color,
         underline_color,

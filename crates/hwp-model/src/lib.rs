@@ -27,7 +27,7 @@ pub use control::{
     BinRef, Cell, Control, GenericControl, GsoPlacement, PageDef, ParagraphList, Picture,
     SectionDef, ShapeGeom, ShapeKind, Table,
 };
-pub use document::{BinStream, DocMeta, Document, Section};
+pub use document::{BinStream, DocMeta, Document, Memo, Metadata, Section};
 pub use header::{
     BinDataItem, BorderFill, BorderLine, CharShape, DocHeader, DocumentProperties, FaceName,
     LANG_COUNT, ParaShape, RawEntry, Style,

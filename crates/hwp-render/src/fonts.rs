@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use fontdb::{Database, Family, Query, Source};
 use hwp_model::Document;
+use rustybuzz::ttf_parser;
 
 /// 한국어 문서용 폴백 글꼴 (분류 불가 시, 우선순위순).
 const FALLBACKS: &[&str] = &[
@@ -171,6 +172,39 @@ impl FontStore {
         result
     }
 
+    /// 주어진 문자에 글리프가 있는 커버리지 폴백 글꼴을 찾는다 (함초롬 우선 → CJK 폴백).
+    /// 문서가 지정한 글꼴(예: macOS 시스템 "휴먼명조")에 기호 글리프(❍ 등)가 없을 때
+    /// 두부(.notdef) 대신 쓸 글꼴. 해석 결과는 캐시한다.
+    pub fn font_covering(&mut self, c: char) -> Option<Arc<LoadedFont>> {
+        const COVERAGE_FALLBACKS: &[&str] = &[
+            "함초롬바탕",
+            "HCR Batang",
+            "함초롬돋움",
+            "HCR Dotum",
+            "Noto Serif CJK KR",
+            "Noto Sans CJK KR",
+            "NanumMyeongjo",
+            "NanumGothic",
+            "Apple SD Gothic Neo",
+            "AppleMyungjo",
+        ];
+        let key = format!("\u{1}cover:{}", c as u32);
+        if let Some(cached) = self.resolved.get(&key) {
+            return cached.clone();
+        }
+        let mut result = None;
+        for name in COVERAGE_FALLBACKS {
+            if let Some(font) = self.try_family(name)
+                && font_has_char(&font, c)
+            {
+                result = Some(font);
+                break;
+            }
+        }
+        self.resolved.insert(key, result.clone());
+        result
+    }
+
     fn try_family(&mut self, name: &str) -> Option<Arc<LoadedFont>> {
         let id = self.db.query(&Query {
             families: &[Family::Name(name)],
@@ -203,6 +237,14 @@ impl FontStore {
         self.loaded.insert(id, loaded.clone());
         Some(loaded)
     }
+}
+
+/// 글꼴이 해당 문자에 (.notdef 아닌) 글리프를 갖는지.
+fn font_has_char(font: &LoadedFont, c: char) -> bool {
+    ttf_parser::Face::parse(&font.data, font.index)
+        .ok()
+        .and_then(|f| f.glyph_index(c))
+        .is_some_and(|g| g.0 != 0)
 }
 
 impl Default for FontStore {

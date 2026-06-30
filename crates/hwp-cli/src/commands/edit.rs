@@ -10,12 +10,16 @@ use anyhow::Context;
 
 use crate::commands::cat::load_document;
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     input: &Path,
     output: &Path,
     replaces: &[String],
+    add_rows: &[String],
     set_cells: &[String],
     set_fields: &[String],
+    set_meta: &[String],
+    add_memos: &[String],
     verify: bool,
 ) -> anyhow::Result<()> {
     let mut doc = load_document(input)?;
@@ -28,6 +32,17 @@ pub fn run(
         let n = hwp_convert::replace_text(&mut doc, from, to, true);
         eprintln!("치환: {from:?} → {to:?} ({n}건)");
         edits += n;
+    }
+
+    // 행 추가는 셀 설정보다 먼저 — 같은 호출 안에서 새 행을 --set-cell로 채울 수 있게.
+    for spec in add_rows {
+        let (ti, tpl, count) = parse_add_row(spec)?;
+        hwp_convert::add_rows(&mut doc, ti, tpl, count).map_err(|e| anyhow::anyhow!(e))?;
+        match tpl {
+            Some(r) => eprintln!("행 추가: 표{ti} (템플릿 행 {r}) × {count}"),
+            None => eprintln!("행 추가: 표{ti} × {count}"),
+        }
+        edits += count;
     }
 
     for spec in set_cells {
@@ -59,8 +74,34 @@ pub fn run(
         edits += n;
     }
 
+    for spec in set_meta {
+        let (key, value) = spec
+            .split_once('=')
+            .with_context(|| format!("--set-meta 형식은 \"키=값\" 입니다: {spec:?}"))?;
+        let val = (!value.is_empty()).then(|| value.to_string());
+        match key.trim() {
+            "title" => doc.metadata.title = val,
+            "author" => doc.metadata.author = val,
+            "subject" => doc.metadata.subject = val,
+            "keywords" => doc.metadata.keywords = val,
+            other => {
+                anyhow::bail!("--set-meta 키는 title|author|subject|keywords 입니다: {other:?}")
+            }
+        }
+        eprintln!("메타데이터 설정: {key} = {value:?}");
+        edits += 1;
+    }
+
+    for text in add_memos {
+        let id = hwp_convert::add_memo(&mut doc, 0, None, text);
+        eprintln!("메모 추가: #{id} {text:?}");
+        edits += 1;
+    }
+
     if edits == 0 {
-        eprintln!("경고: 적용된 편집이 없습니다 (--replace/--set-cell/--set-field 확인)");
+        eprintln!(
+            "경고: 적용된 편집이 없습니다 (--replace/--add-row/--set-cell/--set-field/--set-meta/--add-memo 확인)"
+        );
     }
 
     write_output(&doc, output)?;
@@ -71,6 +112,26 @@ pub fn run(
     Ok(())
 }
 
+/// `--add-row` 사양 파싱 — `"표:N"`(템플릿 자동) 또는 `"표:템플릿행:N"`.
+/// 반환: (표 인덱스, 템플릿 행 옵션, 추가 행 수).
+fn parse_add_row(spec: &str) -> anyhow::Result<(usize, Option<u16>, usize)> {
+    let parts: Vec<&str> = spec.split(':').map(str::trim).collect();
+    match parts.as_slice() {
+        [t, n] => {
+            let ti: usize = t.parse().context("표 인덱스")?;
+            let count: usize = n.parse().context("행 수")?;
+            Ok((ti, None, count))
+        }
+        [t, r, n] => {
+            let ti: usize = t.parse().context("표 인덱스")?;
+            let tpl: u16 = r.parse().context("템플릿 행")?;
+            let count: usize = n.parse().context("행 수")?;
+            Ok((ti, Some(tpl), count))
+        }
+        _ => anyhow::bail!("--add-row 형식은 \"표:N\" 또는 \"표:템플릿행:N\" 입니다: {spec:?}"),
+    }
+}
+
 fn write_output(doc: &hwp_model::Document, output: &Path) -> anyhow::Result<()> {
     match output
         .extension()
@@ -78,12 +139,13 @@ fn write_output(doc: &hwp_model::Document, output: &Path) -> anyhow::Result<()> 
         .map(str::to_ascii_lowercase)
         .as_deref()
     {
-        Some("hwp") => crate::commands::convert::write_hwp_edited(doc, output)?,
+        Some("hwp") => {
+            let warnings = crate::commands::convert::write_hwp_edited(doc, output)?;
+            crate::commands::convert::print_warnings(&warnings);
+        }
         Some("hwpx") => {
             let warnings = hwpx::write_document(doc, output)?;
-            for w in &warnings {
-                eprintln!("경고: {w}");
-            }
+            crate::commands::convert::print_warnings(&warnings);
         }
         Some("json") => std::fs::write(output, hwp_convert::to_json(doc, true, true)?)?,
         Some("md") | Some("markdown") => {

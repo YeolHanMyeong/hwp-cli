@@ -12,7 +12,7 @@ pub fn run(
     input: &Path,
     output: &Path,
     to: Option<ConvertFormat>,
-    _strict: bool,
+    strict: bool,
     preserve_layout: bool,
     embed_bin: bool,
 ) -> anyhow::Result<()> {
@@ -44,6 +44,20 @@ pub fn run(
             let doc = load_document(input)?;
             std::fs::write(output, hwp_convert::to_markdown(&doc))?;
         }
+        ConvertFormat::Html => {
+            let doc = load_document(input)?;
+            std::fs::write(output, hwp_convert::to_html(&doc))?;
+        }
+        ConvertFormat::Odt => {
+            let doc = load_document(input)?;
+            std::fs::write(output, hwp_convert::to_odt(&doc)?)?;
+        }
+        ConvertFormat::Pdf => {
+            let doc = load_document(input)?;
+            let result = hwp_render::render_document_pdf(&doc, &pdf_render_opts(), None)?;
+            print_warnings(&result.report);
+            std::fs::write(output, &result.data)?;
+        }
         ConvertFormat::Json => {
             let doc = load_document(input)?;
             std::fs::write(output, hwp_convert::to_json(&doc, true, embed_bin)?)?;
@@ -57,17 +71,50 @@ pub fn run(
                     preserve_linesegs: preserve_layout,
                 },
             )?;
-            for w in &warnings {
-                eprintln!("경고: {w}");
-            }
+            print_warnings(&warnings);
+            bail_on_strict(strict, &warnings)?;
         }
         ConvertFormat::Hwp => {
             let doc = load_document(input)?;
-            write_hwp(&doc, output, preserve_layout)?;
+            let warnings = write_hwp(&doc, output, preserve_layout)?;
+            print_warnings(&warnings);
+            bail_on_strict(strict, &warnings)?;
         }
     }
     eprintln!("변환 완료: {} → {}", input.display(), output.display());
     Ok(())
+}
+
+/// 경고 목록을 stderr로 출력.
+pub(crate) fn print_warnings(warnings: &[String]) {
+    for w in warnings {
+        eprintln!("경고: {w}");
+    }
+}
+
+/// `--strict`이고 보존 불가(`DROP:`) 경고가 있으면 비정상 종료한다.
+/// 구조 보존 대상(hwp/hwpx)에만 의미가 있다 (md/html/pdf는 본디 손실 변환).
+fn bail_on_strict(strict: bool, warnings: &[String]) -> anyhow::Result<()> {
+    if !strict {
+        return Ok(());
+    }
+    let drops: Vec<&str> = warnings
+        .iter()
+        .filter(|w| w.starts_with("DROP: "))
+        .map(|w| w.as_str())
+        .collect();
+    if drops.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "--strict: 보존 불가 데이터 {}건 드롭\n{}",
+        drops.len(),
+        drops
+            .iter()
+            .map(|w| format!("  - {}", w.trim_start_matches("DROP: ")))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
 }
 
 /// 출력 확장자에 따라 문서를 쓴다 (edit/convert/new/MCP 공용).
@@ -78,7 +125,7 @@ pub fn write_by_ext(
     edited: bool,
     embed_bin: bool,
 ) -> anyhow::Result<()> {
-    match output
+    let warnings = match output
         .extension()
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase)
@@ -86,33 +133,52 @@ pub fn write_by_ext(
     {
         Some("hwp") => {
             if edited {
-                write_hwp_edited(doc, output)
+                write_hwp_edited(doc, output)?
             } else {
-                write_hwp(doc, output, false)
+                write_hwp(doc, output, false)?
             }
         }
-        Some("hwpx") => {
-            let warnings = hwpx::write::write_document_with(
-                doc,
-                output,
-                &hwpx::write::HwpxWriteOptions {
-                    preserve_linesegs: false,
-                },
-            )?;
-            for w in &warnings {
-                eprintln!("경고: {w}");
-            }
-            Ok(())
-        }
+        Some("hwpx") => hwpx::write::write_document_with(
+            doc,
+            output,
+            &hwpx::write::HwpxWriteOptions {
+                preserve_linesegs: false,
+            },
+        )?,
         Some("json") => {
             std::fs::write(output, hwp_convert::to_json(doc, true, embed_bin)?)?;
-            Ok(())
+            Vec::new()
         }
         Some("md") | Some("markdown") => {
             std::fs::write(output, hwp_convert::to_markdown(doc))?;
-            Ok(())
+            Vec::new()
+        }
+        Some("html") | Some("htm") => {
+            std::fs::write(output, hwp_convert::to_html(doc))?;
+            Vec::new()
+        }
+        Some("odt") => {
+            std::fs::write(output, hwp_convert::to_odt(doc)?)?;
+            Vec::new()
+        }
+        Some("pdf") => {
+            let result = hwp_render::render_document_pdf(doc, &pdf_render_opts(), None)?;
+            std::fs::write(output, &result.data)?;
+            result.report
         }
         other => anyhow::bail!("출력 포맷을 추론할 수 없습니다 (확장자: {other:?})"),
+    };
+    print_warnings(&warnings);
+    Ok(())
+}
+
+/// PDF 렌더 옵션 — 폰트는 `HWP_FONT_DIR`(없으면 `fonts/`)에서 해석.
+fn pdf_render_opts() -> hwp_render::RenderOptions {
+    let font_dir =
+        std::path::PathBuf::from(std::env::var("HWP_FONT_DIR").unwrap_or_else(|_| "fonts".into()));
+    hwp_render::RenderOptions {
+        dpi: 96.0,
+        font_dirs: vec![font_dir],
     }
 }
 
@@ -124,6 +190,9 @@ fn infer_format(output: &Path) -> anyhow::Result<ConvertFormat> {
         .as_deref()
     {
         Some("md") | Some("markdown") => Ok(ConvertFormat::Md),
+        Some("html") | Some("htm") => Ok(ConvertFormat::Html),
+        Some("odt") => Ok(ConvertFormat::Odt),
+        Some("pdf") => Ok(ConvertFormat::Pdf),
         Some("json") => Ok(ConvertFormat::Json),
         Some("hwpx") => Ok(ConvertFormat::Hwpx),
         Some("hwp") => Ok(ConvertFormat::Hwp),
@@ -143,7 +212,7 @@ pub fn write_hwp(
     doc: &hwp_model::Document,
     output: &std::path::Path,
     preserve_layout: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<String>> {
     write_hwp_impl(doc, output, preserve_layout, false)
 }
 
@@ -157,7 +226,10 @@ pub fn write_hwp(
 ///
 /// hwpx/md 출신은 보존할 원본 줄 배치가 한글 hwp 레이아웃과 다르므로 합성 경로
 /// (`edited`=true: 줄 배치 비우고 para_shape 복원 후 한글 재계산)를 쓴다.
-pub fn write_hwp_edited(doc: &hwp_model::Document, output: &std::path::Path) -> anyhow::Result<()> {
+pub fn write_hwp_edited(
+    doc: &hwp_model::Document,
+    output: &std::path::Path,
+) -> anyhow::Result<Vec<String>> {
     if doc.meta.source_format == "hwp5" {
         // 원본 줄 배치 보존(preserve), 합성 정규화 없음 — 편집 문단만 count=0.
         write_hwp_impl(doc, output, true, false)
@@ -171,7 +243,7 @@ fn write_hwp_impl(
     output: &std::path::Path,
     preserve_layout: bool,
     edited: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<String>> {
     let font_dir =
         std::path::PathBuf::from(std::env::var("HWP_FONT_DIR").unwrap_or_else(|_| "fonts".into()));
     let synthesize = doc.meta.source_format != "hwp5" || edited;
@@ -181,6 +253,7 @@ fn write_hwp_impl(
         .flat_map(|s| &s.paragraphs)
         .any(|p| !p.line_segs.is_empty());
 
+    let mut report: Vec<String> = Vec::new();
     let owned;
     let doc = if !synthesize || preserve_layout {
         // hwp5 무수정/preserve-layout: 원본 줄 배치 그대로.
@@ -203,9 +276,7 @@ fn write_hwp_impl(
         store.load_dir(&font_dir);
         let mut warns = Vec::new();
         hwp_render::lineseg::synthesize_linesegs(&mut d, &mut store, &mut warns);
-        for w in &warns {
-            eprintln!("경고: {w}");
-        }
+        report.append(&mut warns);
         owned = d;
         &owned
     };
@@ -229,10 +300,8 @@ fn write_hwp_impl(
             edited,
         },
     )?;
-    for w in &warnings {
-        eprintln!("경고: {w}");
-    }
-    Ok(())
+    report.extend(warnings);
+    Ok(report)
 }
 
 /// 모든 문단(표 셀·머리말 등 중첩 포함)의 줄 배치를 제거한다 — 한글이 열 때

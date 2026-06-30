@@ -7,7 +7,25 @@
 //! 쓸 때 반드시 writer의 합성 경로(hwp5: `WriteOptions.edited=true`)를 거쳐야
 //! 한글이 수용한다. 이 모듈은 IR만 바꾸고, 불변식 재수립은 writer가 담당한다.
 
-use hwp_model::{CharShapeId, Control, Document, HwpChar, Paragraph};
+use hwp_model::{CharShapeId, Control, Document, HwpChar, Memo, Paragraph};
+
+/// 문서에 메모(주석)를 추가한다. `section`(0-기반)에 메모를 단다(범위 밖이면 마지막 섹션).
+/// hwpx 출력에서만 방출된다(hwp5 바이너리 메모 합성 미지원 — writer가 경고 후 생략).
+/// 반환값은 부여된 메모 id.
+pub fn add_memo(doc: &mut Document, section: usize, author: Option<&str>, text: &str) -> u32 {
+    if doc.sections.is_empty() {
+        doc.sections.push(hwp_model::Section::default());
+    }
+    let idx = section.min(doc.sections.len() - 1);
+    let sec = &mut doc.sections[idx];
+    let id = sec.memos.iter().map(|m| m.id + 1).max().unwrap_or(0);
+    sec.memos.push(Memo {
+        id,
+        author: author.filter(|a| !a.is_empty()).map(str::to_string),
+        text: text.to_string(),
+    });
+    id
+}
 
 /// 문서 전체에서 `from`을 `to`로 치환한다(본문·표 셀·글상자 문단 재귀).
 /// `all`이 거짓이면 첫 1건만 바꾼다. 반환값은 치환 횟수.
@@ -169,54 +187,82 @@ pub fn set_cell(
     col: u16,
     text: &str,
 ) -> Result<(), String> {
-    let mut st = CellSet {
-        index: table_index,
-        seen: 0,
-        row,
-        col,
-        text,
-        result: None,
-    };
+    with_nth_table(doc, table_index, |t| set_cell_in_table(t, row, col, text))
+        .unwrap_or_else(|| Err(format!("표 #{table_index}를 찾을 수 없습니다")))
+}
+
+/// `table_index`번째 표(0-기반)에 빈 행을 `count`개 추가한다. `template_row`(0-기반,
+/// 생략 시 마지막의 병합 없는 행)를 복제해 셀 서식(폭·여백·테두리·문자/문단 모양)을
+/// 보존하고 내용은 비운다 — 추가된 행(인덱스 `기존행수`부터)은 이후 [`set_cell`]로
+/// 채운다. hwp5 출력은 반드시 edited 합성 경로(`WriteOptions.edited=true`)를 거쳐야
+/// 한글이 수용한다(줄 배치·문단끝·nchars 불변식 재합성).
+pub fn add_rows(
+    doc: &mut Document,
+    table_index: usize,
+    template_row: Option<u16>,
+    count: usize,
+) -> Result<(), String> {
+    if count == 0 {
+        return Ok(());
+    }
+    with_nth_table(doc, table_index, |t| {
+        add_rows_in_table(t, template_row, count)
+    })
+    .unwrap_or_else(|| Err(format!("표 #{table_index}를 찾을 수 없습니다")))
+}
+
+/// `table_index`번째 표(0-기반)의 (행 수, 열 수)를 반환한다. 데이터 구동 채우기가
+/// 추가할 행 수를 계산할 때 쓴다(현재 행 수 조회).
+pub fn table_dims(doc: &mut Document, table_index: usize) -> Option<(u16, u16)> {
+    with_nth_table(doc, table_index, |t| (t.rows, t.cols))
+}
+
+/// 문서 등장 순서 `index`번째 표를 찾아 `f`를 적용한다(0-기반). 본문·표 셀·글상자
+/// 문단을 재귀로 훑는다. 표를 찾으면 `Some(f의 결과)`, 못 찾으면 `None`.
+fn with_nth_table<R, F: FnOnce(&mut hwp_model::Table) -> R>(
+    doc: &mut Document,
+    index: usize,
+    f: F,
+) -> Option<R> {
+    let mut seen = 0;
+    let mut f = Some(f);
+    let mut out = None;
     for section in &mut doc.sections {
         for para in &mut section.paragraphs {
-            walk_set_cell(para, &mut st);
-            if let Some(result) = st.result.take() {
-                return result;
+            walk_nth_table(para, index, &mut seen, &mut f, &mut out);
+            if out.is_some() {
+                return out;
             }
         }
     }
-    Err(format!(
-        "표 #{table_index}를 찾을 수 없습니다 (문서의 표 개수: {})",
-        st.seen
-    ))
+    out
 }
 
-struct CellSet<'a> {
+fn walk_nth_table<R, F: FnOnce(&mut hwp_model::Table) -> R>(
+    para: &mut Paragraph,
     index: usize,
-    seen: usize,
-    row: u16,
-    col: u16,
-    text: &'a str,
-    result: Option<Result<(), String>>,
-}
-
-fn walk_set_cell(para: &mut Paragraph, st: &mut CellSet) {
+    seen: &mut usize,
+    f: &mut Option<F>,
+    out: &mut Option<R>,
+) {
     for ctrl in &mut para.controls {
-        if st.result.is_some() {
+        if out.is_some() {
             return;
         }
         match ctrl {
             Control::Table(t) => {
-                if st.seen == st.index {
-                    st.result = Some(set_cell_in_table(t, st.row, st.col, st.text));
-                    st.seen += 1;
+                if *seen == index {
+                    if let Some(func) = f.take() {
+                        *out = Some(func(t));
+                    }
+                    *seen += 1;
                     return;
                 }
-                st.seen += 1;
+                *seen += 1;
                 for cell in &mut t.cells {
                     for p in &mut cell.paragraphs {
-                        walk_set_cell(p, st);
-                        if st.result.is_some() {
+                        walk_nth_table(p, index, seen, f, out);
+                        if out.is_some() {
                             return;
                         }
                     }
@@ -225,8 +271,8 @@ fn walk_set_cell(para: &mut Paragraph, st: &mut CellSet) {
             Control::Generic(g) => {
                 for list in &mut g.paragraph_lists {
                     for p in &mut list.paragraphs {
-                        walk_set_cell(p, st);
-                        if st.result.is_some() {
+                        walk_nth_table(p, index, seen, f, out);
+                        if out.is_some() {
                             return;
                         }
                     }
@@ -250,15 +296,8 @@ fn set_cell_in_table(
         .ok_or_else(|| format!("표에 셀 ({row}, {col})이 없습니다"))?;
 
     // 첫 문단을 서식 템플릿으로 — 문단/스타일/문자 모양/헤더 보존, 내용만 교체.
-    let template = cell.paragraphs.first();
-    let para_shape = template.map(|p| p.para_shape).unwrap_or_default();
-    let style = template.map(|p| p.style).unwrap_or_default();
-    let shape_id = template
-        .and_then(|p| p.char_shape_runs.first().map(|r| r.1))
-        .unwrap_or_default();
-    let header = template.map(|p| p.header.clone()).unwrap_or_default();
-
-    let mut chars: Vec<HwpChar> = text
+    let mut para = blank_para_like(cell.paragraphs.first());
+    para.chars = text
         .chars()
         .map(|c| {
             if c == '\n' {
@@ -268,21 +307,140 @@ fn set_cell_in_table(
             }
         })
         .collect();
-    if !chars.is_empty() {
-        chars.push(HwpChar::CharCtrl(hwp_model::ctrl_char::PARA_BREAK));
+    if !para.chars.is_empty() {
+        para.chars
+            .push(HwpChar::CharCtrl(hwp_model::ctrl_char::PARA_BREAK));
     }
+    cell.paragraphs = vec![para];
+    Ok(())
+}
 
-    cell.paragraphs = vec![Paragraph {
-        para_shape,
-        style,
-        chars,
-        char_shape_runs: vec![(0, shape_id)],
+/// 표 행 추가/셀 설정용 빈 문단 — 템플릿 문단의 문단/스타일/첫 글자모양/헤더를
+/// 보존하고 내용은 비운다(줄 배치도 비워 writer가 재합성). 한글 합성 게이트는
+/// 셀당 문단 ≥1·문자모양 run ≥1만 요구하므로 빈 chars로 충분하다(writer가
+/// nchars=1·PARA_TEXT 생략을 처리).
+///
+/// 이 문단은 항상 셀의 **유일·마지막** 문단이 되므로(set_cell·add_rows 모두
+/// `cell.paragraphs = vec![이 문단]`), nchars bit31(리스트 마지막 문단 표식)을
+/// 강제한다. hwp5 출신 편집 경로는 writer가 set_last_para_flag를 돌리지 않으므로
+/// (synthesize=false) 여기서 세우지 않으면 다중 문단 셀을 복제할 때 비트가 빠진다.
+fn blank_para_like(template: Option<&Paragraph>) -> Paragraph {
+    let mut header = template.map(|p| p.header.clone()).unwrap_or_default();
+    header.chars_flags |= 0x80;
+    Paragraph {
+        para_shape: template.map(|p| p.para_shape).unwrap_or_default(),
+        style: template.map(|p| p.style).unwrap_or_default(),
+        chars: Vec::new(),
+        char_shape_runs: vec![(
+            0,
+            template
+                .and_then(|p| p.char_shape_runs.first().map(|r| r.1))
+                .unwrap_or_default(),
+        )],
         line_segs: Vec::new(),
         controls: Vec::new(),
         header,
         extras: Vec::new(),
-    }];
+    }
+}
+
+fn add_rows_in_table(
+    table: &mut hwp_model::Table,
+    template_row: Option<u16>,
+    count: usize,
+) -> Result<(), String> {
+    if table.rows == 0 {
+        return Err("빈 표에는 행을 추가할 수 없습니다".to_string());
+    }
+    // 행 수는 u16 범위 — 남은 용량을 넘으면 거부(넘으면 count as u16 절단으로 cells/
+    // row_cell_counts가 어긋나 표 레코드가 깨진다).
+    let remaining = usize::from(u16::MAX) - usize::from(table.rows);
+    if count > remaining {
+        return Err(format!(
+            "추가 행 수가 너무 많습니다: {count} (최대 {remaining}행 — 표 행 수는 u16 범위)"
+        ));
+    }
+    // 템플릿 행 해소: 지정값(범위 검사) 또는 마지막의 '깨끗한'(병합 없는) 행.
+    let tpl = match template_row {
+        Some(r) if r < table.rows => r,
+        Some(r) => {
+            return Err(format!(
+                "템플릿 행 {r}이 표 범위를 벗어남 (행 수: {})",
+                table.rows
+            ));
+        }
+        None => clean_template_row(table)
+            .ok_or("복제할 병합 없는 행이 없습니다 — 템플릿 행을 지정하세요")?,
+    };
+    // 템플릿 행의 셀(열 순서) 수집. 병합 셀이 있거나 전 열을 채우지 않으면(세로 병합에
+    // 덮인 부분 행) 거부 — 복제 시 그리드가 타일링되지 않아 누락 열이 생긴다.
+    let tpl_cells: Vec<hwp_model::Cell> = table
+        .cells
+        .iter()
+        .filter(|c| c.row == tpl)
+        .cloned()
+        .collect();
+    if tpl_cells.is_empty() {
+        return Err(format!("템플릿 행 {tpl}에 셀이 없습니다"));
+    }
+    if tpl_cells.iter().any(|c| c.col_span != 1 || c.row_span != 1) {
+        return Err(format!(
+            "템플릿 행 {tpl}에 병합 셀이 있어 복제 불가 — 병합 없는 행을 지정하세요"
+        ));
+    }
+    if tpl_cells.len() as u16 != table.cols
+        || table.row_cell_counts.get(tpl as usize).copied() != Some(table.cols)
+    {
+        return Err(format!(
+            "템플릿 행 {tpl}이 전체 열({})을 채우지 않음(셀 {}개) — 세로 병합에 덮인 행은 복제 불가, 전 열을 채우는 행을 지정하세요",
+            table.cols,
+            tpl_cells.len()
+        ));
+    }
+    // 복제 문단 instance_id 충돌 방지: hwp5 출신 편집 경로는 writer가 id를 재부여하지
+    // 않으므로(synthesize=false), 표 내 최댓값 위로 고유 id를 부여한다(같은 템플릿
+    // 문단을 N개 셀에 복제하면 비-0 id가 N+1개 중복돼 한글 개체 링크가 깨진다).
+    let mut next_inst = table
+        .cells
+        .iter()
+        .flat_map(|c| &c.paragraphs)
+        .map(|p| p.header.instance_id)
+        .max()
+        .unwrap_or(0);
+    // 새 행은 기존 최대 행 다음부터(행 우선 평탄 순서 유지 — append만, 중간 삽입 금지).
+    let per_row = tpl_cells.len() as u16;
+    let first_new = table.rows;
+    for i in 0..count as u16 {
+        for c in &tpl_cells {
+            let mut nc = c.clone();
+            nc.row = first_new + i;
+            nc.col_span = 1;
+            nc.row_span = 1;
+            let mut para = blank_para_like(c.paragraphs.first());
+            next_inst = next_inst.wrapping_add(1);
+            para.header.instance_id = next_inst;
+            nc.paragraphs = vec![para];
+            table.cells.push(nc);
+        }
+    }
+    table.rows += count as u16;
+    for _ in 0..count {
+        table.row_cell_counts.push(per_row);
+    }
     Ok(())
+}
+
+/// 복제 기본 템플릿: 마지막의 '깨끗한' 행 — 전 열을 채우고(row_cell_counts==cols)
+/// 병합 셀이 없는 행. 세로 병합에 덮인 행은 셀 수가 cols보다 적어 자동 제외된다.
+fn clean_template_row(table: &hwp_model::Table) -> Option<u16> {
+    (0..table.rows).rev().find(|&r| {
+        table.row_cell_counts.get(r as usize).copied() == Some(table.cols)
+            && table
+                .cells
+                .iter()
+                .filter(|c| c.row == r)
+                .all(|c| c.col_span == 1 && c.row_span == 1)
+    })
 }
 
 pub(crate) fn utf16_len(s: &str) -> u32 {
@@ -383,5 +541,179 @@ mod tests {
         // 셀이 1개 문단(내용+문단끝)만 갖는지.
         assert!(set_cell(&mut doc, 0, 99, 99, "x").is_err());
         assert!(set_cell(&mut doc, 5, 0, 0, "x").is_err());
+    }
+
+    fn first_table(doc: &Document) -> &hwp_model::Table {
+        doc.sections[0]
+            .paragraphs
+            .iter()
+            .flat_map(|p| &p.controls)
+            .find_map(|c| match c {
+                Control::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("표 없음")
+    }
+
+    #[test]
+    fn 행_추가_구조_불변식() {
+        // 2행 2열 표 → 3행 추가 → rows=5, cells=10, row_cell_counts 길이=5·합=10.
+        let mut doc = from_markdown("| 가 | 나 |\n|----|----|\n| 1 | 2 |\n");
+        let before = first_table(&doc);
+        let (r0, cells0, cols) = (before.rows, before.cells.len(), before.cols);
+        add_rows(&mut doc, 0, None, 3).unwrap();
+        let t = first_table(&doc);
+        assert_eq!(t.rows, r0 + 3, "rows 증가");
+        assert_eq!(t.cells.len(), cells0 + 3 * cols as usize, "셀 수 증가");
+        assert_eq!(
+            t.row_cell_counts.len(),
+            t.rows as usize,
+            "row_cell_counts 길이 == rows"
+        );
+        assert_eq!(
+            t.row_cell_counts.iter().map(|c| *c as usize).sum::<usize>(),
+            t.cells.len(),
+            "row_cell_counts 합 == 셀 수 (hwp5 extract assert)"
+        );
+        // 새 행은 기존 최대 행 다음부터, 행 우선 평탄 순서 유지(append만).
+        let rows_in_order: Vec<u16> = t.cells.iter().map(|c| c.row).collect();
+        let mut sorted = rows_in_order.clone();
+        sorted.sort_unstable();
+        assert_eq!(rows_in_order, sorted, "cells 행 우선(단조 비감소) 순서");
+        // 새 셀은 빈 문단 1개·문자모양 run 1개(한글 합성 게이트)·span 1.
+        for c in t.cells.iter().filter(|c| c.row >= r0) {
+            assert_eq!(c.paragraphs.len(), 1, "새 셀 문단 1개");
+            assert!(c.paragraphs[0].chars.is_empty(), "새 셀 비어 있음");
+            assert_eq!(c.paragraphs[0].char_shape_runs.len(), 1, "문자모양 run 1개");
+            assert!(c.paragraphs[0].line_segs.is_empty(), "줄 배치 무효화");
+            assert_eq!((c.col_span, c.row_span), (1, 1), "병합 없음");
+        }
+    }
+
+    #[test]
+    fn 행_추가_후_채우기() {
+        let mut doc = from_markdown("| 가 | 나 |\n|----|----|\n| 1 | 2 |\n");
+        let r0 = first_table(&doc).rows; // 2 (헤더+데이터)
+        add_rows(&mut doc, 0, None, 1).unwrap();
+        // 새 행 인덱스 = r0, 거기에 값 채움.
+        set_cell(&mut doc, 0, r0, 0, "새값A").unwrap();
+        set_cell(&mut doc, 0, r0, 1, "새값B").unwrap();
+        let text = doc.plain_text();
+        assert!(
+            text.contains("새값A") && text.contains("새값B"),
+            "got: {text:?}"
+        );
+    }
+
+    #[test]
+    fn 행_추가_서식_보존() {
+        // 새 셀의 폭·여백·테두리·문단모양이 템플릿 행에서 복제되는지.
+        let mut doc = from_markdown("| 가 | 나 |\n|----|----|\n| 1 | 2 |\n");
+        let r0 = first_table(&doc).rows;
+        let tpl: Vec<_> = {
+            let t = first_table(&doc);
+            t.cells
+                .iter()
+                .filter(|c| c.row == r0 - 1)
+                .map(|c| (c.col, c.width, c.margins, c.border_fill))
+                .collect()
+        };
+        add_rows(&mut doc, 0, None, 1).unwrap();
+        let t = first_table(&doc);
+        for (col, w, m, bf) in tpl {
+            let nc = t
+                .cells
+                .iter()
+                .find(|c| c.row == r0 && c.col == col)
+                .expect("새 셀");
+            assert_eq!(nc.width, w, "폭 보존");
+            assert_eq!(nc.margins, m, "여백 보존");
+            assert_eq!(nc.border_fill, bf, "테두리 보존");
+        }
+    }
+
+    #[test]
+    fn 행_추가_엣지케이스() {
+        let mut doc = from_markdown("| 가 | 나 |\n|----|----|\n| 1 | 2 |\n");
+        // count=0은 무변경.
+        let before = first_table(&doc).rows;
+        add_rows(&mut doc, 0, Some(0), 0).unwrap();
+        assert_eq!(first_table(&doc).rows, before);
+        // 없는 표.
+        assert!(add_rows(&mut doc, 9, None, 1).is_err());
+        // 범위 밖 템플릿 행.
+        assert!(add_rows(&mut doc, 0, Some(99), 1).is_err());
+    }
+
+    #[test]
+    fn 행_추가_u16_초과_거부() {
+        // count가 남은 u16 용량을 넘으면 절단 손상 대신 깔끔히 거부(레코드 깨짐 방지).
+        let mut doc = from_markdown("| 가 | 나 |\n|----|----|\n| 1 | 2 |\n");
+        let err = add_rows(&mut doc, 0, None, 70_000).unwrap_err();
+        assert!(err.contains("u16"), "u16 범위 안내: {err}");
+        // 표는 변경되지 않아야(거부 전 무변경).
+        assert_eq!(first_table(&doc).rows, 2);
+    }
+
+    #[test]
+    fn 행_추가_새문단_고유_instance_id_와_마지막비트() {
+        // 복제 문단은 (1) 서로 다른 비-0 instance_id, (2) nchars bit31(마지막 문단)을
+        // 가져야 한다 — hwp5 출신 편집 경로는 writer가 재부여/세팅하지 않으므로.
+        let mut doc = from_markdown("| 가 | 나 |\n|----|----|\n| 1 | 2 |\n");
+        // 기존 셀 문단에 비-0 instance_id 부여(hwp5 출신 모사).
+        for (i, c) in first_table_mut(&mut doc).cells.iter_mut().enumerate() {
+            for p in &mut c.paragraphs {
+                p.header.instance_id = (i as u32 + 1) * 100;
+            }
+        }
+        add_rows(&mut doc, 0, None, 2).unwrap();
+        let t = first_table(&doc);
+        let new_paras: Vec<&Paragraph> = t
+            .cells
+            .iter()
+            .filter(|c| c.row >= 2)
+            .flat_map(|c| &c.paragraphs)
+            .collect();
+        assert_eq!(new_paras.len(), 4, "새 셀 4개(2행×2열)");
+        let ids: Vec<u32> = new_paras.iter().map(|p| p.header.instance_id).collect();
+        assert!(ids.iter().all(|&id| id != 0), "instance_id 비-0: {ids:?}");
+        let mut uniq = ids.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(uniq.len(), ids.len(), "instance_id 전부 고유: {ids:?}");
+        for p in &new_paras {
+            assert_ne!(p.header.chars_flags & 0x80, 0, "새 문단 nchars bit31");
+        }
+    }
+
+    #[test]
+    fn 행_추가_세로병합_덮인_부분행_거부() {
+        // 세로 병합에 덮여 전 열을 채우지 않는 행(셀 수 < cols)을 템플릿으로 지정하면
+        // 거부해야 한다(복제 시 누락 열이 생겨 그리드가 깨짐).
+        let mut doc = from_markdown("| 가 | 나 |\n|----|----|\n| 1 | 2 |\n");
+        {
+            let t = first_table_mut(&mut doc);
+            // (0,0)을 세로 2행 병합으로, (1,0) 셀 제거 → 행 1은 (1,1)만(셀 1개, cols=2).
+            if let Some(c00) = t.cells.iter_mut().find(|c| c.row == 0 && c.col == 0) {
+                c00.row_span = 2;
+            }
+            t.cells.retain(|c| !(c.row == 1 && c.col == 0));
+            t.row_cell_counts = vec![2, 1];
+        }
+        // 행 1은 부분 행 → 거부.
+        let err = add_rows(&mut doc, 0, Some(1), 1).unwrap_err();
+        assert!(err.contains("열"), "전 열 미충족 안내: {err}");
+    }
+
+    fn first_table_mut(doc: &mut Document) -> &mut hwp_model::Table {
+        doc.sections[0]
+            .paragraphs
+            .iter_mut()
+            .flat_map(|p| &mut p.controls)
+            .find_map(|c| match c {
+                Control::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("표 없음")
     }
 }

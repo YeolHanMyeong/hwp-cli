@@ -263,6 +263,72 @@ fn build_value_chars(value: &str) -> Vec<HwpChar> {
         .collect()
 }
 
+/// `{{name}}` 텍스트 자리표시자 하나.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaceholderInfo {
+    /// 자리표시자 이름(중괄호 안, 양끝 공백 제거).
+    pub name: String,
+    /// 문서 전체 등장 횟수.
+    pub occurrences: usize,
+}
+
+/// 본문(표 셀·글상자 재귀)에서 `{{name}}` 텍스트 자리표시자를 등장 순서로 수집한다.
+///
+/// 누름틀(form field, [`list_fields`])과 별개 — 순수 텍스트 `{{...}}` 템플릿용.
+/// `name`은 `[\w가-힣.-]`(영숫자·한글·`.`·`-`·`_`)만 허용하며, 한 문단 내 연속된
+/// 텍스트만 이어 스캔하므로 제어문자/줄나눔을 가로지르는 패턴은 매칭하지 않는다.
+/// 채우기는 `set_field`가 아니라 [`replace_text`](crate::replace_text)`("{{name}}", v)` 로 한다.
+pub fn scan_placeholders(doc: &Document) -> Vec<PlaceholderInfo> {
+    let mut out: Vec<PlaceholderInfo> = Vec::new();
+    for section in &doc.sections {
+        for para in &section.paragraphs {
+            collect_placeholders(para, &mut out);
+        }
+    }
+    out
+}
+
+fn collect_placeholders(para: &Paragraph, out: &mut Vec<PlaceholderInfo>) {
+    let mut seg = String::new();
+    for ch in &para.chars {
+        match ch {
+            HwpChar::Text(c) => seg.push(*c),
+            _ => {
+                scan_segment(&seg, out);
+                seg.clear();
+            }
+        }
+    }
+    scan_segment(&seg, out);
+    for ctrl in &para.controls {
+        for_each_nested(ctrl, &mut |p| collect_placeholders(p, out));
+    }
+}
+
+fn scan_segment(seg: &str, out: &mut Vec<PlaceholderInfo>) {
+    let mut rest = seg;
+    while let Some(open) = rest.find("{{") {
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("}}") else { break };
+        let name = after[..close].trim();
+        if !name.is_empty() && name.chars().all(is_name_char) {
+            if let Some(p) = out.iter_mut().find(|p| p.name == name) {
+                p.occurrences += 1;
+            } else {
+                out.push(PlaceholderInfo {
+                    name: name.to_string(),
+                    occurrences: 1,
+                });
+            }
+        }
+        rest = &after[close + 2..];
+    }
+}
+
+fn is_name_char(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '.' | '-' | '_')
+}
+
 /// 컨트롤의 중첩 문단(표 셀·글상자 리스트)에 f를 적용한다(읽기 전용).
 fn for_each_nested(ctrl: &Control, f: &mut impl FnMut(&Paragraph)) {
     match ctrl {
@@ -362,6 +428,7 @@ mod tests {
         doc.sections.push(hwp_model::Section {
             paragraphs: vec![field_para("수신", "내부결재")],
             extras: Vec::new(),
+            memos: Vec::new(),
         });
         let fields = list_fields(&doc);
         assert_eq!(fields.len(), 1);
@@ -371,11 +438,25 @@ mod tests {
     }
 
     #[test]
+    fn scan_placeholders_이름_횟수() {
+        let doc = crate::from_markdown::from_markdown("{{기관명}} 안녕 {{제목}} 끝 {{기관명}}\n");
+        let slots = scan_placeholders(&doc);
+        let map: std::collections::HashMap<_, _> = slots
+            .iter()
+            .map(|p| (p.name.as_str(), p.occurrences))
+            .collect();
+        assert_eq!(map.get("기관명"), Some(&2));
+        assert_eq!(map.get("제목"), Some(&1));
+        assert_eq!(slots.len(), 2);
+    }
+
+    #[test]
     fn set_field_값_교체() {
         let mut doc = Document::default();
         doc.sections.push(hwp_model::Section {
             paragraphs: vec![field_para("수신", "")], // 빈 누름틀
             extras: Vec::new(),
+            memos: Vec::new(),
         });
         let n = set_field(&mut doc, "수신", "기획팀");
         assert_eq!(n, 1);

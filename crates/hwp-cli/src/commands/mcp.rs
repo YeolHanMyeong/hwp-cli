@@ -125,6 +125,9 @@ fn call_tool(name: &str, args: &Value, ctx: &Ctx) -> Value {
         "hwp_convert" => tool_convert(args),
         "hwp_new" => tool_new(args),
         "hwp_diff" => tool_diff(args, ctx),
+        "hwp_slots" => tool_slots(args),
+        "hwp_fill" => tool_fill(args),
+        "hwp_validate" => tool_validate(args),
         other => Err(format!("알 수 없는 도구: {other}")),
     };
     match result {
@@ -209,6 +212,57 @@ fn tool_list_fields(args: &Value) -> Result<Vec<Value>, String> {
     )])
 }
 
+fn tool_slots(args: &Value) -> Result<Vec<Value>, String> {
+    let path = arg_str(args, "path")?;
+    let doc = load_document(Path::new(path)).map_err(|e| e.to_string())?;
+    let items: Vec<Value> = hwp_convert::scan_placeholders(&doc)
+        .iter()
+        .map(|p| json!({ "name": p.name, "occurrences": p.occurrences }))
+        .collect();
+    Ok(vec![text_content(
+        &serde_json::to_string_pretty(&json!({ "placeholders": items })).unwrap_or_default(),
+    )])
+}
+
+fn tool_fill(args: &Value) -> Result<Vec<Value>, String> {
+    let input = arg_str(args, "input")?;
+    let output = arg_str(args, "output")?;
+    let values_obj = args
+        .get("values")
+        .and_then(Value::as_object)
+        .ok_or("필수 인자 누락: values (객체 {이름:값})")?;
+    let values: std::collections::BTreeMap<String, String> = values_obj
+        .iter()
+        .map(|(k, v)| {
+            let s = match v {
+                Value::String(s) => s.clone(),
+                Value::Null => String::new(),
+                other => other.to_string(),
+            };
+            (k.clone(), s)
+        })
+        .collect();
+    let counts = hwpx::patch::fill_placeholders(Path::new(input), Path::new(output), &values)
+        .map_err(|e| format!("fill 실패: {e}"))?;
+    let total: usize = counts.values().sum();
+    Ok(vec![text_content(
+        &serde_json::to_string_pretty(&json!({
+            "output": output,
+            "replaced": total,
+            "counts": counts,
+        }))
+        .unwrap_or_default(),
+    )])
+}
+
+fn tool_validate(args: &Value) -> Result<Vec<Value>, String> {
+    let path = arg_str(args, "path")?;
+    let v = crate::commands::validate::validate_json(Path::new(path));
+    Ok(vec![text_content(
+        &serde_json::to_string_pretty(&v).unwrap_or_default(),
+    )])
+}
+
 fn tool_render(args: &Value, ctx: &Ctx) -> Result<Vec<Value>, String> {
     let path = arg_str(args, "path")?;
     let page = arg_u64(args, "page", 1) as usize;
@@ -263,6 +317,19 @@ fn tool_edit(args: &Value) -> Result<Vec<Value>, String> {
             summary.push(format!("치환 {from:?}→{to:?}: {n}건"));
         }
     }
+    // 행 추가는 셀 설정보다 먼저 — 새 행을 같은 호출에서 set_cell로 채울 수 있게.
+    if let Some(arr) = args.get("add_rows").and_then(Value::as_array) {
+        for a in arr {
+            let table = a.get("table").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let count = a.get("count").and_then(Value::as_u64).unwrap_or(1) as usize;
+            let template_row = a
+                .get("template_row")
+                .and_then(Value::as_u64)
+                .map(|r| r as u16);
+            hwp_convert::add_rows(&mut doc, table, template_row, count)?;
+            summary.push(format!("행 추가 표{table}×{count}"));
+        }
+    }
     if let Some(arr) = args.get("set_cell").and_then(Value::as_array) {
         for c in arr {
             let table = c.get("table").and_then(Value::as_u64).unwrap_or(0) as usize;
@@ -285,7 +352,9 @@ fn tool_edit(args: &Value) -> Result<Vec<Value>, String> {
         }
     }
     if summary.is_empty() {
-        return Err("적용할 편집이 없습니다 (replace/set_cell 확인)".to_string());
+        return Err(
+            "적용할 편집이 없습니다 (replace/add_rows/set_cell/set_field 확인)".to_string(),
+        );
     }
 
     crate::commands::convert::write_by_ext(&doc, Path::new(output), true, false)
@@ -401,6 +470,11 @@ fn tool_defs() -> Vec<Value> {
                 "replace": {"type": "array", "items": {"type": "object", "properties": {
                     "from": {"type": "string"}, "to": {"type": "string"}}, "required": ["from", "to"]},
                     "description": "텍스트 치환(모든 일치)"},
+                "add_rows": {"type": "array", "items": {"type": "object", "properties": {
+                    "table": {"type": "integer"}, "count": {"type": "integer"},
+                    "template_row": {"type": "integer"}},
+                    "required": ["table", "count"]},
+                    "description": "표 행 추가(0-기반). 마지막 행 복제로 빈 행 count개 추가 — set_cell보다 먼저 적용돼 새 행(인덱스 기존행수부터)을 같은 호출에서 채울 수 있다. template_row로 복제 원본 행 지정(선택)."},
                 "set_cell": {"type": "array", "items": {"type": "object", "properties": {
                     "table": {"type": "integer"}, "row": {"type": "integer"},
                     "col": {"type": "integer"}, "text": {"type": "string"}},
@@ -412,7 +486,7 @@ fn tool_defs() -> Vec<Value> {
         }),
         json!({
             "name": "hwp_convert",
-            "description": "포맷 변환. 출력 확장자(.hwp/.hwpx/.json/.md)로 결정. embed_bin이면 JSON에 이미지 base64 임베드.",
+            "description": "포맷 변환. 출력 확장자(.hwp/.hwpx/.json/.md/.html/.pdf/.odt)로 결정. pdf는 텍스트 선택가능 벡터(이미지 포함). embed_bin이면 JSON에 이미지 base64 임베드.",
             "inputSchema": {"type": "object", "properties": {
                 "input": {"type": "string"}, "output": {"type": "string"},
                 "embed_bin": {"type": "boolean"}
@@ -435,6 +509,29 @@ fn tool_defs() -> Vec<Value> {
                 "page": {"type": "integer"}, "dpi": {"type": "number"},
                 "font_dir": {"type": "string"}
             }, "required": ["input", "ref"]}
+        }),
+        json!({
+            "name": "hwp_slots",
+            "description": "`{{name}}` 텍스트 자리표시자(템플릿 슬롯) 목록을 등장 순서로 반환.",
+            "inputSchema": {"type": "object", "properties": {
+                "path": {"type": "string"}
+            }, "required": ["path"]}
+        }),
+        json!({
+            "name": "hwp_fill",
+            "description": "hwpx 템플릿의 `{{name}}`를 값으로 치환(패키지·미리보기 보존). hwpx 입력 전용.",
+            "inputSchema": {"type": "object", "properties": {
+                "input": {"type": "string"}, "output": {"type": "string"},
+                "values": {"type": "object", "additionalProperties": {"type": "string"},
+                    "description": "{자리표시자이름: 값} 객체"}
+            }, "required": ["input", "output", "values"]}
+        }),
+        json!({
+            "name": "hwp_validate",
+            "description": "구조 검증(mimetype·필수 엔트리·XML 파싱). {valid, errors, warnings} 반환.",
+            "inputSchema": {"type": "object", "properties": {
+                "path": {"type": "string"}
+            }, "required": ["path"]}
         }),
     ]
 }
@@ -500,9 +597,24 @@ mod tests {
             "hwp_convert",
             "hwp_new",
             "hwp_diff",
+            "hwp_slots",
+            "hwp_fill",
+            "hwp_validate",
         ] {
             assert!(names.contains(&expected), "{expected} 누락");
         }
+    }
+
+    #[test]
+    fn call_hwp_validate() {
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{{"name":"hwp_validate","arguments":{{"path":"{}"}}}}}}"#,
+            fixture("hwpx/minimal.hwpx")
+        );
+        let v = call(&line);
+        assert_eq!(v["result"]["isError"], false);
+        let text = v["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("\"valid\": true"), "유효해야: {text}");
     }
 
     #[test]

@@ -62,16 +62,75 @@ pub fn read_document(path: &Path) -> Result<ReadResult> {
         .collect::<Vec<_>>()
         .join(".");
 
+    // 문서 메타데이터 (content.hpf OPF — 최선 노력: 없거나 손상돼도 진단 계속)
+    let metadata = pkg
+        .read_entry_string("Contents/content.hpf")
+        .ok()
+        .map(|xml| parse_content_meta(&xml))
+        .unwrap_or_default();
+
     Ok(ReadResult {
         document: Document {
             meta: DocMeta {
                 source_format: "hwpx".to_string(),
                 source_version: version,
             },
+            metadata,
             header: doc_header,
             sections,
             bin_streams,
         },
         warnings,
     })
+}
+
+/// content.hpf OPF 메타데이터에서 제목/지은이/주제/키워드를 추출한다(최선 노력).
+/// `opf:title`/`dc:creator`/`dc:subject` 텍스트 + `opf:meta[name=keywords]` content 속성.
+/// (앱 표시용 `<opf:meta name="creator">hwp-cli</opf:meta>`는 local-name이 `meta`라 무시됨.)
+pub fn parse_content_meta(xml: &str) -> hwp_model::Metadata {
+    use quick_xml::events::Event;
+    let mut meta = hwp_model::Metadata::default();
+    let mut reader = quick_xml::Reader::from_str(xml);
+    let mut capture: Option<&'static str> = None;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) => match e.local_name().as_ref() {
+                b"title" => capture = Some("title"),
+                b"creator" => capture = Some("author"),
+                b"subject" => capture = Some("subject"),
+                b"meta" => keywords_from_meta(&e, &mut meta),
+                _ => capture = None,
+            },
+            Ok(Event::Empty(e)) => {
+                if e.local_name().as_ref() == b"meta" {
+                    keywords_from_meta(&e, &mut meta);
+                }
+            }
+            Ok(Event::Text(t)) => {
+                if let Some(field) = capture.take() {
+                    let s = t.xml10_content().unwrap_or_default().trim().to_string();
+                    if !s.is_empty() {
+                        match field {
+                            "title" => meta.title = Some(s),
+                            "author" => meta.author = Some(s),
+                            "subject" => meta.subject = Some(s),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Ok(Event::End(_)) => capture = None,
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+    }
+    meta
+}
+
+fn keywords_from_meta(e: &quick_xml::events::BytesStart<'_>, meta: &mut hwp_model::Metadata) {
+    if xml::attr(e, "name").as_deref() == Some("keywords")
+        && let Some(v) = xml::attr(e, "content").filter(|v| !v.is_empty())
+    {
+        meta.keywords = Some(v);
+    }
 }

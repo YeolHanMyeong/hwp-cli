@@ -13,10 +13,11 @@
 
 pub mod error;
 pub mod package;
+pub mod patch;
 pub mod read;
 pub mod write;
 
 pub use error::HwpxError;
 pub use package::HwpxPackage;
-pub use read::{ReadResult, read_document};
+pub use read::{ReadResult, parse_content_meta, read_document};
 pub use write::write_document;

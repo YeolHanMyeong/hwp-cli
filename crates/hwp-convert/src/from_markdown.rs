@@ -20,14 +20,48 @@ mod shapes {
     pub const HEADING_BASE: u16 = 4;
 }
 
+/// `hwp new` 문서 스타일 프리셋.
+///
+/// Phase 1은 **본문 글자 크기만** 구분한다(글꼴은 한글 무결성 검증된 함초롬바탕 고정).
+/// 여백·머리글/바닥글·페이지번호·글꼴 family 프리셋은 Phase 2.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Preset {
+    /// 함초롬바탕 10pt (현행 `hwp new` 기본).
+    #[default]
+    Plain,
+    /// 공문 — 함초롬바탕 11.5pt.
+    Gongmun,
+    /// 보고서 — 함초롬바탕 15pt.
+    Bogoseo,
+}
+
+impl Preset {
+    /// 본문 글자 크기 (HWPUNIT, 1pt = 100).
+    pub fn body_size(self) -> i32 {
+        match self {
+            Preset::Plain => 1000,
+            Preset::Gongmun => 1150,
+            Preset::Bogoseo => 1500,
+        }
+    }
+}
+
 /// 테두리/배경 ID 배치: 1·2 = 무테두리(기본/참조용), 3 = 실선 0.12mm.
 const TABLE_BORDER_FILL: u16 = 3;
 
 /// 본문 영역 폭 (A4 기본 여백 기준, HWPUNIT).
 const BODY_WIDTH: i32 = 42520;
 
-/// `hwp new`용 기본 문서 헤더 — 한글 빈 문서에 준하는 최소 구성.
+/// `hwp new`용 기본 문서 헤더 — 한글 빈 문서에 준하는 최소 구성 (기본 프리셋).
 pub fn default_header() -> hwp_model::DocHeader {
+    default_header_preset(Preset::default())
+}
+
+/// 프리셋을 적용한 기본 문서 헤더.
+pub fn default_header_preset(preset: Preset) -> hwp_model::DocHeader {
+    let body = preset.body_size();
+    // 헤딩 크기 = 본문 × 비율 (기본 프리셋에서 1800/1500/1300/1200/1100/1100 재현).
+    let h = |factor: i32| (body * factor) / 100;
     let mut header = hwp_model::DocHeader::default();
     for slot in 0..LANG_COUNT {
         header.fonts[slot] = vec![FaceName {
@@ -62,16 +96,16 @@ pub fn default_header() -> hwp_model::DocHeader {
         ..base.clone()
     };
     header.char_shapes = vec![
-        cs(1000, false, false), // 0 본문
-        cs(1000, true, false),  // 1 굵게
-        cs(1000, false, true),  // 2 기울임
-        cs(1000, true, true),   // 3 굵게+기울임
-        cs(1800, true, false),  // 4 H1
-        cs(1500, true, false),  // 5 H2
-        cs(1300, true, false),  // 6 H3
-        cs(1200, true, false),  // 7 H4
-        cs(1100, true, false),  // 8 H5
-        cs(1100, true, false),  // 9 H6
+        cs(body, false, false),  // 0 본문
+        cs(body, true, false),   // 1 굵게
+        cs(body, false, true),   // 2 기울임
+        cs(body, true, true),    // 3 굵게+기울임
+        cs(h(180), true, false), // 4 H1
+        cs(h(150), true, false), // 5 H2
+        cs(h(130), true, false), // 6 H3
+        cs(h(120), true, false), // 7 H4
+        cs(h(110), true, false), // 8 H5
+        cs(h(110), true, false), // 9 H6
     ];
 
     // 탭 정의 — 한글 기본 좌/중/우 자동 탭 3개. 정상 표본(hello_world 등
@@ -170,8 +204,13 @@ pub fn default_header() -> hwp_model::DocHeader {
     header
 }
 
-/// markdown 텍스트를 문서로 변환한다.
+/// markdown 텍스트를 문서로 변환한다 (기본 프리셋).
 pub fn from_markdown(md: &str) -> Document {
+    from_markdown_preset(md, Preset::default())
+}
+
+/// 프리셋을 지정해 markdown을 문서로 변환한다.
+pub fn from_markdown_preset(md: &str, preset: Preset) -> Document {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     let parser = Parser::new_ext(md, options);
@@ -193,10 +232,12 @@ pub fn from_markdown(md: &str) -> Document {
             source_format: "markdown".to_string(),
             source_version: String::new(),
         },
-        header: default_header(),
+        metadata: Default::default(),
+        header: default_header_preset(preset),
         sections: vec![Section {
             paragraphs: b.paragraphs,
             extras: Vec::new(),
+            memos: Vec::new(),
         }],
         bin_streams: Vec::new(),
     }
@@ -552,5 +593,45 @@ fn table_paragraph(tb: TableBuilder) -> Paragraph {
         char_shape_runs: vec![(0, CharShapeId(0))],
         controls: vec![Control::Table(table)],
         ..Paragraph::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preset_본문_크기() {
+        assert_eq!(
+            default_header_preset(Preset::Plain).char_shapes[0].base_size,
+            1000
+        );
+        assert_eq!(
+            default_header_preset(Preset::Gongmun).char_shapes[0].base_size,
+            1150
+        );
+        assert_eq!(
+            default_header_preset(Preset::Bogoseo).char_shapes[0].base_size,
+            1500
+        );
+    }
+
+    #[test]
+    fn preset_헤딩_스케일() {
+        // H1(index 4)도 본문 비례로 커진다.
+        let plain_h1 = default_header_preset(Preset::Plain).char_shapes[4].base_size;
+        let bogoseo_h1 = default_header_preset(Preset::Bogoseo).char_shapes[4].base_size;
+        assert!(
+            bogoseo_h1 > plain_h1,
+            "bogoseo H1({bogoseo_h1}) > plain H1({plain_h1})"
+        );
+        // 기본 프리셋은 기존 절대값(1800) 유지.
+        assert_eq!(plain_h1, 1800);
+    }
+
+    #[test]
+    fn from_markdown_preset_적용() {
+        let doc = from_markdown_preset("# 제목\n\n본문\n", Preset::Bogoseo);
+        assert_eq!(doc.header.char_shapes[0].base_size, 1500);
     }
 }

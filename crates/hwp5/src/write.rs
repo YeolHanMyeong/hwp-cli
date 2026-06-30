@@ -10,8 +10,8 @@ use std::io::Write as _;
 use std::path::Path;
 
 use hwp_model::{
-    BorderLine, Cell, CharShape, Control, Document, FaceName, HwpChar, LANG_COUNT, OpaqueRecord,
-    ParaShape, Paragraph, Picture, RawEntry, Section, SectionDef, Style, Table,
+    BorderLine, Cell, CharShape, Control, Document, FaceName, HwpChar, LANG_COUNT, Metadata,
+    OpaqueRecord, ParaShape, Paragraph, Picture, RawEntry, Section, SectionDef, Style, Table,
 };
 
 use crate::codec::{ByteWriter, compress};
@@ -41,6 +41,14 @@ pub struct WriteOptions {
 /// 문서를 HWP 5.0 파일로 저장한다. 경고(평탄화/드롭) 목록을 반환한다.
 pub fn write_document(doc: &Document, path: &Path, opts: &WriteOptions) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
+
+    // 메모(주석)는 hwpx 출력에서만 지원 — hwp5 바이너리 메모 합성은 미지원.
+    let memo_count: usize = doc.sections.iter().map(|s| s.memos.len()).sum();
+    if memo_count > 0 {
+        warnings.push(format!(
+            "메모 {memo_count}개는 .hwpx 출력에서만 지원 — hwp 출력에서 생략"
+        ));
+    }
 
     // hwpx 출신 문서 정규화: hwp5 레코드(SHAPE_COMPONENT)가 없는 그림은
     // 쓸 수 없으므로 컨트롤과 확장 문자를 동기 제거한다
@@ -211,9 +219,9 @@ pub fn write_document(doc: &Document, path: &Path, opts: &WriteOptions) -> Resul
             0x63, 0x60, 0x40, 0x05, 0xFF, 0x81, 0x00, 0x00, 0x6E, 0xBB, 0x6E, 0xD1, 0x14, 0x00,
             0x00, 0x00,
         ])?;
-    // 요약 정보 (표본과 동일한 14개 속성 구조, 값은 비움)
+    // 요약 정보 (표본과 동일한 14개 속성 구조, 메타데이터 채움)
     cfb.create_new_stream("/\u{5}HwpSummaryInformation")?
-        .write_all(&hwp_summary_information())?;
+        .write_all(&hwp_summary_information(&doc.metadata))?;
     cfb.create_new_stream("/PrvText")?.write_all(&prv_text)?;
     if let Some(img) = &opts.prv_image {
         cfb.create_new_stream("/PrvImage")?.write_all(img)?;
@@ -581,7 +589,7 @@ fn synth_pictures_para(
                     .position(|n| !item_ref.is_empty() && n.contains(&item_ref))
                     .or(if bin_names.is_empty() { None } else { Some(0) });
                 let Some(idx) = pick else {
-                    warnings.push("이미지 바이너리 스트림을 찾지 못해 생략".to_string());
+                    warnings.push("DROP: 이미지 바이너리 스트림을 찾지 못해 생략".to_string());
                     continue;
                 };
                 // 같은 스트림에 이미 storage_id가 있으면 재사용(공유 이미지).
@@ -705,7 +713,8 @@ fn strip_unwritable_pictures(para: &mut Paragraph, warnings: &mut Vec<String>) {
     for (i, mut control) in std::mem::take(&mut para.controls).into_iter().enumerate() {
         match &mut control {
             Control::Picture(p) if p.extras.is_empty() => {
-                warnings.push("hwp5 그림 레코드가 없는 이미지를 생략 (hwpx 출신)".to_string());
+                warnings
+                    .push("DROP: hwp5 그림 레코드가 없는 이미지를 생략 (hwpx 출신)".to_string());
                 removed.push(i as u32);
                 continue;
             }
@@ -715,7 +724,7 @@ fn strip_unwritable_pictures(para: &mut Paragraph, warnings: &mut Vec<String>) {
                 if g.data.is_empty() && g.ctrl_id != *b"cold" && g.raw_children.is_empty() =>
             {
                 warnings.push(format!(
-                    "hwp5 페이로드가 없는 {:?} 컨트롤을 생략 (hwpx 출신)",
+                    "DROP: hwp5 페이로드가 없는 {:?} 컨트롤을 생략 (hwpx 출신)",
                     String::from_utf8_lossy(&g.ctrl_id)
                 ));
                 removed.push(i as u32);
@@ -827,14 +836,20 @@ const DEFAULT_NUMBERING_DATA: [u8; 226] = [
     0x00, 0x00,
 ];
 
-/// 최소 유효 `\x05HwpSummaryInformation` (OLE 속성 집합, 속성 0개).
+/// `\x05HwpSummaryInformation` (OLE 속성 집합) 작성. 메타데이터(제목/주제/지은이/키워드)를
+/// 채우되, 비어 있으면 빈 문자열로 표본 구조를 유지한다.
 /// 헤더 상수는 한글 저장 표본 실측값 — FMTID 9FA2B660-1061-11D4-B4C6-006097C09D8C.
-fn hwp_summary_information() -> Vec<u8> {
+/// PID: 0x02=제목 0x03=주제 0x04=지은이 0x05=키워드 (MS-OLEPS PIDSI). `summary.rs`의 파서와 대칭.
+pub(crate) fn hwp_summary_information(meta: &Metadata) -> Vec<u8> {
     const HWP_FMTID: [u8; 16] = [
         0x60, 0xB6, 0xA2, 0x9F, 0x61, 0x10, 0xD4, 0x11, 0xB4, 0xC6, 0x00, 0x60, 0x97, 0xC0, 0x9D,
         0x8C,
     ];
-    // 표본(한글 빈 문서)과 동일한 PID 순서/타입 — 값은 비움
+    let title = meta.title.as_deref().unwrap_or("");
+    let subject = meta.subject.as_deref().unwrap_or("");
+    let author = meta.author.as_deref().unwrap_or("");
+    let keywords = meta.keywords.as_deref().unwrap_or("");
+    // 표본(한글 빈 문서)과 동일한 PID 순서/타입 — 메타데이터만 채움
     enum Val<'a> {
         Str(&'a str),
         FileTime,
@@ -842,11 +857,11 @@ fn hwp_summary_information() -> Vec<u8> {
         Dictionary,
     }
     let props: [(u32, Val); 14] = [
-        (0x02, Val::Str("")),        // 제목
-        (0x03, Val::Str("")),        // 주제
-        (0x04, Val::Str("")),        // 지은이
+        (0x02, Val::Str(title)),     // 제목
+        (0x03, Val::Str(subject)),   // 주제
+        (0x04, Val::Str(author)),    // 지은이
         (0x14, Val::Str("")),        // 날짜 문자열
-        (0x05, Val::Str("")),        // 키워드
+        (0x05, Val::Str(keywords)),  // 키워드
         (0x06, Val::Str("")),        // 설명
         (0x08, Val::Str("")),        // 마지막 저장자
         (0x09, Val::Str("hwp-cli")), // 프로그램

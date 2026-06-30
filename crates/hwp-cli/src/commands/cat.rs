@@ -49,6 +49,7 @@ pub fn run(path: &Path, format: TextFormat) -> anyhow::Result<()> {
     match format {
         TextFormat::Plain => print!("{}", doc.plain_text()),
         TextFormat::Markdown => print!("{}", hwp_convert::to_markdown(&doc)),
+        TextFormat::Html => print!("{}", hwp_convert::to_html(&doc)),
         TextFormat::Json => println!("{}", hwp_convert::to_json(&doc, true, false)?),
     }
     Ok(())
