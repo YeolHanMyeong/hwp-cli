@@ -82,7 +82,8 @@ fn render_page(page: &PageList) -> String {
                 let color = hex_color(run.color);
                 let skew_c = if run.italic { 0.2126 * s } else { 0.0 };
                 let stroke = if run.bold {
-                    format!(r#" stroke="{color}" stroke-width="{:.1}""#, 0.03 * upem)
+                    // 합성 굵게 4.5% (한컴 굵게 대조 보정)
+                    format!(r#" stroke="{color}" stroke-width="{:.1}""#, 0.045 * upem)
                 } else {
                     String::new()
                 };

@@ -29,8 +29,8 @@ use crate::shape::ShapedRun;
 
 /// 합성 기울임 탄젠트 (png.rs/svg.rs와 동일, ≈12°).
 const ITALIC_SKEW: f32 = 0.2126;
-/// 합성 굵게 스트로크 굵기 (글자 크기 대비, png.rs와 동일).
-const BOLD_STROKE: f32 = 0.03;
+/// 합성 굵게 스트로크 굵기 (글자 크기 대비, png.rs와 동일). 한컴 굵게 대조 보정.
+const BOLD_STROKE: f32 = 0.045;
 
 /// 문서 전체를 단일 멀티페이지 PDF 바이트로 렌더링한다.
 pub fn render_pdf(list: &DisplayList, warnings: &mut Vec<String>) -> Result<Vec<u8>, RenderError> {
@@ -41,12 +41,10 @@ pub fn render_pdf(list: &DisplayList, warnings: &mut Vec<String>) -> Result<Vec<
         for item in &page.items {
             if let Item::Glyphs { run, .. } = item {
                 let key = font_key(&run.font);
-                let idx = *font_index
-                    .entry(key)
-                    .or_insert_with(|| {
-                        fonts.push(FontInfo::new(run.font.clone()));
-                        fonts.len() - 1
-                    });
+                let idx = *font_index.entry(key).or_insert_with(|| {
+                    fonts.push(FontInfo::new(run.font.clone()));
+                    fonts.len() - 1
+                });
                 let f = &mut fonts[idx];
                 let chars: Vec<char> = run.text.chars().collect();
                 for (i, g) in run.glyphs.iter().enumerate() {
@@ -153,8 +151,13 @@ pub fn render_pdf(list: &DisplayList, warnings: &mut Vec<String>) -> Result<Vec<
                 } => match decode_image(data) {
                     Some(payload) => {
                         let id = alloc(&mut counter);
-                        let smask_id = matches!(&payload,
-                            ImagePayload::Raw { alpha_z: Some(_), .. })
+                        let smask_id = matches!(
+                            &payload,
+                            ImagePayload::Raw {
+                                alpha_z: Some(_),
+                                ..
+                            }
+                        )
                         .then(|| alloc(&mut counter));
                         let name = format!("Im{}", images.len());
                         content.save_state();
@@ -382,12 +385,7 @@ fn write_font(pdf: &mut Pdf, f: &FontInfo) -> Result<(), RenderError> {
 fn write_page(pdf: &mut Pdf, plan: &PagePlan, page_tree_id: Ref, fonts: &[FontInfo]) {
     for img in &plan.images {
         match &img.payload {
-            ImagePayload::Jpeg {
-                bytes,
-                w,
-                h,
-                gray,
-            } => {
+            ImagePayload::Jpeg { bytes, w, h, gray } => {
                 let mut x = pdf.image_xobject(img.id, bytes);
                 x.filter(Filter::DctDecode);
                 x.width(*w);
@@ -463,7 +461,14 @@ fn write_page(pdf: &mut Pdf, plan: &PagePlan, page_tree_id: Ref, fonts: &[FontIn
 
 /// 글리프 런을 텍스트 객체로 그린다. 각 글리프를 셰이핑 좌표에 명시 배치해
 /// png/svg 백엔드와 위치를 일치시킨다.
-fn write_glyph_run(content: &mut Content, f: &FontInfo, x: f32, y: f32, page_h: f32, run: &ShapedRun) {
+fn write_glyph_run(
+    content: &mut Content,
+    f: &FontInfo,
+    x: f32,
+    y: f32,
+    page_h: f32,
+    run: &ShapedRun,
+) {
     content.begin_text();
     content.set_font(Name(f.res_name.as_bytes()), run.size_pt);
     content.set_horizontal_scaling(run.x_scale * 100.0); // 장평(Tz)
@@ -509,7 +514,8 @@ fn out_gid(subset_ok: bool, remapper: &GlyphRemapper, orig: u16) -> u16 {
 }
 
 fn glyph_width(face: &ttf_parser::Face<'_>, gid: u16) -> f32 {
-    face.glyph_hor_advance(ttf_parser::GlyphId(gid)).unwrap_or(0) as f32
+    face.glyph_hor_advance(ttf_parser::GlyphId(gid))
+        .unwrap_or(0) as f32
 }
 
 fn font_key(font: &Arc<LoadedFont>) -> (usize, u32) {

@@ -101,14 +101,29 @@ pub fn layout_document(
                 warnings.push("PAGE_DEF 없음 — A4 기본값 사용".to_string());
                 default_page()
             });
-        let (w, h) = (
-            page_def.width.to_pt() as f32,
-            page_def.height.to_pt() as f32,
-        );
+        // 가로(landscape, attr bit0): 용지를 90° 돌려 폭↔높이 스왑.
+        let landscape = page_def.attr & 1 != 0;
+        let (w, h) = if landscape {
+            (
+                page_def.height.to_pt() as f32,
+                page_def.width.to_pt() as f32,
+            )
+        } else {
+            (
+                page_def.width.to_pt() as f32,
+                page_def.height.to_pt() as f32,
+            )
+        };
+        // 본문 폭 계산의 기준 용지 폭(HWPUNIT) — landscape면 height가 폭이 된다.
+        let paper_w_hu = if landscape {
+            page_def.height.0
+        } else {
+            page_def.width.0
+        };
         let body_left = page_def.margin_left.to_pt() as f32;
         let body_top = (page_def.margin_top.0 + page_def.margin_header.0) as f32 / 100.0;
         let body_width =
-            (page_def.width.0 - page_def.margin_left.0 - page_def.margin_right.0) as f32 / 100.0;
+            (paper_w_hu - page_def.margin_left.0 - page_def.margin_right.0) as f32 / 100.0;
         // 본문 영역 하한 (넘침 분할 기준)
         let body_bottom = h - (page_def.margin_bottom.0 + page_def.margin_footer.0) as f32 / 100.0;
 
@@ -457,8 +472,11 @@ fn layout_para_objects(
                 // 다단/연결 글상자: 내부 문단의 v_pos 리셋(단 나누기)으로 단을 분할한다.
                 // 단 0은 이 박스, 단 1+는 연결 글상자(같은 크기·세로위치, 더 오른쪽
                 // 떠 있는 gso 박스) 위치로 흐른다. 없으면 가로로 한 단 진행(근사).
-                let flat: Vec<&Paragraph> =
-                    g.paragraph_lists.iter().flat_map(|l| l.paragraphs.iter()).collect();
+                let flat: Vec<&Paragraph> = g
+                    .paragraph_lists
+                    .iter()
+                    .flat_map(|l| l.paragraphs.iter())
+                    .collect();
                 let columns = split_columns(&flat);
                 let cont = if columns.len() > 1 && !inline {
                     continuation_columns(para, &b)
@@ -521,6 +539,23 @@ fn layout_para_objects(
 }
 
 /// 표 하나를 (x, y)에 배치하고 높이를 반환한다.
+/// 셀 여백 (왼/오른/위/아래) pt — 셀 지정 → 표 기본 → 한글 기본.
+fn cell_margins(table: &Table, cell: &hwp_model::Cell) -> (f32, f32, f32, f32) {
+    let m = if cell.margins.iter().any(|&v| v > 0) {
+        cell.margins
+    } else if table.inner_margins.iter().any(|&v| v > 0) {
+        table.inner_margins
+    } else {
+        DEFAULT_CELL_MARGINS
+    };
+    (
+        m[0] as f32 / 100.0,
+        m[1] as f32 / 100.0,
+        m[2] as f32 / 100.0,
+        m[3] as f32 / 100.0,
+    )
+}
+
 fn layout_table(
     doc: &Document,
     store: &mut FontStore,
@@ -548,11 +583,61 @@ fn layout_table(
     fill_unknown(&mut col_w, 60.0);
     fill_unknown(&mut row_h, 18.0);
 
+    // 측정 패스: 실제 내용 높이로 행 높이를 확장한다(저장된 cell.height는 한글의 줄바꿈
+    // 기준이라, 셰이핑/합성 줄바꿈이 더 많은 줄을 만들면 내용이 다음 행을 침범해 겹친다 —
+    // 실측 높이와 max로 행을 늘려 방지). 스크래치 페이지에 그려 높이만 잰다. 실측 내용
+    // 높이는 세로정렬에 재사용한다(재측정 회피).
+    let mut spanned: Vec<(usize, usize, f32)> = Vec::new(); // (시작행, 스팬, 필요높이)
+    let mut content_h_by_cell: Vec<f32> = Vec::with_capacity(table.cells.len());
+    for cell in &table.cells {
+        let (c, r) = (cell.col as usize, cell.row as usize);
+        if c >= cols || r >= rows {
+            content_h_by_cell.push(0.0);
+            continue;
+        }
+        let cw: f32 = col_w[c..(c + cell.col_span as usize).min(cols)]
+            .iter()
+            .sum();
+        let (ml, mr, mt, mb) = cell_margins(table, cell);
+        let mut scratch = PageList {
+            width_pt: page.width_pt,
+            height_pt: page.height_pt,
+            items: Vec::new(),
+        };
+        let mut scratch_warn = Vec::new();
+        let content_h = layout_box_paragraphs(
+            doc,
+            store,
+            &mut scratch,
+            &cell.paragraphs,
+            0.0,
+            0.0,
+            (cw - ml - mr).max(4.0),
+            &mut scratch_warn,
+        );
+        content_h_by_cell.push(content_h);
+        let needed = content_h + mt + mb;
+        let span = (cell.row_span as usize).max(1);
+        if span == 1 {
+            row_h[r] = row_h[r].max(needed);
+        } else {
+            spanned.push((r, span, needed));
+        }
+    }
+    // row_span>1 셀: 스팬 행 합이 부족하면 마지막 스팬 행에 부족분을 더한다.
+    for (r, span, needed) in spanned {
+        let end = (r + span).min(rows);
+        let cur: f32 = row_h[r..end].iter().sum();
+        if end > r && needed > cur {
+            row_h[end - 1] += needed - cur;
+        }
+    }
+
     // 누적 오프셋
     let col_x: Vec<f32> = prefix_sums(&col_w, x);
     let row_y: Vec<f32> = prefix_sums(&row_h, y);
 
-    for cell in &table.cells {
+    for (ci, cell) in table.cells.iter().enumerate() {
         let (c, r) = (cell.col as usize, cell.row as usize);
         if c >= cols || r >= rows {
             warnings.push(format!("셀 주소가 표 범위를 벗어남: ({r},{c})"));
@@ -583,26 +668,23 @@ fn layout_table(
             });
         }
 
-        // 2) 내용 — 셀 여백(셀 지정 → 표 기본 → 한글 기본) 적용
-        let margins = if cell.margins.iter().any(|&m| m > 0) {
-            cell.margins
-        } else if table.inner_margins.iter().any(|&m| m > 0) {
-            table.inner_margins
-        } else {
-            DEFAULT_CELL_MARGINS
+        // 2) 내용 — 셀 여백(셀 지정 → 표 기본 → 한글 기본) + 세로정렬
+        let (ml, mr, mt, mb) = cell_margins(table, cell);
+        // 세로정렬: list_attr bits5-6 (0=위, 1=가운데, 2=아래). 실측 내용 높이로 오프셋.
+        let content_h = content_h_by_cell.get(ci).copied().unwrap_or(0.0);
+        let avail = (ch - mt - mb - content_h).max(0.0);
+        let voff = match (cell.list_attr >> 5) & 0x3 {
+            1 => avail * 0.5,
+            2 => avail,
+            _ => 0.0,
         };
-        let (ml, mr, mt) = (
-            margins[0] as f32 / 100.0,
-            margins[1] as f32 / 100.0,
-            margins[2] as f32 / 100.0,
-        );
         layout_box_paragraphs(
             doc,
             store,
             page,
             &cell.paragraphs,
             cx + ml,
-            cy + mt,
+            cy + mt + voff,
             (cw - ml - mr).max(4.0),
             warnings,
         );
@@ -645,7 +727,16 @@ fn layout_box_paragraphs(
     width: f32,
     warnings: &mut Vec<String>,
 ) -> f32 {
-    layout_box_para_iter(doc, store, page, paras.iter(), origin_x, origin_y, width, warnings)
+    layout_box_para_iter(
+        doc,
+        store,
+        page,
+        paras.iter(),
+        origin_x,
+        origin_y,
+        width,
+        warnings,
+    )
 }
 
 /// `layout_box_paragraphs`의 반복자 버전 — 단(컬럼)으로 분할된 조각도 받는다.
@@ -815,9 +906,15 @@ fn last_content_seg(para: &Paragraph) -> usize {
 
 /// 정렬에 따른 가로 shift(pt). 양쪽/배분/나눔(0/4/5)이고 마지막 줄이 아니면
 /// items의 글리프 advance를 늘려 줄을 seg_width까지 채우고 shift 0을 반환한다.
-fn align_line(items: &mut [InlineItem], align: u8, seg_width: f32, natural: f32, is_last: bool) -> f32 {
+fn align_line(
+    items: &mut [InlineItem],
+    align: u8,
+    seg_width: f32,
+    natural: f32,
+    is_last: bool,
+) -> f32 {
     match align {
-        2 => (seg_width - natural).max(0.0),       // 오른쪽
+        2 => (seg_width - natural).max(0.0),         // 오른쪽
         3 => ((seg_width - natural) / 2.0).max(0.0), // 가운데
         0 | 4 | 5 if !is_last => {
             // 잉여 폭 분배. 폰트 부재 등으로 natural이 비정상이면 캡(≤100% stretch)으로 폭주 방지.
@@ -1066,10 +1163,16 @@ mod justify_tests {
         let mut items = vec![run(&[10.0, 10.0, 10.0])];
         let shift = align_line(&mut items, 0, 45.0, 30.0, false);
         assert_eq!(shift, 0.0);
-        assert!((total_adv(&items) - 45.0).abs() < 0.01, "줄이 seg_width를 채워야");
+        assert!(
+            (total_adv(&items) - 45.0).abs() < 0.01,
+            "줄이 seg_width를 채워야"
+        );
         if let InlineItem::Run(r) = &items[0] {
             assert!((r.glyphs[0].x_advance - 17.5).abs() < 0.01);
-            assert!((r.glyphs[2].x_advance - 10.0).abs() < 0.01, "마지막 글리프는 불변");
+            assert!(
+                (r.glyphs[2].x_advance - 10.0).abs() < 0.01,
+                "마지막 글리프는 불변"
+            );
             assert!((r.width_pt - 45.0).abs() < 0.01, "width_pt 갱신");
         }
     }
@@ -1094,7 +1197,11 @@ mod justify_tests {
         align_line(&mut items, 0, 40.0, 25.0, false); // slack 15
         if let InlineItem::Run(r) = &items[0] {
             // 후행 공백(idx2)은 분배 제외, last_visible=1 → gap 1개(idx0)에 15.
-            assert!((r.glyphs[0].x_advance - 25.0).abs() < 0.01, "{}", r.glyphs[0].x_advance);
+            assert!(
+                (r.glyphs[0].x_advance - 25.0).abs() < 0.01,
+                "{}",
+                r.glyphs[0].x_advance
+            );
             assert!((r.glyphs[2].x_advance - 5.0).abs() < 0.01, "후행 공백 불변");
         }
     }
@@ -1103,14 +1210,20 @@ mod justify_tests {
     fn 마지막_줄은_늘리지_않음() {
         let mut items = vec![run(&[10.0, 10.0, 10.0])];
         align_line(&mut items, 0, 45.0, 30.0, true);
-        assert!((total_adv(&items) - 30.0).abs() < 0.01, "마지막 줄은 ragged 유지");
+        assert!(
+            (total_adv(&items) - 30.0).abs() < 0.01,
+            "마지막 줄은 ragged 유지"
+        );
     }
 
     #[test]
     fn 가운데_오른쪽은_shift만() {
         let mut center = vec![run(&[10.0, 10.0])];
         assert!((align_line(&mut center, 3, 40.0, 20.0, false) - 10.0).abs() < 0.01);
-        assert!((total_adv(&center) - 20.0).abs() < 0.01, "가운데는 advance 불변");
+        assert!(
+            (total_adv(&center) - 20.0).abs() < 0.01,
+            "가운데는 advance 불변"
+        );
         let mut right = vec![run(&[10.0, 10.0])];
         assert!((align_line(&mut right, 2, 40.0, 20.0, false) - 20.0).abs() < 0.01);
     }
