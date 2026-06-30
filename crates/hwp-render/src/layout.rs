@@ -226,6 +226,7 @@ pub fn layout_document(
             page_notes.extend(footnote::para_notes(&notes, para));
             let tabs = crate::tab::tab_stops(doc, para);
             let geom = para_geometry(doc, para);
+            let links = crate::shape::hyperlink_ranges(para);
             // 목록 마커(불릿/번호) — 문서 순서로 카운터 진행(목록 아니면 None).
             let marker = list_state.marker(doc, para);
 
@@ -238,7 +239,8 @@ pub fn layout_document(
                     content_bottom += 16.0; // 빈 문단 높이 근사
                 } else {
                     let end = para.wchar_len();
-                    let items = shape_range_notes(store, doc, para, (0, end), &marks, warnings);
+                    let mut items = shape_range_notes(store, doc, para, (0, end), &marks, warnings);
+                    crate::shape::apply_link_style(&mut items, &links);
                     let max_size = items_max_size(&items).unwrap_or(10.0);
                     // 문단 들여쓰기/여백/위 간격(폴백 전용 — 캐시는 col_start에 반영됨).
                     let left = body_left + geom.left;
@@ -306,6 +308,7 @@ pub fn layout_document(
 
                 let mut items =
                     shape_range_notes(store, doc, para, (line_start, line_end), &marks, warnings);
+                crate::shape::apply_link_style(&mut items, &links);
                 let natural_width: f32 = items_width(&items);
 
                 // 정렬 보정 (가운데/오른쪽 + 양쪽정렬은 마지막 줄 빼고 글자 사이로 잉여 분배).

@@ -291,6 +291,57 @@ fn shape_piece(
     })
 }
 
+/// 하이퍼링크 색(COLORREF 0x00BBGGRR = 파랑).
+const LINK_BLUE: u32 = 0x00CC_0000;
+
+/// 문단 안 하이퍼링크(`%hlk` 필드)의 링크 텍스트 WCHAR 범위 [start, end) 목록.
+/// FIELD_START(ExtCtrl code 3, ctrl_id %hlk) ~ FIELD_END(InlineCtrl code 4) 사이.
+pub fn hyperlink_ranges(para: &Paragraph) -> Vec<(u32, u32)> {
+    const FIELD_START: u16 = 3;
+    const FIELD_END: u16 = 4;
+    let mut ranges = Vec::new();
+    let mut wpos = 0u32;
+    for (i, ch) in para.chars.iter().enumerate() {
+        if let HwpChar::ExtCtrl { code, ctrl_id, .. } = ch
+            && *code == FIELD_START
+            && ctrl_id == b"%hlk"
+        {
+            let start = wpos + ch.wchar_width();
+            let mut end = start;
+            for next in &para.chars[i + 1..] {
+                if let HwpChar::InlineCtrl { code, .. } = next
+                    && *code == FIELD_END
+                {
+                    break;
+                }
+                end += next.wchar_width();
+            }
+            if end > start {
+                ranges.push((start, end));
+            }
+        }
+        wpos += ch.wchar_width();
+    }
+    ranges
+}
+
+/// 링크 범위에 드는 Run에 밑줄+링크색을 입힌다(필드 경계 컨트롤이 조각을 끊어
+/// 링크 텍스트는 자체 Run이므로 start_wchar로 판정). 빈 범위면 무동작.
+pub fn apply_link_style(items: &mut [InlineItem], links: &[(u32, u32)]) {
+    if links.is_empty() {
+        return;
+    }
+    for item in items.iter_mut() {
+        if let InlineItem::Run(run) = item
+            && links.iter().any(|&(a, b)| run.start_wchar >= a && run.start_wchar < b)
+        {
+            run.underline = true;
+            run.color = LINK_BLUE;
+            run.underline_color = LINK_BLUE;
+        }
+    }
+}
+
 /// 임의 문자열을 기본 글자모양으로 셰이핑한다(수식 근사 등 합성 텍스트용).
 /// 한글이 섞이면 한글 슬롯, 아니면 라틴 슬롯 폰트를 쓴다.
 pub fn shape_plain(
@@ -349,4 +400,92 @@ fn note_mark_run(
         g.y_offset += raise;
     }
     Some(run)
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+    use crate::fonts::LoadedFont;
+    use std::sync::Arc;
+
+    fn field_start() -> HwpChar {
+        HwpChar::ExtCtrl {
+            code: 3,
+            ctrl_id: *b"%hlk",
+            payload: vec![0; 12],
+            ctrl_index: Some(0),
+        }
+    }
+    fn field_end() -> HwpChar {
+        HwpChar::InlineCtrl {
+            code: 4,
+            payload: vec![0; 12],
+        }
+    }
+
+    #[test]
+    fn 하이퍼링크_범위() {
+        let para = Paragraph {
+            chars: vec![
+                HwpChar::Text('a'),
+                field_start(),
+                HwpChar::Text('네'),
+                HwpChar::Text('이'),
+                HwpChar::Text('버'),
+                field_end(),
+                HwpChar::Text('b'),
+            ],
+            ..Paragraph::default()
+        };
+        // a=1 WCHAR, ExtCtrl=8 → 링크 시작 1+8=9, '네이버'=3 → (9, 12).
+        assert_eq!(hyperlink_ranges(&para), vec![(9, 12)]);
+        let plain = Paragraph {
+            chars: vec![HwpChar::Text('a')],
+            ..Paragraph::default()
+        };
+        assert!(hyperlink_ranges(&plain).is_empty());
+    }
+
+    fn run_at(start: u32) -> InlineItem {
+        InlineItem::Run(ShapedRun {
+            font: Arc::new(LoadedFont {
+                data: Arc::new(Vec::new()),
+                index: 0,
+                family: String::new(),
+            }),
+            size_pt: 10.0,
+            x_scale: 1.0,
+            color: 0,
+            bold: false,
+            italic: false,
+            underline: false,
+            strike: false,
+            underline_color: 0xFFFF_FFFF,
+            shade_color: 0xFFFF_FFFF,
+            shadow: None,
+            glyphs: Vec::new(),
+            width_pt: 0.0,
+            text: String::new(),
+            start_wchar: start,
+        })
+    }
+
+    #[test]
+    fn 링크_스타일_적용() {
+        let mut items = vec![run_at(0), run_at(9), run_at(20)];
+        apply_link_style(&mut items, &[(9, 12)]);
+        let und: Vec<bool> = items
+            .iter()
+            .map(|i| matches!(i, InlineItem::Run(r) if r.underline))
+            .collect();
+        assert_eq!(und, vec![false, true, false]); // 9만 링크 범위
+        if let InlineItem::Run(r) = &items[1] {
+            assert_eq!(r.color, LINK_BLUE);
+            assert_eq!(r.underline_color, LINK_BLUE);
+        }
+        // 빈 범위는 무동작.
+        let mut items2 = vec![run_at(9)];
+        apply_link_style(&mut items2, &[]);
+        assert!(matches!(&items2[0], InlineItem::Run(r) if !r.underline));
+    }
 }
