@@ -117,6 +117,9 @@ enum Cmd {
         /// 필드/누름틀 채우기 "이름=값" (반복 가능 — hwp fields로 이름 확인)
         #[arg(long = "set-field")]
         set_field: Vec<String>,
+        /// 누름틀 생성 "앵커=>이름" 또는 "앵커=>이름=값" — 앵커 텍스트 뒤에 %clk 필드 삽입 (반복 가능)
+        #[arg(long = "create-field")]
+        create_field: Vec<String>,
         /// 글자 서식 "찾기:속성=값,…" (예: "제목:bold=on,size=16,color=#FF0000")
         #[arg(long = "set-format")]
         set_format: Vec<String>,
@@ -252,6 +255,7 @@ fn main() -> anyhow::Result<()> {
             replace,
             set_cell,
             set_field,
+            create_field,
             set_format,
             set_align,
             insert_para,
@@ -266,6 +270,7 @@ fn main() -> anyhow::Result<()> {
             &replace,
             &set_cell,
             &set_field,
+            &create_field,
             &set_format,
             &set_align,
             &insert_para,

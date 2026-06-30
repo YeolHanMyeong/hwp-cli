@@ -273,6 +273,25 @@ fn tool_edit(args: &Value) -> Result<Vec<Value>, String> {
             summary.push(format!("셀 표{table}({row},{col})={text:?}"));
         }
     }
+    // 누름틀 생성은 set_field보다 먼저 — 같은 호출에서 생성→채우기 가능.
+    if let Some(arr) = args.get("create_field").and_then(Value::as_array) {
+        for f in arr {
+            let anchor = f
+                .get("anchor")
+                .and_then(Value::as_str)
+                .ok_or("create_field 항목에 anchor 필요")?;
+            let name = f
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("create_field 항목에 name 필요")?;
+            let value = f.get("value").and_then(Value::as_str).unwrap_or("");
+            if hwp_convert::create_field(&mut doc, anchor, name, value) {
+                summary.push(format!("누름틀 생성 {anchor:?}→{name:?}"));
+            } else {
+                summary.push(format!("경고: 앵커 {anchor:?} 못 찾음"));
+            }
+        }
+    }
     if let Some(arr) = args.get("set_field").and_then(Value::as_array) {
         for f in arr {
             let name = f
@@ -370,7 +389,7 @@ fn tool_edit(args: &Value) -> Result<Vec<Value>, String> {
     }
     if summary.is_empty() {
         return Err(
-            "적용할 편집이 없습니다 (replace/set_cell/set_field/set_format/set_align/insert_para/delete_para/add_row/delete_row 확인)"
+            "적용할 편집이 없습니다 (replace/set_cell/set_field/create_field/set_format/set_align/insert_para/delete_para/add_row/delete_row 확인)"
                 .to_string(),
         );
     }
@@ -507,6 +526,9 @@ fn tool_defs() -> Vec<Value> {
                 "set_field": {"type": "array", "items": {"type": "object", "properties": {
                     "name": {"type": "string"}, "value": {"type": "string"}},
                     "required": ["name", "value"]}, "description": "필드/누름틀 채우기(이름으로)"},
+                "create_field": {"type": "array", "items": {"type": "object", "properties": {
+                    "anchor": {"type": "string"}, "name": {"type": "string"}, "value": {"type": "string"}},
+                    "required": ["anchor", "name"]}, "description": "앵커 텍스트 뒤에 %clk 누름틀 생성(이름·선택 표시값; set_field로 채움)"},
                 "set_format": {"type": "array", "items": {"type": "object", "properties": {
                     "pattern": {"type": "string"}, "bold": {"type": "boolean"},
                     "italic": {"type": "boolean"}, "underline": {"type": "boolean"},

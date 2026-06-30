@@ -9,9 +9,10 @@
 //! IR을 바꾸지 않고 온디맨드로 파싱한다(리더/writer/왕복 무영향). 채우기는 값 영역만
 //! 교체하고 char_shape_run을 보정한다 — 쓰기는 편집 경로(write_hwp_edited)를 거친다.
 
-use hwp_model::{Control, Document, HwpChar, Paragraph};
+use hwp_model::opaque::OpaqueRecord;
+use hwp_model::{Control, Document, GenericControl, HwpChar, Paragraph};
 
-use crate::edit::{adjust_runs, utf16_len};
+use crate::edit::{adjust_runs, find_match, utf16_len};
 
 const CTRL_DATA_TAG: u16 = 0x0010 + 71; // HWPTAG_CTRL_DATA
 const FIELD_START: u16 = 3;
@@ -284,6 +285,140 @@ fn for_each_nested(ctrl: &Control, f: &mut impl FnMut(&Paragraph)) {
     }
 }
 
+/// ExtCtrl payload(12B): 선두 4B = 역순 ctrl_id(리더가 역순으로 파싱), 나머지 0.
+fn rev_payload(ctrl_id: &[u8; 4]) -> Vec<u8> {
+    let mut p = vec![0u8; 12];
+    p[0] = ctrl_id[3];
+    p[1] = ctrl_id[2];
+    p[2] = ctrl_id[1];
+    p[3] = ctrl_id[0];
+    p
+}
+
+/// CTRL_DATA Parameter Set: 필드 이름 BSTR 1개(setid0·count1·id1·BSTR).
+fn make_field_ctrl_data(name: &str) -> Vec<u8> {
+    let mut cd = vec![0u8, 0, 1, 0]; // setid=0, count=1
+    cd.extend([1u8, 0, 1, 0]); // item id=1, type=BSTR(1)
+    let units: Vec<u16> = name.encode_utf16().collect();
+    cd.extend((units.len() as u32).to_le_bytes());
+    for u in units {
+        cd.extend(u.to_le_bytes());
+    }
+    cd
+}
+
+/// %clk 누름틀 컨트롤 레코드(이름 CTRL_DATA 포함).
+fn make_field_control(name: &str) -> Control {
+    Control::Generic(GenericControl {
+        ctrl_id: *b"%clk",
+        data: vec![0u8; 11], // 속성4 기타1 len2=0 id4
+        paragraph_lists: Vec::new(),
+        extras: Vec::new(),
+        raw_children: vec![OpaqueRecord {
+            tag: CTRL_DATA_TAG,
+            data: make_field_ctrl_data(name),
+            children: Vec::new(),
+        }],
+        gso_shapes: Vec::new(),
+        equation: None,
+    })
+}
+
+/// 필드 문자열: FIELD_START(ExtCtrl, 코드 3) + 표시값 + FIELD_END(InlineCtrl, 코드 4).
+fn make_field_chars(value: &str) -> Vec<HwpChar> {
+    let mut chars = vec![HwpChar::ExtCtrl {
+        code: FIELD_START,
+        ctrl_id: *b"%clk",
+        payload: rev_payload(b"%clk"),
+        ctrl_index: None,
+    }];
+    chars.extend(build_value_chars(value));
+    chars.push(HwpChar::InlineCtrl {
+        code: FIELD_END,
+        payload: vec![0u8; 12],
+    });
+    chars
+}
+
+/// 문단의 ExtCtrl ↔ controls 등장순서 연결(ctrl_index)을 다시 매긴다.
+fn relink_ctrl_index(para: &mut Paragraph) {
+    let mut next = 0u32;
+    for ch in &mut para.chars {
+        if let HwpChar::ExtCtrl { ctrl_index, .. } = ch {
+            *ctrl_index = Some(next);
+            next += 1;
+        }
+    }
+}
+
+/// 한 문단에서 앵커 텍스트 뒤에 누름틀을 삽입한다. 반환=삽입 여부.
+fn create_field_in_para(para: &mut Paragraph, anchor: &str, name: &str, value: &str) -> bool {
+    let Some((cidx, wpos)) = find_match(&para.chars, anchor, 0) else {
+        return false;
+    };
+    let ins = (cidx + anchor.chars().count()).min(para.chars.len());
+    let iw = wpos + utf16_len(anchor);
+    // control 삽입 위치 = ins 이전 ExtCtrl 개수(등장순서가 chars와 정합해야 함).
+    let ci = para.chars[..ins]
+        .iter()
+        .filter(|c| matches!(c, HwpChar::ExtCtrl { .. }))
+        .count()
+        .min(para.controls.len());
+    para.controls.insert(ci, make_field_control(name));
+    let field_chars = make_field_chars(value);
+    let inserted_w: u32 = field_chars.iter().map(HwpChar::wchar_width).sum();
+    para.chars.splice(ins..ins, field_chars);
+    adjust_runs(&mut para.char_shape_runs, iw, 0, inserted_w);
+    relink_ctrl_index(para);
+    para.header.ctrl_mask = 0; // writer가 chars에서 재계산(FIELD_START bit3 포함)
+    para.line_segs.clear();
+    true
+}
+
+/// 본문/표 셀/글상자 문단을 재귀로 훑어 첫 매칭에 누름틀을 삽입한다.
+fn create_field_rec(para: &mut Paragraph, anchor: &str, name: &str, value: &str) -> bool {
+    if create_field_in_para(para, anchor, name, value) {
+        return true;
+    }
+    for ctrl in &mut para.controls {
+        match ctrl {
+            Control::Table(t) => {
+                for cell in &mut t.cells {
+                    for p in &mut cell.paragraphs {
+                        if create_field_rec(p, anchor, name, value) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            Control::Generic(g) => {
+                for l in &mut g.paragraph_lists {
+                    for p in &mut l.paragraphs {
+                        if create_field_rec(p, anchor, name, value) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// `anchor` 텍스트를 가진 첫 문단의 그 뒤에 `name` 이름의 %clk 누름틀을 삽입한다
+/// (표시값 `value`, 보통 빈 문자열). 반환=삽입 여부. 삽입 후 `set_field`로 채울 수 있다.
+pub fn create_field(doc: &mut Document, anchor: &str, name: &str, value: &str) -> bool {
+    for section in &mut doc.sections {
+        for para in &mut section.paragraphs {
+            if create_field_rec(para, anchor, name, value) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,5 +519,53 @@ mod tests {
         assert_eq!(fields[0].value, "기획팀");
         // 다른 이름은 안 바뀜
         assert_eq!(set_field(&mut doc, "없는이름", "x"), 0);
+    }
+
+    #[test]
+    fn create_field_삽입_후_읽기_채우기() {
+        let mut doc = crate::from_markdown::from_markdown("수신: 부서");
+        // 앵커 "수신:" 뒤에 누름틀 삽입.
+        assert!(create_field(&mut doc, "수신:", "수신처", ""));
+        let fields = list_fields(&doc);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].kind, "누름틀");
+        assert_eq!(fields[0].ctrl_id, "%clk");
+        assert_eq!(fields[0].name.as_deref(), Some("수신처"));
+        assert_eq!(fields[0].value, "");
+        // 생성한 누름틀을 이름으로 채우기.
+        assert_eq!(set_field(&mut doc, "수신처", "홍길동"), 1);
+        assert_eq!(list_fields(&doc)[0].value, "홍길동");
+        // 없는 앵커는 삽입 안 됨.
+        assert!(!create_field(&mut doc, "없는앵커", "x", ""));
+    }
+
+    #[test]
+    fn create_field_ctrl_index_정합() {
+        // 삽입된 ExtCtrl이 controls[ctrl_index]와 등장순서로 맞물리는지.
+        let mut doc = crate::from_markdown::from_markdown("가나다");
+        assert!(create_field(&mut doc, "가", "필드", "값"));
+        let para = &doc.sections[0].paragraphs[0];
+        // ExtCtrl의 ctrl_index가 %clk 컨트롤을 가리킨다.
+        let ext = para
+            .chars
+            .iter()
+            .find_map(|c| match c {
+                HwpChar::ExtCtrl {
+                    code, ctrl_index, ..
+                } if *code == FIELD_START => *ctrl_index,
+                _ => None,
+            })
+            .expect("ExtCtrl 존재");
+        match &para.controls[ext as usize] {
+            Control::Generic(g) => assert_eq!(&g.ctrl_id, b"%clk"),
+            _ => panic!("필드 컨트롤이 %clk Generic이어야"),
+        }
+        // 필드 ExtCtrl payload 선두 4B = 역순 ctrl_id("%clk"→"klc%").
+        // (문단 선두 secd ExtCtrl과 구분하려 code로 필터.)
+        let payload = para.chars.iter().find_map(|c| match c {
+            HwpChar::ExtCtrl { code, payload, .. } if *code == FIELD_START => Some(payload.clone()),
+            _ => None,
+        });
+        assert_eq!(&payload.unwrap()[..4], b"klc%");
     }
 }

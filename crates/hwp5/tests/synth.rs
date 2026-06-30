@@ -283,3 +283,25 @@ fn record_sizes(data: &[u8], tag: u16) -> Vec<u32> {
     }
     out
 }
+
+/// 신규 누름틀(%clk) 생성이 hwp5 이진 왕복을 통과한다 — payload 역순 ctrl_id +
+/// CTRL_DATA 이름 BSTR이 실제 writer→reader를 거쳐 정확히 복원되는지(IR 단정만으론
+/// payload 바이트를 검증 못 함).
+#[test]
+fn 누름틀_생성_이진_왕복() {
+    let mut doc = hwp_convert::from_markdown("수신: 부서명\n\n참조: 부서명");
+    assert!(hwp_convert::create_field(&mut doc, "수신:", "수신처", ""));
+    // 같은 호출에서 채우기까지.
+    assert_eq!(hwp_convert::set_field(&mut doc, "수신처", "기획팀"), 1);
+
+    let out = tmp("field.hwp");
+    hwp5::write_document(&doc, &out, &hwp5::WriteOptions::default()).unwrap();
+    let reread = hwp5::read_document(&out).unwrap();
+
+    let fields = hwp_convert::list_fields(&reread.document);
+    let clk: Vec<_> = fields.iter().filter(|f| f.ctrl_id == "%clk").collect();
+    assert_eq!(clk.len(), 1, "누름틀 1개가 왕복돼야: {fields:?}");
+    assert_eq!(clk[0].kind, "누름틀");
+    assert_eq!(clk[0].name.as_deref(), Some("수신처"));
+    assert_eq!(clk[0].value, "기획팀");
+}

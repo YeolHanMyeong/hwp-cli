@@ -11,7 +11,7 @@ pub mod structure;
 use hwp_model::Document;
 
 pub use edit::{replace_text, set_cell};
-pub use field::{FieldInfo, list_fields, set_field};
+pub use field::{FieldInfo, create_field, list_fields, set_field};
 pub use format::{CharFormat, set_char_format, set_para_align};
 pub use from_markdown::{default_header, from_markdown};
 pub use markdown::to_markdown;

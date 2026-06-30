@@ -18,6 +18,7 @@ pub fn run(
     replaces: &[String],
     set_cells: &[String],
     set_fields: &[String],
+    create_fields: &[String],
     set_formats: &[String],
     set_aligns: &[String],
     insert_paras: &[String],
@@ -59,6 +60,20 @@ pub fn run(
         hwp_convert::set_cell(&mut doc, ti, r, c, text).map_err(|e| anyhow::anyhow!(e))?;
         eprintln!("셀 설정: 표{ti} ({r},{c}) = {text:?}");
         edits += 1;
+    }
+
+    // 누름틀 생성은 set_field보다 먼저 — 같은 호출에서 생성한 필드를 바로 채울 수 있게.
+    for spec in create_fields {
+        let (anchor, rest) = spec.split_once("=>").with_context(|| {
+            format!("--create-field 형식은 \"앵커=>이름\" 또는 \"앵커=>이름=값\" 입니다: {spec:?}")
+        })?;
+        let (name, value) = rest.split_once('=').unwrap_or((rest, ""));
+        if hwp_convert::create_field(&mut doc, anchor, name, value) {
+            eprintln!("누름틀 생성: {anchor:?} 뒤에 이름={name:?} 값={value:?}");
+            edits += 1;
+        } else {
+            eprintln!("경고: 앵커 {anchor:?}를 찾지 못했습니다");
+        }
     }
 
     for spec in set_fields {
@@ -158,7 +173,7 @@ pub fn run(
 
     if edits == 0 {
         eprintln!(
-            "경고: 적용된 편집이 없습니다 (--replace/--set-cell/--set-field/--set-format/--set-align/--insert-para/--delete-para/--add-row/--delete-row 확인)"
+            "경고: 적용된 편집이 없습니다 (--replace/--set-cell/--set-field/--create-field/--set-format/--set-align/--insert-para/--delete-para/--add-row/--delete-row 확인)"
         );
     }
 
