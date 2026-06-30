@@ -8,6 +8,17 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// fixture 바이너리는 저장소에서 제외된다(로컬 전용 — `fixtures/README.md`). 없으면
+/// `true`를 반환하고 스킵 메시지를 출력한다(테스트는 `return`). fixture는 전부-또는-전무로
+/// 준비되므로 대표 파일 하나만 확인한다.
+fn skip_if_no_fixtures() -> bool {
+    if fixture("hello_world.hwp").exists() {
+        return false;
+    }
+    eprintln!("스킵: fixtures 없음 (fixtures/hwp5/) — fixtures/README.md 참고");
+    true
+}
+
 const ALL_FIXTURES: &[&str] = &[
     "hello_world.hwp",
     "bookmark.hwp",
@@ -21,6 +32,9 @@ const ALL_FIXTURES: &[&str] = &[
 /// (경고는 곧 분류표/레이아웃 가정의 오류 신호다)
 #[test]
 fn 전체_fixture_경고_없이_파싱() {
+    if skip_if_no_fixtures() {
+        return;
+    }
     for name in ALL_FIXTURES {
         let result = hwp5::read_document(&fixture(name)).expect(name);
         assert!(
@@ -34,6 +48,9 @@ fn 전체_fixture_경고_없이_파싱() {
 /// 소형 fixture의 추출 텍스트 스냅샷.
 #[test]
 fn 텍스트_추출_스냅샷() {
+    if skip_if_no_fixtures() {
+        return;
+    }
     for name in ["hello_world.hwp", "work_report.hwp"] {
         let result = hwp5::read_document(&fixture(name)).unwrap();
         insta::assert_snapshot!(
@@ -46,6 +63,9 @@ fn 텍스트_추출_스냅샷() {
 /// 빈 문서(컨트롤만 있는 문서)는 빈 텍스트여야 한다 — PrvText로 교차 확인됨.
 #[test]
 fn 빈_문서_추출() {
+    if skip_if_no_fixtures() {
+        return;
+    }
     for name in ["bookmark.hwp", "color_fill.hwp", "outline.hwp"] {
         let result = hwp5::read_document(&fixture(name)).unwrap();
         assert_eq!(result.document.plain_text().trim(), "", "{name}");
@@ -55,6 +75,9 @@ fn 빈_문서_추출() {
 /// 대형 문서: 구조 통계와 핵심 내용 불변식 (전체 스냅샷은 과대).
 #[test]
 fn annual_report_불변식() {
+    if skip_if_no_fixtures() {
+        return;
+    }
     let result = hwp5::read_document(&fixture("annual_report.hwp")).unwrap();
     let doc = &result.document;
     let text = doc.plain_text();
@@ -71,6 +94,9 @@ fn annual_report_불변식() {
 /// 문서 헤더 파싱 검증: hello_world의 알려진 값들.
 #[test]
 fn hello_world_헤더() {
+    if skip_if_no_fixtures() {
+        return;
+    }
     let result = hwp5::read_document(&fixture("hello_world.hwp")).unwrap();
     let doc = &result.document;
 
@@ -100,6 +126,9 @@ fn hello_world_헤더() {
 /// 표 구조 검증: work_report의 표.
 #[test]
 fn work_report_표_구조() {
+    if skip_if_no_fixtures() {
+        return;
+    }
     let result = hwp5::read_document(&fixture("work_report.hwp")).unwrap();
     let doc = &result.document;
 

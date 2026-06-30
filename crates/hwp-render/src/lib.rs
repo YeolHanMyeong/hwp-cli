@@ -103,8 +103,7 @@ pub fn render_document_pdf(
 ) -> Result<PdfOutput, RenderError> {
     let (mut list, mut report) = build_display_list(doc, opts);
     if let Some(sel) = pages {
-        let mut taken: Vec<Option<display::PageList>> =
-            list.pages.into_iter().map(Some).collect();
+        let mut taken: Vec<Option<display::PageList>> = list.pages.into_iter().map(Some).collect();
         let mut picked = Vec::with_capacity(sel.len());
         for &n in sel {
             if let Some(page) = taken.get_mut(n.wrapping_sub(1)).and_then(Option::take) {

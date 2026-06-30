@@ -13,8 +13,20 @@ fn fixture(rel: &str) -> PathBuf {
         .join(rel)
 }
 
+/// fixture 바이너리는 저장소에서 제외된다(로컬 전용). 없으면 `true`(스킵).
+fn skip_if_no_fixtures() -> bool {
+    if fixture("hwpx/minimal.hwpx").exists() {
+        return false;
+    }
+    eprintln!("스킵: fixtures 없음 — fixtures/README.md 참고");
+    true
+}
+
 #[test]
 fn validate_valid_hwpx_exit_zero() {
+    if skip_if_no_fixtures() {
+        return;
+    }
     let out = hwp()
         .arg("validate")
         .arg(fixture("hwpx/minimal.hwpx"))
@@ -130,6 +142,9 @@ fn convert_html_has_title_from_metadata() {
 
 #[test]
 fn convert_pdf_embeds_image_xobject() {
+    if skip_if_no_fixtures() {
+        return;
+    }
     // 이미지 있는 fixture → PDF는 %PDF- 헤더 + Image XObject (폰트 비의존).
     let out = tmp("hwp_cli_img.pdf");
     let status = hwp()
@@ -179,6 +194,9 @@ fn new_metadata_then_info_json() {
 
 #[test]
 fn convert_odt_mimetype_first() {
+    if skip_if_no_fixtures() {
+        return;
+    }
     let out = tmp("hwp_cli.odt");
     assert!(
         hwp()
@@ -209,6 +227,9 @@ fn convert_odt_mimetype_first() {
 
 #[test]
 fn strict_fails_on_dropped_controls() {
+    if skip_if_no_fixtures() {
+        return;
+    }
     // annual_report는 hwpx 쓰기 시 gso 도형을 드롭 → --strict면 비정상 종료.
     let out = tmp("hwp_cli_strict.hwpx");
     let ok = hwp()

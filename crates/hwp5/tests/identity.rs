@@ -23,8 +23,20 @@ const ALL: &[&str] = &[
     "annual_report.hwp",
 ];
 
+/// fixture 바이너리는 저장소에서 제외된다(로컬 전용). 없으면 `true`(스킵).
+fn skip_if_no_fixtures() -> bool {
+    if fixture("hello_world.hwp").exists() {
+        return false;
+    }
+    eprintln!("스킵: fixtures 없음 (fixtures/hwp5/) — fixtures/README.md 참고");
+    true
+}
+
 #[test]
 fn 레코드_스트림_바이트_동일_재직렬화() {
+    if skip_if_no_fixtures() {
+        return;
+    }
     for name in ALL {
         let mut c = hwp5::Hwp5Container::open(&fixture(name)).expect(name);
         let mut targets = vec!["/DocInfo".to_string()];

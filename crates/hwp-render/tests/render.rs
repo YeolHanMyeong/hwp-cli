@@ -18,7 +18,10 @@ fn fixture(rel: &str) -> PathBuf {
 fn fixture_or_skip(rel: &str) -> Option<PathBuf> {
     let p = fixture(rel);
     if !p.exists() {
-        eprintln!("스킵: fixture 없음 ({}) — fixtures/README.md 참고", p.display());
+        eprintln!(
+            "스킵: fixture 없음 ({}) — fixtures/README.md 참고",
+            p.display()
+        );
         return None;
     }
     Some(p)
@@ -197,7 +200,11 @@ fn 글상자_연결_다단_배치() {
     let mut store = hwp_render::FontStore::new();
     let mut warns = Vec::new();
     let list = hwp_render::layout::layout_document(&doc, &mut store, &mut warns);
-    assert!(list.pages.len() >= 5, "annual_report 는 5쪽 이상: {}", list.pages.len());
+    assert!(
+        list.pages.len() >= 5,
+        "annual_report 는 5쪽 이상: {}",
+        list.pages.len()
+    );
 
     let page = &list.pages[4]; // 5쪽 (0-기반)
     let glyphs: Vec<(f32, f32)> = page
@@ -222,7 +229,10 @@ fn 글상자_연결_다단_배치() {
     let right_col = glyphs
         .iter()
         .any(|(x, y)| (280.0..330.0).contains(x) && (200.0..800.0).contains(y));
-    assert!(right_col, "오른쪽 단(x≈300pt)에 본문이 없음 — 다단 글상자 미배치");
+    assert!(
+        right_col,
+        "오른쪽 단(x≈300pt)에 본문이 없음 — 다단 글상자 미배치"
+    );
 }
 
 /// 그리기 개체(도형) 렌더: annual_report의 선/사각형/타원/호/다각형이 Item::Path로
@@ -246,7 +256,10 @@ fn 도형_렌더_경로_생성() {
         .filter(|i| matches!(i, Item::Path { .. }))
         .count();
     // 보이지 않는 글상자 프레임은 제외되므로 가시 도형(선 43·타원·호·다각형 등)만 ~80개.
-    assert!(paths > 50, "도형 경로가 너무 적음: {paths} (선·사각형·타원 등 미렌더)");
+    assert!(
+        paths > 50,
+        "도형 경로가 너무 적음: {paths} (선·사각형·타원 등 미렌더)"
+    );
 
     // 파이(링) 페이지: 타원/호 유래 곡선(CubicTo) 경로 존재.
     let has_curve = list.pages.iter().flat_map(|p| &p.items).any(|i| {
@@ -257,7 +270,10 @@ fn 도형_렌더_경로_생성() {
 
     // 도형이 더 이상 "미지원 컨트롤"로 집계되지 않아야 한다.
     let skipped = warns.iter().filter(|w| w.contains("미지원 컨트롤")).count();
-    assert_eq!(skipped, 0, "아직 미지원으로 집계되는 도형이 있음: {warns:?}");
+    assert_eq!(
+        skipped, 0,
+        "아직 미지원으로 집계되는 도형이 있음: {warns:?}"
+    );
 }
 
 /// 그러데이션 채움이 백엔드에서 실제 그러데이션으로 렌더되는지(단색 근사가 아니라).
@@ -278,7 +294,7 @@ fn 그러데이션_채움_백엔드() {
             ],
             fill: Some(Fill::Gradient(Gradient {
                 radial: false,
-                angle_deg: 0.0, // 가로
+                angle_deg: 0.0,                                      // 가로
                 stops: vec![(0.0, 0x0000_00FF), (1.0, 0x00FF_0000)], // 빨강→파랑
             })),
             stroke: None,
@@ -300,6 +316,9 @@ fn 그러데이션_채움_백엔드() {
     assert!(
         left.red() > right.red() && left.blue() < right.blue(),
         "좌측은 빨강, 우측은 파랑이어야 — 좌({},{}) 우({},{})",
-        left.red(), left.blue(), right.red(), right.blue()
+        left.red(),
+        left.blue(),
+        right.red(),
+        right.blue()
     );
 }

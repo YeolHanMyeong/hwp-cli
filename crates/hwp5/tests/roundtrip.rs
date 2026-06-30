@@ -18,11 +18,23 @@ fn tmp(name: &str) -> PathBuf {
     dir.join(name)
 }
 
+/// fixture 바이너리는 저장소에서 제외된다(로컬 전용). 없으면 `true`(스킵).
+fn skip_if_no_fixtures() -> bool {
+    if fixture("hello_world.hwp").exists() {
+        return false;
+    }
+    eprintln!("스킵: fixtures 없음 (fixtures/hwp5/) — fixtures/README.md 참고");
+    true
+}
+
 /// 전체 fixture: IR 경유 재저장(--preserve-layout)이 **압축 해제 스트림
 /// 바이트 동일**해야 한다 — 표/그림/도형/책갈피/빈 셀 모두 포함.
 /// hwp→IR→hwp가 레코드 수준 무손실임의 최종 증명 (한글 '손상' 판정 방지).
 #[test]
 fn 전체_fixture_바이트_동일_왕복() {
+    if skip_if_no_fixtures() {
+        return;
+    }
     let opts = hwp5::WriteOptions {
         preserve_linesegs: true,
         ..Default::default()
@@ -63,6 +75,9 @@ fn 전체_fixture_바이트_동일_왕복() {
 /// 전체 fixture: 의미 동등 왕복.
 #[test]
 fn 전체_fixture_의미_왕복() {
+    if skip_if_no_fixtures() {
+        return;
+    }
     for name in [
         "hello_world.hwp",
         "bookmark.hwp",

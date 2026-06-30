@@ -10,8 +10,20 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// fixture 바이너리는 저장소에서 제외된다(로컬 전용). 없으면 `true`(스킵).
+fn skip_if_no_fixtures() -> bool {
+    if fixture("minimal.hwpx").exists() {
+        return false;
+    }
+    eprintln!("스킵: fixtures 없음 (fixtures/hwpx/) — fixtures/README.md 참고");
+    true
+}
+
 #[test]
 fn minimal_추출() {
+    if skip_if_no_fixtures() {
+        return;
+    }
     let result = hwpx::read_document(&fixture("minimal.hwpx")).unwrap();
     assert!(result.warnings.is_empty(), "{:?}", result.warnings);
     let doc = &result.document;

@@ -553,6 +553,15 @@ mod tests {
         format!("{}/../../fixtures/{rel}", env!("CARGO_MANIFEST_DIR"))
     }
 
+    /// fixture 바이너리는 저장소에서 제외된다(로컬 전용). 없으면 `true`(스킵).
+    fn skip_if_no_fixtures() -> bool {
+        if std::path::Path::new(&fixture("hwp5/hello_world.hwp")).exists() {
+            return false;
+        }
+        eprintln!("스킵: fixtures 없음 — fixtures/README.md 참고");
+        true
+    }
+
     fn call(line: &str) -> Value {
         let resp = handle_request(line, &ctx()).expect("응답 있어야 함");
         serde_json::from_str(&resp).unwrap()
@@ -607,6 +616,9 @@ mod tests {
 
     #[test]
     fn call_hwp_validate() {
+        if skip_if_no_fixtures() {
+            return;
+        }
         let line = format!(
             r#"{{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{{"name":"hwp_validate","arguments":{{"path":"{}"}}}}}}"#,
             fixture("hwpx/minimal.hwpx")
@@ -619,6 +631,9 @@ mod tests {
 
     #[test]
     fn call_hwp_read_json() {
+        if skip_if_no_fixtures() {
+            return;
+        }
         let line = format!(
             r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"hwp_read","arguments":{{"path":"{}","format":"plain"}}}}}}"#,
             fixture("hwp5/hello_world.hwp")
@@ -631,6 +646,9 @@ mod tests {
 
     #[test]
     fn call_hwp_render_이미지() {
+        if skip_if_no_fixtures() {
+            return;
+        }
         let line = format!(
             r#"{{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{{"name":"hwp_render","arguments":{{"path":"{}","page":1,"dpi":96}}}}}}"#,
             fixture("hwp5/hello_world.hwp")

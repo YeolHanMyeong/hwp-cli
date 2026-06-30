@@ -487,7 +487,7 @@ fn parse_generic(
         extras: Vec::new(),
         // 원본 자식 서브트리를 중첩 그대로 보존 → 무손실 재직렬화.
         raw_children: children.iter().map(to_opaque).collect(),
-            gso_shapes: Vec::new(),
+        gso_shapes: Vec::new(),
     };
     collect_paragraph_lists(children, &mut g, warnings);
     g

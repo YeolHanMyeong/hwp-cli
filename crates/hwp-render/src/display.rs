@@ -107,11 +107,7 @@ impl Gradient {
                 };
                 let (r0, g0, b0) = colorref_rgb(c0);
                 let (r1, g1, b1) = colorref_rgb(c1);
-                return (
-                    lerp_u8(r0, r1, f),
-                    lerp_u8(g0, g1, f),
-                    lerp_u8(b0, b1, f),
-                );
+                return (lerp_u8(r0, r1, f), lerp_u8(g0, g1, f), lerp_u8(b0, b1, f));
             }
         }
         colorref_rgb(self.stops[self.stops.len() - 1].1)
@@ -119,7 +115,9 @@ impl Gradient {
 }
 
 fn lerp_u8(a: u8, b: u8, f: f32) -> u8 {
-    (a as f32 + (b as f32 - a as f32) * f).round().clamp(0.0, 255.0) as u8
+    (a as f32 + (b as f32 - a as f32) * f)
+        .round()
+        .clamp(0.0, 255.0) as u8
 }
 
 /// COLORREF(0x00BBGGRR) → (r, g, b). 0xFFFFFFFF은 흰색 취급(그러데이션 stop용).

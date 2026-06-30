@@ -18,7 +18,10 @@ fn fixture(rel: &str) -> PathBuf {
 fn load_or_skip(rel: &str) -> Option<hwp_model::Document> {
     let p = fixture(rel);
     if !p.exists() {
-        eprintln!("스킵: fixture 없음 ({}) — fixtures/README.md 참고", p.display());
+        eprintln!(
+            "스킵: fixture 없음 ({}) — fixtures/README.md 참고",
+            p.display()
+        );
         return None;
     }
     Some(hwp5::read_document(&p).unwrap().document)
@@ -37,7 +40,9 @@ fn count(haystack: &[u8], needle: &[u8]) -> usize {
 
 #[test]
 fn 유효한_pdf_구조() {
-    let Some(doc) = load_or_skip("hwp5/hello_world.hwp") else { return };
+    let Some(doc) = load_or_skip("hwp5/hello_world.hwp") else {
+        return;
+    };
     let out = render_document_pdf(&doc, &RenderOptions::default(), None).unwrap();
     let pdf = &out.data;
 
@@ -54,7 +59,10 @@ fn 유효한_pdf_구조() {
         count(pdf, b"/CIDFontType2") + count(pdf, b"/CIDFontType0") >= 1,
         "CID 폰트 없음"
     );
-    assert!(count(pdf, b"/ToUnicode") >= 1, "ToUnicode CMap 없음(검색 불가)");
+    assert!(
+        count(pdf, b"/ToUnicode") >= 1,
+        "ToUnicode CMap 없음(검색 불가)"
+    );
     assert!(
         count(pdf, b"/FontFile2") + count(pdf, b"/FontFile3") >= 1,
         "임베드 폰트 프로그램 없음"
@@ -63,7 +71,9 @@ fn 유효한_pdf_구조() {
 
 #[test]
 fn 페이지_수_일치() {
-    let Some(doc) = load_or_skip("hwp5/annual_report.hwp") else { return };
+    let Some(doc) = load_or_skip("hwp5/annual_report.hwp") else {
+        return;
+    };
     let opts = RenderOptions::default();
     let total = count_pages(&doc, &opts);
     assert!(total > 1, "멀티페이지 문서여야 함: {total}쪽");
@@ -81,7 +91,9 @@ fn 페이지_수_일치() {
 
 #[test]
 fn 페이지_선택() {
-    let Some(doc) = load_or_skip("hwp5/annual_report.hwp") else { return };
+    let Some(doc) = load_or_skip("hwp5/annual_report.hwp") else {
+        return;
+    };
     let opts = RenderOptions::default();
     let total = count_pages(&doc, &opts);
     assert!(total >= 3);
@@ -94,7 +106,9 @@ fn 페이지_선택() {
 #[test]
 fn 표_문서_렌더() {
     // 표(선·셀 채움·텍스트)를 포함해도 유효한 PDF가 나와야 한다.
-    let Some(doc) = load_or_skip("hwp5/work_report.hwp") else { return };
+    let Some(doc) = load_or_skip("hwp5/work_report.hwp") else {
+        return;
+    };
     let out = render_document_pdf(&doc, &RenderOptions::default(), None).unwrap();
     assert!(out.data.starts_with(b"%PDF-"));
     assert!(out.data.windows(5).any(|w| w == b"%%EOF"));
@@ -102,7 +116,9 @@ fn 표_문서_렌더() {
 
 #[test]
 fn 빈_문서_렌더() {
-    let Some(doc) = load_or_skip("hwp5/bookmark.hwp") else { return };
+    let Some(doc) = load_or_skip("hwp5/bookmark.hwp") else {
+        return;
+    };
     let out = render_document_pdf(&doc, &RenderOptions::default(), None).unwrap();
     // 텍스트가 없어도 유효한 1쪽 PDF.
     assert!(out.data.starts_with(b"%PDF-"));

@@ -9,6 +9,15 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// fixture 바이너리는 저장소에서 제외된다(로컬 전용). 없으면 `true`(스킵).
+fn skip_if_no_fixtures() -> bool {
+    if fixture("minimal.hwpx").exists() {
+        return false;
+    }
+    eprintln!("스킵: fixtures 없음 (fixtures/hwpx/) — fixtures/README.md 참고");
+    true
+}
+
 fn tmp(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join("hwpx-write-tests");
     std::fs::create_dir_all(&dir).unwrap();
@@ -18,6 +27,9 @@ fn tmp(name: &str) -> PathBuf {
 /// hwpx → IR → hwpx → IR 왕복: 의미 동등성.
 #[test]
 fn 왕복_의미_동등() {
+    if skip_if_no_fixtures() {
+        return;
+    }
     let original = hwpx::read_document(&fixture("minimal.hwpx"))
         .unwrap()
         .document;
@@ -62,6 +74,9 @@ fn 왕복_의미_동등() {
 /// 패키지 규칙: mimetype이 첫 엔트리 + 무압축.
 #[test]
 fn 패키지_mimetype_규칙() {
+    if skip_if_no_fixtures() {
+        return;
+    }
     let doc = hwpx::read_document(&fixture("minimal.hwpx"))
         .unwrap()
         .document;

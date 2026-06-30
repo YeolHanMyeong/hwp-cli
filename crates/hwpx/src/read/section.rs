@@ -807,34 +807,32 @@ fn collect_shape(
     let mut border_color = 0xFFFF_FFFFu32;
     let mut border_width = 0i32;
     let mut points: Vec<(i32, i32)> = Vec::new();
-    let mut read_attrs = |e: &BytesStart<'_>| {
-        match e.local_name().as_ref() {
-            b"pos" => {
-                x = attr_offset_i32(e, "horzOffset").unwrap_or(x);
-                y = attr_offset_i32(e, "vertOffset").unwrap_or(y);
-            }
-            b"sz" => {
-                w = attr_i32(e, "width").unwrap_or(w);
-                h = attr_i32(e, "height").unwrap_or(h);
-            }
-            b"lineShape" => {
-                if let Some(c) = attr(e, "color") {
-                    border_color = parse_color(&c);
-                }
-                border_width = attr_i32(e, "width").unwrap_or(border_width);
-            }
-            b"winBrush" => {
-                if let Some(c) = attr(e, "faceColor") {
-                    fill = parse_color(&c);
-                }
-            }
-            n if n.starts_with(b"pt") => {
-                if let (Some(px), Some(py)) = (attr_i32(e, "x"), attr_i32(e, "y")) {
-                    points.push((px, py));
-                }
-            }
-            _ => {}
+    let mut read_attrs = |e: &BytesStart<'_>| match e.local_name().as_ref() {
+        b"pos" => {
+            x = attr_offset_i32(e, "horzOffset").unwrap_or(x);
+            y = attr_offset_i32(e, "vertOffset").unwrap_or(y);
         }
+        b"sz" => {
+            w = attr_i32(e, "width").unwrap_or(w);
+            h = attr_i32(e, "height").unwrap_or(h);
+        }
+        b"lineShape" => {
+            if let Some(c) = attr(e, "color") {
+                border_color = parse_color(&c);
+            }
+            border_width = attr_i32(e, "width").unwrap_or(border_width);
+        }
+        b"winBrush" => {
+            if let Some(c) = attr(e, "faceColor") {
+                fill = parse_color(&c);
+            }
+        }
+        n if n.starts_with(b"pt") => {
+            if let (Some(px), Some(py)) = (attr_i32(e, "x"), attr_i32(e, "y")) {
+                points.push((px, py));
+            }
+        }
+        _ => {}
     };
 
     let mut depth = 1u32;

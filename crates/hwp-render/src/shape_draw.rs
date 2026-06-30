@@ -214,7 +214,10 @@ struct Mat {
 
 impl Mat {
     fn apply(&self, x: f64, y: f64) -> (f64, f64) {
-        (self.a * x + self.b * y + self.c, self.d * x + self.e * y + self.f)
+        (
+            self.a * x + self.b * y + self.c,
+            self.d * x + self.e * y + self.f,
+        )
     }
     fn mul(&self, o: &Mat) -> Mat {
         Mat {
@@ -240,10 +243,12 @@ fn rd_u16(d: &[u8], o: usize) -> Option<u16> {
     d.get(o..o + 2).map(|b| u16::from_le_bytes([b[0], b[1]]))
 }
 fn rd_i32(d: &[u8], o: usize) -> Option<i32> {
-    d.get(o..o + 4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    d.get(o..o + 4)
+        .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 fn rd_u32(d: &[u8], o: usize) -> Option<u32> {
-    d.get(o..o + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    d.get(o..o + 4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 fn rd_f64(d: &[u8], o: usize) -> f64 {
     d.get(o..o + 8)
@@ -301,7 +306,12 @@ fn parse_style(d: &[u8], doc: &Document) -> Option<Style> {
             }
         }
     }
-    Some(Style { m, stroke, fill, image })
+    Some(Style {
+        m,
+        stroke,
+        fill,
+        image,
+    })
 }
 
 /// Table 28 그러데이션: type(i16) 각(i16) cx(i16) cy(i16) spread(i16) num(i16),
@@ -323,7 +333,9 @@ fn parse_gradient(d: &[u8], fo: usize) -> Option<Gradient> {
         let max = v.iter().cloned().fold(1.0_f32, f32::max);
         v.iter().map(|p| (p / max).clamp(0.0, 1.0)).collect()
     } else {
-        (0..num).map(|i| i as f32 / (num.max(2) - 1) as f32).collect()
+        (0..num)
+            .map(|i| i as f32 / (num.max(2) - 1) as f32)
+            .collect()
     };
     let mut stops = Vec::with_capacity(num);
     for i in 0..num {
@@ -360,11 +372,13 @@ fn geometry(tag: u16, d: &[u8], s: &Style, origin: (f64, f64)) -> Option<Vec<Pat
     // local 점(HWPUNIT) → 행렬 → +origin → /100 = pt.
     let to_pt = |x: f64, y: f64| -> (f32, f32) {
         let (px, py) = s.m.apply(x, y);
-        (((px + origin.0) / 100.0) as f32, ((py + origin.1) / 100.0) as f32)
+        (
+            ((px + origin.0) / 100.0) as f32,
+            ((py + origin.1) / 100.0) as f32,
+        )
     };
-    let p = |o: usize| -> Option<(f64, f64)> {
-        Some((rd_i32(d, o)? as f64, rd_i32(d, o + 4)? as f64))
-    };
+    let p =
+        |o: usize| -> Option<(f64, f64)> { Some((rd_i32(d, o)? as f64, rd_i32(d, o + 4)? as f64)) };
 
     match tag {
         SC_LINE => {
@@ -415,7 +429,13 @@ fn geometry(tag: u16, d: &[u8], s: &Style, origin: (f64, f64)) -> Option<Vec<Pat
             let (cx, cy) = p(4)?;
             let (a1x, a1y) = p(12)?;
             let (a2x, a2y) = p(20)?;
-            Some(ellipse_path(cx, cy, (a1x - cx, a1y - cy), (a2x - cx, a2y - cy), &to_pt))
+            Some(ellipse_path(
+                cx,
+                cy,
+                (a1x - cx, a1y - cy),
+                (a2x - cx, a2y - cy),
+                &to_pt,
+            ))
         }
         SC_ARC => {
             // BYTE arctype + center + start(ax1) + end(ax2).
@@ -466,10 +486,26 @@ fn ellipse_path(
     let c = |bx: f64, by: f64| pt(bx, by);
     vec![
         PathCmd::MoveTo(p0.0, p0.1),
-        cubic(c(a1.0 + k * a2.0, a1.1 + k * a2.1), c(a2.0 + k * a1.0, a2.1 + k * a1.1), p1),
-        cubic(c(a2.0 - k * a1.0, a2.1 - k * a1.1), c(-a1.0 + k * a2.0, -a1.1 + k * a2.1), p2),
-        cubic(c(-a1.0 - k * a2.0, -a1.1 - k * a2.1), c(-a2.0 - k * a1.0, -a2.1 - k * a1.1), p3),
-        cubic(c(-a2.0 + k * a1.0, -a2.1 + k * a1.1), c(a1.0 - k * a2.0, a1.1 - k * a2.1), p0),
+        cubic(
+            c(a1.0 + k * a2.0, a1.1 + k * a2.1),
+            c(a2.0 + k * a1.0, a2.1 + k * a1.1),
+            p1,
+        ),
+        cubic(
+            c(a2.0 - k * a1.0, a2.1 - k * a1.1),
+            c(-a1.0 + k * a2.0, -a1.1 + k * a2.1),
+            p2,
+        ),
+        cubic(
+            c(-a1.0 - k * a2.0, -a1.1 - k * a2.1),
+            c(-a2.0 - k * a1.0, -a2.1 - k * a1.1),
+            p3,
+        ),
+        cubic(
+            c(-a2.0 + k * a1.0, -a2.1 + k * a1.1),
+            c(a1.0 - k * a2.0, a1.1 - k * a2.1),
+            p0,
+        ),
         PathCmd::Close,
     ]
 }
@@ -575,7 +611,9 @@ mod tests {
             panic!("Path가 아님");
         };
         assert_eq!(commands.len(), 5, "사각형은 Move+Line×3+Close");
-        assert!(matches!(commands[0], PathCmd::MoveTo(x, y) if (x - 20.0).abs() < 0.1 && (y - 10.0).abs() < 0.1));
+        assert!(
+            matches!(commands[0], PathCmd::MoveTo(x, y) if (x - 20.0).abs() < 0.1 && (y - 10.0).abs() < 0.1)
+        );
         assert!(matches!(fill, Some(Fill::Solid(0x0000_CCFF))));
         assert!(stroke.is_some(), "테두리 있어야");
 
