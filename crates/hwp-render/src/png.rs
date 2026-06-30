@@ -119,43 +119,26 @@ fn render_page(page: &PageList, dpi: f32) -> Result<Pixmap, RenderError> {
                     Ok(f) => f,
                     Err(_) => continue,
                 };
-                let upem = face.units_per_em() as f32;
-                let glyph_scale = run.size_pt / upem;
-
-                let mut paint = Paint::default();
-                let (r, g, b) = colorref_rgb(run.color);
-                paint.set_color_rgba8(r, g, b, 255);
-                paint.anti_alias = true;
-
-                let mut pen_x = *x;
-                for glyph in &run.glyphs {
-                    let mut builder = OutlinePath::default();
-                    if face
-                        .outline_glyph(ttf_parser::GlyphId(glyph.id), &mut builder)
-                        .is_some()
-                        && let Some(path) = builder.path.finish()
-                    {
-                        // 글리프 → 페이지 변환: 크기 스케일, y 뒤집기(폰트는 y-up),
-                        // 장평 x스케일, 기울임 skew, 베이스라인 원점 이동, DPI 스케일
-                        let mut t = Transform::from_scale(glyph_scale * run.x_scale, -glyph_scale);
-                        if run.italic {
-                            t = t.post_concat(Transform::from_skew(-ITALIC_SKEW, 0.0));
-                        }
-                        t = t.post_translate(pen_x + glyph.x_offset, *y - glyph.y_offset);
-                        t = t.post_scale(px_scale, px_scale);
-
-                        pixmap.fill_path(&path, &paint, FillRule::Winding, t, None);
-                        if run.bold {
-                            // 합성 굵게: 윤곽선 위 스트로크 (굵기 ≈ 크기의 3%)
-                            let stroke = Stroke {
-                                width: run.size_pt * 0.03 / glyph_scale,
-                                ..Stroke::default()
-                            };
-                            pixmap.stroke_path(&path, &paint, &stroke, t, None);
-                        }
-                    }
-                    pen_x += glyph.x_advance;
+                // 글자 음영(배경 하이라이트) — 글리프 뒤에 사각형.
+                if run.shade_color != 0xFFFF_FFFF
+                    && let Some(rect) = tiny_skia::Rect::from_xywh(
+                        *x * px_scale,
+                        (*y - run.size_pt * 0.8) * px_scale,
+                        run.width_pt * px_scale,
+                        run.size_pt * px_scale,
+                    )
+                {
+                    let (sr, sg, sb) = colorref_rgb(run.shade_color);
+                    let mut sp = Paint::default();
+                    sp.set_color_rgba8(sr, sg, sb, 255);
+                    pixmap.fill_rect(rect, &sp, Transform::identity(), None);
                 }
+                // 그림자 — 본문 전에 오프셋 복사.
+                if let Some(sc) = run.shadow {
+                    let d = run.size_pt * 0.06;
+                    draw_glyph_run(&mut pixmap, &face, run, *x, *y, px_scale, sc, d, d);
+                }
+                draw_glyph_run(&mut pixmap, &face, run, *x, *y, px_scale, run.color, 0.0, 0.0);
             }
             Item::Path {
                 commands,
@@ -280,6 +263,54 @@ fn decode_image(data: &[u8]) -> Option<Pixmap> {
         )?;
     }
     Some(pixmap)
+}
+
+/// 글리프 런 하나를 (x, y) 베이스라인에 그린다. (dx, dy) 평행이동(그림자용),
+/// color로 채운다. bold/italic/장평/글리프 y_offset(첨자) 반영.
+#[allow(clippy::too_many_arguments)]
+fn draw_glyph_run(
+    pixmap: &mut Pixmap,
+    face: &ttf_parser::Face<'_>,
+    run: &crate::shape::ShapedRun,
+    x: f32,
+    y: f32,
+    px_scale: f32,
+    color: u32,
+    dx: f32,
+    dy: f32,
+) {
+    let upem = face.units_per_em() as f32;
+    let glyph_scale = run.size_pt / upem;
+    let (r, g, b) = colorref_rgb(color);
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(r, g, b, 255);
+    paint.anti_alias = true;
+    let mut pen_x = x;
+    for glyph in &run.glyphs {
+        let mut builder = OutlinePath::default();
+        if face
+            .outline_glyph(ttf_parser::GlyphId(glyph.id), &mut builder)
+            .is_some()
+            && let Some(path) = builder.path.finish()
+        {
+            // 크기 스케일·y뒤집기(폰트 y-up)·장평·기울임·베이스라인 이동·DPI 스케일
+            let mut t = Transform::from_scale(glyph_scale * run.x_scale, -glyph_scale);
+            if run.italic {
+                t = t.post_concat(Transform::from_skew(-ITALIC_SKEW, 0.0));
+            }
+            t = t.post_translate(pen_x + glyph.x_offset + dx, y - glyph.y_offset + dy);
+            t = t.post_scale(px_scale, px_scale);
+            pixmap.fill_path(&path, &paint, FillRule::Winding, t, None);
+            if run.bold {
+                let stroke = Stroke {
+                    width: run.size_pt * 0.03 / glyph_scale,
+                    ..Stroke::default()
+                };
+                pixmap.stroke_path(&path, &paint, &stroke, t, None);
+            }
+        }
+        pen_x += glyph.x_advance;
+    }
 }
 
 /// COLORREF(0x00BBGGRR) → (r, g, b). 0xFFFFFFFF(없음)는 검정 취급.

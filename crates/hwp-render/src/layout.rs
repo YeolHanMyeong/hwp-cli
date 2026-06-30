@@ -1398,6 +1398,8 @@ mod justify_tests {
             underline: false,
             strike: false,
             underline_color: 0xFFFF_FFFF,
+            shade_color: 0xFFFF_FFFF,
+            shadow: None,
             glyphs,
             width_pt: advs.iter().sum(),
             text: text.to_string(),

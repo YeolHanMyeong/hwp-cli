@@ -181,7 +181,34 @@ pub fn render_pdf(list: &DisplayList, warnings: &mut Vec<String>) -> Result<Vec<
                 },
                 Item::Glyphs { x, y, run } => {
                     if let Some(&idx) = font_index.get(&font_key(&run.font)) {
-                        write_glyph_run(&mut content, &fonts[idx], *x, *y, h, run);
+                        // 글자 음영(배경 하이라이트) — 글리프 뒤 사각형.
+                        if run.shade_color != 0xFFFF_FFFF {
+                            let (sr, sg, sb) = colorref_rgb(run.shade_color);
+                            content.set_fill_rgb(sr, sg, sb);
+                            content.rect(
+                                *x,
+                                h - (*y + run.size_pt * 0.2),
+                                run.width_pt,
+                                run.size_pt,
+                            );
+                            content.fill_nonzero();
+                        }
+                        // 그림자 — 본문 전에 오프셋 복사.
+                        if let Some(sc) = run.shadow {
+                            let d = run.size_pt * 0.06;
+                            write_glyph_run(&mut content, &fonts[idx], *x, *y, h, run, sc, d, d);
+                        }
+                        write_glyph_run(
+                            &mut content,
+                            &fonts[idx],
+                            *x,
+                            *y,
+                            h,
+                            run,
+                            run.color,
+                            0.0,
+                            0.0,
+                        );
                     }
                 }
                 Item::Path {
@@ -467,11 +494,23 @@ fn write_page(pdf: &mut Pdf, plan: &PagePlan, page_tree_id: Ref, fonts: &[FontIn
 
 /// 글리프 런을 텍스트 객체로 그린다. 각 글리프를 셰이핑 좌표에 명시 배치해
 /// png/svg 백엔드와 위치를 일치시킨다.
-fn write_glyph_run(content: &mut Content, f: &FontInfo, x: f32, y: f32, page_h: f32, run: &ShapedRun) {
+/// 글리프 런을 PDF 텍스트로 그린다. color로 채우고 (dx, dy)만큼 평행이동(그림자용).
+#[allow(clippy::too_many_arguments)]
+fn write_glyph_run(
+    content: &mut Content,
+    f: &FontInfo,
+    x: f32,
+    y: f32,
+    page_h: f32,
+    run: &ShapedRun,
+    color: u32,
+    dx: f32,
+    dy: f32,
+) {
     content.begin_text();
     content.set_font(Name(f.res_name.as_bytes()), run.size_pt);
     content.set_horizontal_scaling(run.x_scale * 100.0); // 장평(Tz)
-    let (r, g, b) = colorref_rgb(run.color);
+    let (r, g, b) = colorref_rgb(color);
     content.set_fill_rgb(r, g, b);
     if run.bold {
         // 합성 굵게 = 채움+스트로크.
@@ -483,18 +522,18 @@ fn write_glyph_run(content: &mut Content, f: &FontInfo, x: f32, y: f32, page_h: 
     }
     let shear = if run.italic { ITALIC_SKEW } else { 0.0 };
 
-    let mut pen_x = x;
+    let mut pen_x = x + dx;
     for gl in &run.glyphs {
         let gid = out_gid(f.subset_ok, &f.remapper, gl.id);
         // Tm: 크기·장평은 Tf/Tz가 적용, 여기선 기울임 시어(c)·베이스라인 이동만.
-        // y 뒤집기: PDF는 y-위 → page_h - (y - y_offset).
+        // y 뒤집기: PDF는 y-위 → page_h - (y - y_offset). 그림자는 dy만큼 더 내린다.
         content.set_text_matrix([
             1.0,
             0.0,
             shear,
             1.0,
             pen_x + gl.x_offset,
-            page_h - (y - gl.y_offset),
+            page_h - (y - gl.y_offset) - dy,
         ]);
         let code = gid.to_be_bytes();
         content.show(Str(&code));

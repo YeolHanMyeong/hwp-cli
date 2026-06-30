@@ -34,6 +34,10 @@ pub struct ShapedRun {
     pub strike: bool,
     /// 밑줄 색 (COLORREF, 0xFFFFFFFF = 글자색 따름)
     pub underline_color: u32,
+    /// 글자 음영(배경 하이라이트) 색 (COLORREF, 0xFFFFFFFF = 없음)
+    pub shade_color: u32,
+    /// 그림자 색 (Some이면 그림자 그림)
+    pub shadow: Option<u32>,
     pub glyphs: Vec<Glyph>,
     pub width_pt: f32,
     pub text: String,
@@ -57,6 +61,8 @@ impl ShapedRun {
             underline: self.underline,
             strike: self.strike,
             underline_color: self.underline_color,
+            shade_color: self.shade_color,
+            shadow: self.shadow,
             glyphs,
             width_pt,
             text: String::new(), // 부분 런의 원문 추적은 PDF 백엔드(M7)에서
@@ -221,8 +227,25 @@ fn shape_piece(
     // 크기: 기준 크기 × 언어별 상대 크기%
     let base = if cs.base_size > 0 { cs.base_size } else { 1000 };
     let rel = cs.rel_sizes.get(lang).copied().unwrap_or(100).max(1);
-    let size_pt = (base as f32 / 100.0) * (rel as f32 / 100.0);
+    let full_size = (base as f32 / 100.0) * (rel as f32 / 100.0);
+    // 위/아래 첨자: 크기 ~65% 축소 + 베이스라인 이동(원 크기 기준). 수동 글자위치(offsets%) 가산.
+    let (sup, sub) = (cs.is_superscript(), cs.is_subscript());
+    let size_pt = if sup || sub {
+        full_size * 0.65
+    } else {
+        full_size
+    };
     let scale = size_pt / upem;
+    let y_raise = {
+        let mut r = full_size * cs.char_offset(lang) as f32 / 100.0;
+        if sup {
+            r += full_size * 0.34;
+        }
+        if sub {
+            r -= full_size * 0.16;
+        }
+        r
+    };
 
     // 자간: 글자 크기 기준 % (U4 — 반올림 방식은 실측 보정 예정)
     let spacing_pt = size_pt * cs.spacings.get(lang).copied().unwrap_or(0) as f32 / 100.0;
@@ -240,7 +263,7 @@ fn shape_piece(
             id: info.glyph_id as u16,
             x_advance: advance,
             x_offset: gpos.x_offset as f32 * scale * x_scale,
-            y_offset: gpos.y_offset as f32 * scale,
+            y_offset: gpos.y_offset as f32 * scale + y_raise,
         });
         width += advance;
     }
@@ -255,6 +278,12 @@ fn shape_piece(
         underline: cs.has_underline(),
         strike: cs.has_strike(),
         underline_color: cs.underline_color,
+        shade_color: if cs.has_shade() {
+            cs.shade_color
+        } else {
+            0xFFFF_FFFF
+        },
+        shadow: cs.has_shadow().then_some(cs.shadow_color),
         glyphs,
         width_pt: width,
         text: text.to_string(),

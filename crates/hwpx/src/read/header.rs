@@ -211,6 +211,29 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
                             }
                         }
                     }
+                    // 위/아래 첨자(hwp5 attr bit16/17).
+                    b"supscript" => {
+                        if let Some(cs) = &mut current_char {
+                            cs.attr |= 1 << 16;
+                        }
+                    }
+                    b"subscript" => {
+                        if let Some(cs) = &mut current_char {
+                            cs.attr |= 1 << 17;
+                        }
+                    }
+                    // 그림자(hwp5 attr bits11~13) + 색/간격.
+                    b"shadow" => {
+                        if let Some(cs) = &mut current_char {
+                            cs.attr |= 1 << 11;
+                            if let Some(c) = attr(e, "color") {
+                                cs.shadow_color = parse_color(&c);
+                            }
+                            let gx = attr_i32(e, "offsetX").unwrap_or(0).clamp(-128, 127) as i8;
+                            let gy = attr_i32(e, "offsetY").unwrap_or(0).clamp(-128, 127) as i8;
+                            cs.shadow_gap = (gx, gy);
+                        }
+                    }
                     b"paraPr" => {
                         // paraPr 자체 속성을 attr1에 인코딩(정품 한글과 일치 — 강제
                         // 0x180 대신 실제 값). snapToGrid=bit8(줄 격자 사용),

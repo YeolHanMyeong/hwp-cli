@@ -114,6 +114,31 @@ impl CharShape {
     pub fn has_strike(&self) -> bool {
         (self.attr >> 18) & 0x7 != 0
     }
+
+    /// 글자 음영(배경 하이라이트)이 있는지. 0xFFFFFFFF=없음 관례.
+    pub fn has_shade(&self) -> bool {
+        self.shade_color != 0xFFFF_FFFF
+    }
+
+    /// 위첨자 (bit 16).
+    pub fn is_superscript(&self) -> bool {
+        self.attr & (1 << 16) != 0
+    }
+
+    /// 아래첨자 (bit 17).
+    pub fn is_subscript(&self) -> bool {
+        self.attr & (1 << 17) != 0
+    }
+
+    /// 그림자 효과 (bits 11~13).
+    pub fn has_shadow(&self) -> bool {
+        (self.attr >> 11) & 0x7 != 0
+    }
+
+    /// 언어 슬롯의 수동 글자 위치(첨자 오프셋) % (-100~100). 위=양수.
+    pub fn char_offset(&self, lang: usize) -> i8 {
+        self.offsets.get(lang).copied().unwrap_or(0)
+    }
 }
 
 /// PARA_SHAPE — 문단 모양. 알려진 prefix + tail 보존.
@@ -239,5 +264,51 @@ impl BorderFill {
     /// 그릴 배경색 (없음 표식 제외).
     pub fn visible_bg(&self) -> Option<u32> {
         self.bg_color.filter(|&c| c != 0xFFFF_FFFF)
+    }
+}
+
+#[cfg(test)]
+mod char_effect_tests {
+    use super::*;
+
+    #[test]
+    fn 글자효과_접근자() {
+        // 음영: 0xFFFFFFFF=없음, 그 외=있음.
+        let none = CharShape {
+            shade_color: 0xFFFF_FFFF,
+            ..CharShape::default()
+        };
+        assert!(!none.has_shade());
+        let shaded = CharShape {
+            shade_color: 0x0000_FFFF,
+            ..CharShape::default()
+        };
+        assert!(shaded.has_shade());
+
+        // 위/아래 첨자(bit16/17), 그림자(bits11~13).
+        let sup = CharShape {
+            attr: 1 << 16,
+            ..CharShape::default()
+        };
+        assert!(sup.is_superscript() && !sup.is_subscript() && !sup.has_shadow());
+        let sub = CharShape {
+            attr: 1 << 17,
+            ..CharShape::default()
+        };
+        assert!(sub.is_subscript() && !sub.is_superscript());
+        let shadow = CharShape {
+            attr: 1 << 11,
+            ..CharShape::default()
+        };
+        assert!(shadow.has_shadow());
+
+        // 수동 글자위치(offsets%).
+        let mut cs = CharShape::default();
+        cs.offsets[1] = 30;
+        assert_eq!(cs.char_offset(1), 30);
+        assert_eq!(cs.char_offset(0), 0);
+        // 기본값은 전부 효과 없음.
+        let d = CharShape::default();
+        assert!(!d.is_superscript() && !d.is_subscript() && !d.has_shadow());
     }
 }

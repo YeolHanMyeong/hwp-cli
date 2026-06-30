@@ -87,6 +87,40 @@ fn render_page(page: &PageList) -> String {
                     String::new()
                 };
 
+                // 글자 음영(배경 하이라이트) — 글리프 뒤 사각형.
+                if run.shade_color != 0xFFFF_FFFF {
+                    let _ = writeln!(
+                        out,
+                        r#"<rect x="{:.2}" y="{:.2}" width="{:.2}" height="{:.2}" fill="{}"/>"#,
+                        x,
+                        y - run.size_pt * 0.8,
+                        run.width_pt,
+                        run.size_pt,
+                        hex_color(run.shade_color)
+                    );
+                }
+                // 그림자 — 본문 전에 오프셋 복사.
+                if let Some(sc) = run.shadow {
+                    let sd = run.size_pt * 0.06;
+                    let shc = hex_color(sc);
+                    let mut pen_x = *x;
+                    for glyph in &run.glyphs {
+                        let d = outline_cache
+                            .entry((font_key, glyph.id))
+                            .or_insert_with(|| glyph_path(&face, glyph.id))
+                            .clone();
+                        if let Some(d) = d {
+                            let (a, dd) = (s * run.x_scale, -s);
+                            let (e, f) = (pen_x + glyph.x_offset + sd, y - glyph.y_offset + sd);
+                            let _ = writeln!(
+                                out,
+                                r#"<path transform="matrix({a:.4} 0 {skew_c:.4} {dd:.4} {e:.2} {f:.2})" d="{d}" fill="{shc}"/>"#
+                            );
+                        }
+                        pen_x += glyph.x_advance;
+                    }
+                }
+
                 let mut pen_x = *x;
                 for glyph in &run.glyphs {
                     let d = outline_cache
