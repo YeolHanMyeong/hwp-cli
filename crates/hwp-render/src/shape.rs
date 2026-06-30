@@ -38,6 +38,12 @@ pub struct ShapedRun {
     pub shade_color: u32,
     /// 그림자 색 (Some이면 그림자 그림)
     pub shadow: Option<u32>,
+    /// 외곽선(빈 글자 — 채움 없이 윤곽선만)
+    pub outline: bool,
+    /// 양각(3D 돋움)
+    pub emboss: bool,
+    /// 음각(3D 새김)
+    pub engrave: bool,
     pub glyphs: Vec<Glyph>,
     pub width_pt: f32,
     pub text: String,
@@ -63,6 +69,9 @@ impl ShapedRun {
             underline_color: self.underline_color,
             shade_color: self.shade_color,
             shadow: self.shadow,
+            outline: self.outline,
+            emboss: self.emboss,
+            engrave: self.engrave,
             glyphs,
             width_pt,
             text: String::new(), // 부분 런의 원문 추적은 PDF 백엔드(M7)에서
@@ -284,6 +293,9 @@ fn shape_piece(
             0xFFFF_FFFF
         },
         shadow: cs.has_shadow().then_some(cs.shadow_color),
+        outline: cs.has_outline(),
+        emboss: cs.is_emboss(),
+        engrave: cs.is_engrave(),
         glyphs,
         width_pt: width,
         text: text.to_string(),
@@ -463,6 +475,9 @@ mod link_tests {
             underline_color: 0xFFFF_FFFF,
             shade_color: 0xFFFF_FFFF,
             shadow: None,
+            outline: false,
+            emboss: false,
+            engrave: false,
             glyphs: Vec::new(),
             width_pt: 0.0,
             text: String::new(),

@@ -227,20 +227,22 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
                             }
                         }
                     }
-                    // 위/아래 첨자(hwp5 attr bit16/17).
+                    // 위/아래 첨자(hwp5 attr bit15/16 — 스펙).
                     b"supscript" => {
                         if let Some(cs) = &mut current_char {
-                            cs.attr |= 1 << 16;
+                            cs.attr |= 1 << 15;
                         }
                     }
                     b"subscript" => {
                         if let Some(cs) = &mut current_char {
-                            cs.attr |= 1 << 17;
+                            cs.attr |= 1 << 16;
                         }
                     }
-                    // 그림자(hwp5 attr bits11~13) + 색/간격.
+                    // 그림자(hwp5 attr bits11~12) + 색/간격.
                     b"shadow" => {
-                        if let Some(cs) = &mut current_char {
+                        if let Some(cs) = &mut current_char
+                            && attr(e, "type").as_deref() != Some("NONE")
+                        {
                             cs.attr |= 1 << 11;
                             if let Some(c) = attr(e, "color") {
                                 cs.shadow_color = parse_color(&c);
@@ -248,6 +250,24 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
                             let gx = attr_i32(e, "offsetX").unwrap_or(0).clamp(-128, 127) as i8;
                             let gy = attr_i32(e, "offsetY").unwrap_or(0).clamp(-128, 127) as i8;
                             cs.shadow_gap = (gx, gy);
+                        }
+                    }
+                    // 외곽선(bit8~10) / 양각(bit13) / 음각(bit14).
+                    b"outline" => {
+                        if let Some(cs) = &mut current_char
+                            && attr(e, "type").as_deref() != Some("NONE")
+                        {
+                            cs.attr |= 1 << 8;
+                        }
+                    }
+                    b"emboss" => {
+                        if let Some(cs) = &mut current_char {
+                            cs.attr |= 1 << 13;
+                        }
+                    }
+                    b"engrave" => {
+                        if let Some(cs) = &mut current_char {
+                            cs.attr |= 1 << 14;
                         }
                     }
                     b"paraPr" => {

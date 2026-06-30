@@ -138,6 +138,11 @@ fn render_page(page: &PageList, dpi: f32) -> Result<Pixmap, RenderError> {
                     let d = run.size_pt * 0.06;
                     draw_glyph_run(&mut pixmap, &face, run, *x, *y, px_scale, sc, d, d);
                 }
+                // 양각/음각 — 흰 하이라이트 사본 오프셋(양각=좌상, 음각=우하).
+                if run.emboss || run.engrave {
+                    let d = run.size_pt * 0.05 * if run.emboss { -1.0 } else { 1.0 };
+                    draw_glyph_run(&mut pixmap, &face, run, *x, *y, px_scale, 0x00FF_FFFF, d, d);
+                }
                 draw_glyph_run(&mut pixmap, &face, run, *x, *y, px_scale, run.color, 0.0, 0.0);
             }
             Item::Path {
@@ -300,13 +305,22 @@ fn draw_glyph_run(
             }
             t = t.post_translate(pen_x + glyph.x_offset + dx, y - glyph.y_offset + dy);
             t = t.post_scale(px_scale, px_scale);
-            pixmap.fill_path(&path, &paint, FillRule::Winding, t, None);
-            if run.bold {
+            if run.outline {
+                // 외곽선: 채움 없이 윤곽선만(빈 글자).
                 let stroke = Stroke {
-                    width: run.size_pt * 0.03 / glyph_scale,
+                    width: run.size_pt * 0.025 / glyph_scale,
                     ..Stroke::default()
                 };
                 pixmap.stroke_path(&path, &paint, &stroke, t, None);
+            } else {
+                pixmap.fill_path(&path, &paint, FillRule::Winding, t, None);
+                if run.bold {
+                    let stroke = Stroke {
+                        width: run.size_pt * 0.03 / glyph_scale,
+                        ..Stroke::default()
+                    };
+                    pixmap.stroke_path(&path, &paint, &stroke, t, None);
+                }
             }
         }
         pen_x += glyph.x_advance;
