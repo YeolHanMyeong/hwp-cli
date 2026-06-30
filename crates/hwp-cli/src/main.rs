@@ -117,6 +117,30 @@ enum Cmd {
         /// 필드/누름틀 채우기 "이름=값" (반복 가능 — hwp fields로 이름 확인)
         #[arg(long = "set-field")]
         set_field: Vec<String>,
+        /// 누름틀 생성 "앵커=>이름" 또는 "앵커=>이름=값" — 앵커 텍스트 뒤에 %clk 필드 삽입 (반복 가능)
+        #[arg(long = "create-field")]
+        create_field: Vec<String>,
+        /// 글자 서식 "찾기:속성=값,…" (예: "제목:bold=on,size=16,color=#FF0000")
+        #[arg(long = "set-format")]
+        set_format: Vec<String>,
+        /// 문단 정렬 "찾기=정렬" (left/right/center/justify/distribute)
+        #[arg(long = "set-align")]
+        set_align: Vec<String>,
+        /// 문단 삽입 "앵커=>텍스트" — 앵커가 있는 문단 뒤에 새 문단 (반복 가능)
+        #[arg(long = "insert-para")]
+        insert_para: Vec<String>,
+        /// 문단 삽입(앞) "앵커=>텍스트" — 앵커가 있는 문단 앞에 새 문단 (반복 가능)
+        #[arg(long = "insert-para-before")]
+        insert_para_before: Vec<String>,
+        /// 문단 삭제 "텍스트" — 텍스트가 있는 문단 삭제 (반복 가능)
+        #[arg(long = "delete-para")]
+        delete_para: Vec<String>,
+        /// 표 행 추가 "표" — N번째 표 끝에 빈 행 (반복 가능, 0-기반)
+        #[arg(long = "add-row")]
+        add_row: Vec<String>,
+        /// 표 행 삭제 "표:행" — N번째 표의 R행 (반복 가능, 0-기반)
+        #[arg(long = "delete-row")]
+        delete_row: Vec<String>,
         /// 쓰기 후 재읽기로 검증
         #[arg(long)]
         verify: bool,
@@ -231,8 +255,31 @@ fn main() -> anyhow::Result<()> {
             replace,
             set_cell,
             set_field,
+            create_field,
+            set_format,
+            set_align,
+            insert_para,
+            insert_para_before,
+            delete_para,
+            add_row,
+            delete_row,
             verify,
-        } => commands::edit::run(&input, &output, &replace, &set_cell, &set_field, verify),
+        } => commands::edit::run(
+            &input,
+            &output,
+            &replace,
+            &set_cell,
+            &set_field,
+            &create_field,
+            &set_format,
+            &set_align,
+            &insert_para,
+            &insert_para_before,
+            &delete_para,
+            &add_row,
+            &delete_row,
+            verify,
+        ),
         Cmd::Fields { file, json } => commands::fields::run(&file, json),
     }
 }

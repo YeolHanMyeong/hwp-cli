@@ -11,8 +11,9 @@
 //!   (`hp:subList` 문단은 텍스트 추출을 위해 재귀 수집)
 
 use hwp_model::{
-    Cell, CharShapeId, Control, GenericControl, HwpChar, HwpUnit, LineSeg, PageDef, ParaShapeId,
-    Paragraph, ParagraphList, Section, SectionDef, ShapeGeom, ShapeKind, StyleId, Table,
+    Cell, CharShapeId, Control, Equation, GenericControl, GradientSpec, HwpChar, HwpUnit, LineSeg,
+    PageDef, ParaShapeId, Paragraph, ParagraphList, Section, SectionDef, ShapeGeom, ShapeKind,
+    StyleId, Table,
 };
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
@@ -154,6 +155,19 @@ fn parse_paragraph(
                         push_ext_ctrl(&mut para, &mut wchar_pos, 11, *b"tbl ");
                         para.controls.push(Control::Table(table));
                     }
+                    b"equation" => {
+                        let eq = parse_equation(reader, e, empty)?;
+                        push_ext_ctrl(&mut para, &mut wchar_pos, 11, *b"eqed");
+                        para.controls.push(Control::Generic(GenericControl {
+                            ctrl_id: *b"eqed",
+                            data: Vec::new(),
+                            paragraph_lists: Vec::new(),
+                            extras: Vec::new(),
+                            raw_children: Vec::new(),
+                            gso_shapes: Vec::new(),
+                            equation: Some(eq),
+                        }));
+                    }
                     b"linesegarray" => {
                         if !empty {
                             parse_linesegs(reader, &mut para)?;
@@ -184,10 +198,24 @@ fn parse_paragraph(
                             extras: Vec::new(),
                             raw_children: Vec::new(),
                             gso_shapes: Vec::new(),
+                            equation: None,
                         };
                         if !empty {
                             if let Some(kind) = shape_kind(&name) {
-                                collect_shape(reader, &name, kind, &mut generic, warnings)?;
+                                // 둥근 사각형: <hp:rect ratio="N"> (모서리 곡률 %).
+                                let round_ratio = if kind == ShapeKind::Rect {
+                                    attr_i32(e, "ratio").unwrap_or(0).clamp(0, 100) as u8
+                                } else {
+                                    0
+                                };
+                                collect_shape(
+                                    reader,
+                                    &name,
+                                    kind,
+                                    round_ratio,
+                                    &mut generic,
+                                    warnings,
+                                )?;
                             } else {
                                 collect_sub_lists(reader, &name, &mut generic, warnings)?;
                             }
@@ -447,6 +475,7 @@ fn parse_ctrl(
                     extras: Vec::new(),
                     raw_children: Vec::new(),
                     gso_shapes: Vec::new(),
+                    equation: None,
                 };
                 if matches!(event, Event::Start(_)) {
                     collect_sub_lists(reader, &name, &mut generic, warnings)?;
@@ -799,6 +828,7 @@ fn collect_shape(
     reader: &mut XmlReader<'_>,
     end_name: &[u8],
     kind: ShapeKind,
+    round_ratio: u8,
     generic: &mut GenericControl,
     warnings: &mut Vec<String>,
 ) -> Result<()> {
@@ -807,6 +837,10 @@ fn collect_shape(
     let mut border_color = 0xFFFF_FFFFu32;
     let mut border_width = 0i32;
     let mut points: Vec<(i32, i32)> = Vec::new();
+    let mut fill_gradient: Option<GradientSpec> = None;
+    let mut border_style = 0u8;
+    let mut arrow_start = 0u8;
+    let mut arrow_end = 0u8;
     let mut read_attrs = |e: &BytesStart<'_>| match e.local_name().as_ref() {
         b"pos" => {
             x = attr_offset_i32(e, "horzOffset").unwrap_or(x);
@@ -821,6 +855,15 @@ fn collect_shape(
                 border_color = parse_color(&c);
             }
             border_width = attr_i32(e, "width").unwrap_or(border_width);
+            if let Some(st) = attr(e, "style") {
+                border_style = line_style_code(&st);
+            }
+            if let Some(hs) = attr(e, "headStyle") {
+                arrow_start = arrow_code(&hs);
+            }
+            if let Some(ts) = attr(e, "tailStyle") {
+                arrow_end = arrow_code(&ts);
+            }
         }
         b"winBrush" => {
             if let Some(c) = attr(e, "faceColor") {
@@ -858,6 +901,8 @@ fn collect_shape(
                         }
                     }
                     generic.paragraph_lists.push(list);
+                } else if n == b"gradation" {
+                    fill_gradient = parse_gradation(reader, &e)?;
                 } else {
                     read_attrs(&e);
                     if n == end_name {
@@ -886,11 +931,142 @@ fn collect_shape(
             h,
             points,
             fill,
+            fill_gradient,
             border_color,
             border_width,
+            round_ratio,
+            border_style,
+            arrow_start,
+            arrow_end,
         });
     }
     Ok(())
+}
+
+/// `<hp:equation>` — 수식. 스크립트(`script` 속성 또는 `<hp:script>` 자식)와
+/// 크기(hp:sz)·위치(hp:pos)를 모은다. 렌더러는 상자+텍스트로 근사한다.
+fn parse_equation(
+    reader: &mut XmlReader<'_>,
+    start: &BytesStart<'_>,
+    empty: bool,
+) -> Result<Equation> {
+    let mut script = attr(start, "script").unwrap_or_default();
+    let (mut width, mut height, mut x, mut y) = (0i32, 0i32, 0i32, 0i32);
+    let mut inline = true;
+    if !empty {
+        loop {
+            let ev = next_event(reader)?;
+            match &ev {
+                Event::Start(e) | Event::Empty(e) => {
+                    let is_start = matches!(ev, Event::Start(_));
+                    match e.local_name().as_ref() {
+                        b"script" if is_start => script = read_element_text(reader, b"script")?,
+                        b"sz" => {
+                            width = attr_i32(e, "width").unwrap_or(width);
+                            height = attr_i32(e, "height").unwrap_or(height);
+                        }
+                        b"pos" => {
+                            inline = attr(e, "treatAsChar").as_deref() == Some("1");
+                            x = attr_offset_i32(e, "horzOffset").unwrap_or(0);
+                            y = attr_offset_i32(e, "vertOffset").unwrap_or(0);
+                        }
+                        _ => {}
+                    }
+                }
+                Event::End(e) if e.local_name().as_ref() == b"equation" => break,
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+    }
+    Ok(Equation {
+        script: script.trim().to_string(),
+        width,
+        height,
+        inline,
+        x,
+        y,
+    })
+}
+
+/// 주어진 요소가 닫힐 때까지 텍스트를 모은다.
+fn read_element_text(reader: &mut XmlReader<'_>, end: &[u8]) -> Result<String> {
+    let mut out = String::new();
+    loop {
+        match next_event(reader)? {
+            Event::Text(t) => {
+                let s = t.xml10_content().map_err(|e| HwpxError::Xml {
+                    entry: "section".to_string(),
+                    message: e.to_string(),
+                })?;
+                out.push_str(&s);
+            }
+            Event::End(e) if e.local_name().as_ref() == end => break,
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+/// hp:lineShape `style` → 선 종류 코드(0=실선,1=파선,2=점선,3=일점쇄선,4=이점쇄선,5=긴파선).
+fn line_style_code(s: &str) -> u8 {
+    match s.to_ascii_uppercase().as_str() {
+        "DASH" => 1,
+        "DOT" => 2,
+        "DASH_DOT" | "DASHDOT" => 3,
+        "DASH_DOT_DOT" | "DASHDOTDOT" => 4,
+        "LONG_DASH" | "LONGDASH" => 5,
+        _ => 0, // SOLID 등
+    }
+}
+
+/// hp:lineShape `headStyle`/`tailStyle` → 화살촉 유무(0=없음/NORMAL, 1=화살촉).
+fn arrow_code(s: &str) -> u8 {
+    if s.is_empty() || s.eq_ignore_ascii_case("NORMAL") || s.eq_ignore_ascii_case("NONE") {
+        0
+    } else {
+        1
+    }
+}
+
+/// `<hp:gradation>` — 그러데이션 채움. type(LINEAR/RADIAL/...), angle, 자식
+/// `hp:color value="#.."` 들을 균등 위치로 stop화한다.
+fn parse_gradation(
+    reader: &mut XmlReader<'_>,
+    start: &BytesStart<'_>,
+) -> Result<Option<GradientSpec>> {
+    let gtype = attr(start, "type").unwrap_or_default();
+    // LINEAR=선형, 그 외(RADIAL/CIRCLE/CONICAL/SQUARE)는 방사형 근사.
+    let radial = !gtype.eq_ignore_ascii_case("LINEAR");
+    let angle_deg = attr_i32(start, "angle").unwrap_or(0) as f32;
+    let mut colors: Vec<u32> = Vec::new();
+    loop {
+        match next_event(reader)? {
+            Event::Empty(e) | Event::Start(e) if e.local_name().as_ref() == b"color" => {
+                if let Some(v) = attr(&e, "value") {
+                    colors.push(parse_color(&v));
+                }
+            }
+            Event::End(e) if e.local_name().as_ref() == b"gradation" => break,
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    if colors.len() < 2 {
+        return Ok(None);
+    }
+    let last = (colors.len() - 1) as f32;
+    let stops = colors
+        .into_iter()
+        .enumerate()
+        .map(|(i, c)| (i as f32 / last, c))
+        .collect();
+    Ok(Some(GradientSpec {
+        radial,
+        angle_deg,
+        stops,
+    }))
 }
 
 /// `<hp:linesegarray>` — 줄 배치 정보.
@@ -977,5 +1153,52 @@ mod page_ctrl_tests {
         assert_eq!(head_foot_data(&e), vec![0, 0, 0, 0, 0x02, 0, 0, 0]);
         let odd = elem("hp:footer", &[("id", "3"), ("applyPageType", "ODD")]);
         assert_eq!(head_foot_data(&odd), vec![0x02, 0, 0, 0, 0x03, 0, 0, 0]);
+    }
+
+    /// 완결된 `<hp:gradation>…` 문서를 열어 시작 태그를 소비하고 parse_gradation 호출.
+    fn run_gradation(xml: &str) -> Option<GradientSpec> {
+        let mut reader = Reader::from_str(xml);
+        let start = match reader.read_event().unwrap() {
+            Event::Start(e) => e.into_owned(),
+            other => panic!("gradation 시작 태그 기대, 실제 {other:?}"),
+        };
+        parse_gradation(&mut reader, &start).unwrap()
+    }
+
+    /// 선형 그러데이션: type=LINEAR, 색 2개 → stop 0.0/1.0 균등.
+    #[test]
+    fn gradation_선형_2색() {
+        let g = run_gradation(
+            r##"<hp:gradation type="LINEAR" angle="90"><hp:color value="#FF0000"/><hp:color value="#0000FF"/></hp:gradation>"##,
+        )
+        .unwrap();
+        assert!(!g.radial);
+        assert_eq!(g.angle_deg, 90.0);
+        assert_eq!(g.stops.len(), 2);
+        assert_eq!(g.stops[0], (0.0, parse_color("#FF0000")));
+        assert_eq!(g.stops[1], (1.0, parse_color("#0000FF")));
+    }
+
+    /// 방사형 그러데이션: type=RADIAL → radial=true, 색 3개 → 0/0.5/1.0.
+    #[test]
+    fn gradation_방사_3색() {
+        let g = run_gradation(
+            r##"<hp:gradation type="RADIAL"><hp:color value="#000000"/><hp:color value="#808080"/><hp:color value="#FFFFFF"/></hp:gradation>"##,
+        )
+        .unwrap();
+        assert!(g.radial);
+        assert_eq!(g.stops.len(), 3);
+        assert!((g.stops[1].0 - 0.5).abs() < 0.001);
+    }
+
+    /// 색이 1개 이하면 그러데이션 없음(None).
+    #[test]
+    fn gradation_단색_무시() {
+        assert!(
+            run_gradation(
+                r##"<hp:gradation type="LINEAR"><hp:color value="#FF0000"/></hp:gradation>"##
+            )
+            .is_none()
+        );
     }
 }

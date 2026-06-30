@@ -33,20 +33,24 @@
 ## 현재 범위와 한계
 
 - **구현 완료**: hwp/hwpx 읽기, hwpx 쓰기, **hwp 바이너리 쓰기**(convert hwpx→hwp, new→hwp,
-  edit→hwp 포함), markdown/JSON 왕복, PNG/SVG/PDF 렌더링, 렌더 충실도 diff, 누름틀/필드 채우기, MCP 서버.
-- **PDF 출력** — 폰트 임베드(서브셋, CIDFontType2/Identity-H) + ToUnicode로 텍스트 검색이 가능한 단일
-  멀티페이지 PDF. glyf(트루타입) 폰트가 1차 지원이며 CFF(OTF)는 best-effort. 그리기 개체(선·사각형·타원·
-  호·다각형)는 **hwp·hwpx 모두** 그리고, 채움은 **단색·그러데이션(선형/방사형)·이미지**를 실제로 렌더한다.
-  양쪽 정렬은 공백 우선 분배. 수식·차트·OLE는 아직 미지원이다.
+  edit→hwp 포함), markdown/JSON 왕복, PNG/SVG/PDF 렌더링(표·그림·글상자·도형·각주/미주·글자 효과),
+  렌더 충실도 diff, 누름틀/필드 채우기, MCP 서버.
+- **PDF 출력** — 폰트 임베드(서브셋, CIDFontType2(glyf)·CIDFontType0(CFF/OTF), Identity-H) + ToUnicode로
+  텍스트 검색이 가능한 단일 멀티페이지 PDF. glyf는 FontFile2, CFF(OTF)는 FontFile3(OpenType)로 정식
+  임베드한다. 그리기 개체(선·사각형·**둥근 사각형**·타원·호·다각형)는 **hwp·hwpx 모두** 그리고, 채움은
+  **단색·그러데이션(선형/방사형)·이미지**, 선은 **점선·화살표**, 표는 **대각선 테두리**까지 렌더한다.
+  글자 효과는 **음영(형광펜)·위/아래 첨자·그림자**를, 본문에는 **각주/미주**(하단 영역 + 번호 참조)를 그린다.
+  양쪽 정렬은 공백 우선 분배. 수식은 상자+스크립트로 근사 렌더하며, 차트·OLE만 아직 미지원이다.
 - **무손실 왕복의 범위**: hwp 출신·무수정 문서는 표·이미지·도형·책갈피를 포함해도 압축 해제 스트림
   기준 바이트 동일 왕복까지 보장한다(전체 fixture 게이트). 편집했거나 hwpx/markdown 출신인 문서는
   writer의 합성 경로를 거쳐 **의미 동등**(텍스트·구조 보존)으로 되쓴다. hwpx 쓰기는 항상 의미 동등
   (템플릿 기반 재생성)이다. JSON 이미지까지 포함한 완전 무손실 왕복은 `--embed-bin`(base64 임베드)
   경로 전용이다.
 - **미지원 입력**: 암호화/배포용(DRM) HWP 5.0 문서는 읽기를 거부한다.
-- **의미 모델 한계**: 표·그림·구역·머리말/꼬리말·글상자·필드는 의미 파싱되지만, 도형(사각형/타원/선/
-  다각형/수식/차트/OLE)은 의미 모델이 없어 hwp 내부에서는 원형 보존(round-trip)만 되고 포맷 간 합성
-  변환은 되지 않는다. 누름틀/필드는 기존 이름의 값만 채울 수 있고 신규 필드 생성은 없다.
+- **의미 모델 한계**: 표·그림·구역·머리말/꼬리말·글상자·필드·각주/미주는 의미 파싱·렌더되지만, 도형·
+  수식·차트·OLE는 렌더는 되어도(도형은 hwp·hwpx 모두) **포맷 간 의미 변환**(hwp↔hwpx 도형 레코드 합성)은
+  아직 안 된다 — 같은 포맷 안에서는 원형 보존(round-trip)된다. 누름틀/필드는 기존 이름의 값만 채울 수
+  있고 신규 필드 생성은 없다.
 
 ## 설치와 빌드
 
@@ -107,6 +111,17 @@ hwp edit form.hwp -o filled.hwp \
     --set-cell "0:1:2=12,300원" \
     --set-field "수신처=홍길동" --verify
 
+# 구조 편집 (문단 삽입/삭제·표 행 추가/삭제 — 모양 상속)
+hwp edit report.hwp -o out.hwp \
+    --insert-para "개요=>추가 설명 문단입니다." \
+    --insert-para-before "결론=>결론 직전에 삽입." \
+    --delete-para "임시 메모" \
+    --add-row "0" --delete-row "1:3" --verify
+
+# 누름틀 생성 + 채우기 (앵커 텍스트 뒤에 %clk 필드 삽입 후 이름으로 채움)
+hwp edit form.hwp -o out.hwp \
+    --create-field "수신:=>수신처" --set-field "수신처=홍길동" --verify
+
 # 렌더 충실도 비교 (한글 기준 PNG와 잉크/오프셋/픽셀 오차)
 hwp diff report.hwp --ref hancom_p1.png --page 1 --dpi 150 --font-dir ./fonts
 
@@ -123,7 +138,7 @@ hwp mcp --font-dir ./fonts
 | `convert <input> -o <output>` | `--to hwp\|hwpx\|md\|json`(생략 시 확장자 추론), `--strict`(예약 — 현재 미동작), `--preserve-layout`, `--embed-bin` | 포맷 변환. 출력이 `.pdf`이면 렌더 경로로 위임(시스템 글꼴 사용 — 정밀 글꼴은 `render --font-dir` 권장). `--preserve-layout`는 무수정 왕복 전용 줄 배치 보존. `--embed-bin`은 JSON에 이미지 base64 임베드. `--strict`는 향후 보존 불가 데이터 발견 시 실패 처리 예정(현재는 동작하지 않음) |
 | `render <input> -o <output>` | `--pages "1"\|"1-3"\|"all"`(기본 `all`), `--dpi <f64>`(기본 96, 래스터 전용), `--format png\|svg\|pdf`(생략 시 확장자 추론), `--font-dir <dir>`(반복) | 페이지를 PNG/SVG(페이지별 파일)·PDF(단일 멀티페이지)로 렌더 |
 | `new -o <output>` | `--from <md\|json>`(생략 시 빈 문서) | markdown/JSON IR에서 새 문서 생성 |
-| `edit <input> -o <output>` | `--replace "찾기=>바꾸기"`(반복), `--set-cell "표:행:열=값"`(반복, 0-기반), `--set-field "이름=값"`(반복), `--verify` | 기존 문서 편집. `--verify`는 쓰기 후 재읽기로 검증 |
+| `edit <input> -o <output>` | `--replace "찾기=>바꾸기"`, `--set-cell "표:행:열=값"`(0-기반), `--set-field "이름=값"`, `--create-field "앵커=>이름"`(또는 `"앵커=>이름=값"`, %clk 누름틀 생성), `--set-format "찾기:bold=on,size=16,color=#RRGGBB"`, `--set-align "찾기=left\|right\|center\|justify\|distribute\|divide"`, `--insert-para "앵커=>텍스트"`(앵커 문단 뒤), `--insert-para-before "앵커=>텍스트"`(앞), `--delete-para "텍스트"`, `--add-row "표"`, `--delete-row "표:행"`, `--verify` (모두 반복 가능) | 기존 문서 편집. 텍스트·서식·구조(문단/표 행) 편집. 삽입 문단·행은 앵커/템플릿 모양을 상속하고 합성 경로로 저장(불변식 적용). `--verify`는 쓰기 후 재읽기로 검증 |
 | `fields <file>` | `--json` | 필드/누름틀 목록(이름·종류·값·명령) |
 | `diff <input> --ref <png>` | `--page <n>`(기본 1), `--dpi <f64>`(기본 96), `-o/--out <png>`, `--font-dir <dir>`(반복), `--tolerance <u8>`(기본 16) | 렌더 결과를 한글 기준 PNG와 비교(잉크 적용률·dx/dy 오프셋·픽셀 차이율·MAE) |
 | `mcp` | `--font-dir <dir>`(반복) | MCP stdio 서버 실행 |

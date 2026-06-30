@@ -3,9 +3,10 @@
 //! 파이프라인: 문자 모양 경계 → HWP 언어 분류 재분할 → 폰트 해석 →
 //! rustybuzz 셰이핑 → 자간/장평 후처리.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use hwp_model::{CharShape, Document, HwpChar, Paragraph, ctrl_char};
+use hwp_model::{CharShape, Document, HwpChar, LANG_COUNT, Paragraph, ctrl_char};
 
 use crate::fonts::{FontStore, LoadedFont};
 
@@ -33,6 +34,16 @@ pub struct ShapedRun {
     pub strike: bool,
     /// 밑줄 색 (COLORREF, 0xFFFFFFFF = 글자색 따름)
     pub underline_color: u32,
+    /// 글자 음영(배경 하이라이트) 색 (COLORREF, 0xFFFFFFFF = 없음)
+    pub shade_color: u32,
+    /// 그림자 색 (Some이면 그림자 그림)
+    pub shadow: Option<u32>,
+    /// 외곽선(빈 글자 — 채움 없이 윤곽선만)
+    pub outline: bool,
+    /// 양각(3D 돋움)
+    pub emboss: bool,
+    /// 음각(3D 새김)
+    pub engrave: bool,
     pub glyphs: Vec<Glyph>,
     pub width_pt: f32,
     pub text: String,
@@ -56,6 +67,11 @@ impl ShapedRun {
             underline: self.underline,
             strike: self.strike,
             underline_color: self.underline_color,
+            shade_color: self.shade_color,
+            shadow: self.shadow,
+            outline: self.outline,
+            emboss: self.emboss,
+            engrave: self.engrave,
             glyphs,
             width_pt,
             text: String::new(), // 부분 런의 원문 추적은 PDF 백엔드(M7)에서
@@ -106,6 +122,18 @@ pub fn shape_range(
     range: (u32, u32),
     warnings: &mut Vec<String>,
 ) -> Vec<InlineItem> {
+    shape_range_notes(store, doc, para, range, &HashMap::new(), warnings)
+}
+
+/// `shape_range`에 각주/미주 마커(ctrl_index→번호)를 더한 버전. 본문 경로만 사용.
+pub fn shape_range_notes(
+    store: &mut FontStore,
+    doc: &Document,
+    para: &Paragraph,
+    range: (u32, u32),
+    marks: &HashMap<u32, u32>,
+    warnings: &mut Vec<String>,
+) -> Vec<InlineItem> {
     // 1. (문자모양, 언어) 경계로 텍스트 조각 수집
     struct Piece {
         shape_id: u16,
@@ -147,7 +175,16 @@ pub fn shape_range(
                         start: pos + 8,
                     });
                 }
-                _ => {} // 컨트롤은 v1 렌더 제외
+                // 각주/미주 앵커: 윗첨자 번호 마커를 본문 위치에 넣는다.
+                HwpChar::ExtCtrl {
+                    ctrl_index: Some(ci),
+                    ..
+                } if marks.contains_key(ci) => {
+                    if let Some(run) = note_mark_run(store, doc, para, pos, marks[ci]) {
+                        items.push((pieces.len(), InlineItem::Run(run)));
+                    }
+                }
+                _ => {} // 그 외 컨트롤은 v1 렌더 제외
             }
         }
         pos += w;
@@ -199,8 +236,25 @@ fn shape_piece(
     // 크기: 기준 크기 × 언어별 상대 크기%
     let base = if cs.base_size > 0 { cs.base_size } else { 1000 };
     let rel = cs.rel_sizes.get(lang).copied().unwrap_or(100).max(1);
-    let size_pt = (base as f32 / 100.0) * (rel as f32 / 100.0);
+    let full_size = (base as f32 / 100.0) * (rel as f32 / 100.0);
+    // 위/아래 첨자: 크기 ~65% 축소 + 베이스라인 이동(원 크기 기준). 수동 글자위치(offsets%) 가산.
+    let (sup, sub) = (cs.is_superscript(), cs.is_subscript());
+    let size_pt = if sup || sub {
+        full_size * 0.65
+    } else {
+        full_size
+    };
     let scale = size_pt / upem;
+    let y_raise = {
+        let mut r = full_size * cs.char_offset(lang) as f32 / 100.0;
+        if sup {
+            r += full_size * 0.34;
+        }
+        if sub {
+            r -= full_size * 0.16;
+        }
+        r
+    };
 
     // 자간: 글자 크기 기준 % (U4 — 반올림 방식은 실측 보정 예정)
     let spacing_pt = size_pt * cs.spacings.get(lang).copied().unwrap_or(0) as f32 / 100.0;
@@ -218,7 +272,7 @@ fn shape_piece(
             id: info.glyph_id as u16,
             x_advance: advance,
             x_offset: gpos.x_offset as f32 * scale * x_scale,
-            y_offset: gpos.y_offset as f32 * scale,
+            y_offset: gpos.y_offset as f32 * scale + y_raise,
         });
         width += advance;
     }
@@ -233,9 +287,222 @@ fn shape_piece(
         underline: cs.has_underline(),
         strike: cs.has_strike(),
         underline_color: cs.underline_color,
+        shade_color: if cs.has_shade() {
+            cs.shade_color
+        } else {
+            0xFFFF_FFFF
+        },
+        shadow: cs.has_shadow().then_some(cs.shadow_color),
+        outline: cs.has_outline(),
+        emboss: cs.is_emboss(),
+        engrave: cs.is_engrave(),
         glyphs,
         width_pt: width,
         text: text.to_string(),
         start_wchar,
     })
+}
+
+/// 하이퍼링크 색(COLORREF 0x00BBGGRR = 파랑).
+const LINK_BLUE: u32 = 0x00CC_0000;
+
+/// 문단 안 하이퍼링크(`%hlk` 필드)의 링크 텍스트 WCHAR 범위 [start, end) 목록.
+/// FIELD_START(ExtCtrl code 3, ctrl_id %hlk) ~ FIELD_END(InlineCtrl code 4) 사이.
+pub fn hyperlink_ranges(para: &Paragraph) -> Vec<(u32, u32)> {
+    const FIELD_START: u16 = 3;
+    const FIELD_END: u16 = 4;
+    let mut ranges = Vec::new();
+    let mut wpos = 0u32;
+    for (i, ch) in para.chars.iter().enumerate() {
+        if let HwpChar::ExtCtrl { code, ctrl_id, .. } = ch
+            && *code == FIELD_START
+            && ctrl_id == b"%hlk"
+        {
+            let start = wpos + ch.wchar_width();
+            let mut end = start;
+            for next in &para.chars[i + 1..] {
+                if let HwpChar::InlineCtrl { code, .. } = next
+                    && *code == FIELD_END
+                {
+                    break;
+                }
+                end += next.wchar_width();
+            }
+            if end > start {
+                ranges.push((start, end));
+            }
+        }
+        wpos += ch.wchar_width();
+    }
+    ranges
+}
+
+/// 링크 범위에 드는 Run에 밑줄+링크색을 입힌다(필드 경계 컨트롤이 조각을 끊어
+/// 링크 텍스트는 자체 Run이므로 start_wchar로 판정). 빈 범위면 무동작.
+pub fn apply_link_style(items: &mut [InlineItem], links: &[(u32, u32)]) {
+    if links.is_empty() {
+        return;
+    }
+    for item in items.iter_mut() {
+        if let InlineItem::Run(run) = item
+            && links
+                .iter()
+                .any(|&(a, b)| run.start_wchar >= a && run.start_wchar < b)
+        {
+            run.underline = true;
+            run.color = LINK_BLUE;
+            run.underline_color = LINK_BLUE;
+        }
+    }
+}
+
+/// 임의 문자열을 기본 글자모양으로 셰이핑한다(수식 근사 등 합성 텍스트용).
+/// 한글이 섞이면 한글 슬롯, 아니면 라틴 슬롯 폰트를 쓴다.
+pub fn shape_plain(
+    store: &mut FontStore,
+    doc: &Document,
+    text: &str,
+    size_pt: f32,
+    color: u32,
+) -> Option<ShapedRun> {
+    let cs = CharShape {
+        base_size: (size_pt * 100.0) as i32,
+        ratios: [100; LANG_COUNT],
+        rel_sizes: [100; LANG_COUNT],
+        text_color: color,
+        // 0xFFFFFFFF=음영 없음. 기본 0이면 "불투명 검정 배경"으로 해석돼 마커가
+        // 검은 박스로 덮인다(각주·수식·목록 마커 공통 — 검은바 트랩).
+        shade_color: 0xFFFF_FFFF,
+        ..CharShape::default()
+    };
+    let lang = if text.chars().any(|c| ('가'..='힣').contains(&c)) {
+        0
+    } else {
+        1
+    };
+    shape_piece(store, doc, Some(&cs), lang, text, 0)
+}
+
+/// 각주/미주 본문 마커(윗첨자 번호). 주변 글자모양을 따라 ~65% 크기로 줄이고
+/// 베이스라인을 위로 올린다. 글리프↔WCHAR 매핑(start_wchar)은 앵커 위치로 둔다.
+fn note_mark_run(
+    store: &mut FontStore,
+    doc: &Document,
+    para: &Paragraph,
+    pos: u32,
+    number: u32,
+) -> Option<ShapedRun> {
+    let base_id = shape_id_at(para, pos);
+    let base = doc.header.char_shapes.get(base_id as usize).cloned();
+    let base_size = base
+        .as_ref()
+        .map(|c| if c.base_size > 0 { c.base_size } else { 1000 })
+        .unwrap_or(1000);
+    let mut cs = base.unwrap_or_else(|| CharShape {
+        ratios: [100; LANG_COUNT],
+        rel_sizes: [100; LANG_COUNT],
+        shade_color: 0xFFFF_FFFF,
+        ..CharShape::default()
+    });
+    cs.base_size = ((base_size as f32) * 0.65).max(500.0) as i32;
+    cs.attr = 0; // 마커엔 굵게/기울임 등 합성 효과 불필요
+    let text = number.to_string();
+    let mut run = shape_piece(store, doc, Some(&cs), 1, &text, pos)?;
+    // 윗첨자: 위로 올림(y-up 좌표, 백엔드가 baseline-y에서 y_offset만큼 올림).
+    let raise = (base_size as f32 / 100.0) * 0.34;
+    for g in &mut run.glyphs {
+        g.y_offset += raise;
+    }
+    Some(run)
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+    use crate::fonts::LoadedFont;
+    use std::sync::Arc;
+
+    fn field_start() -> HwpChar {
+        HwpChar::ExtCtrl {
+            code: 3,
+            ctrl_id: *b"%hlk",
+            payload: vec![0; 12],
+            ctrl_index: Some(0),
+        }
+    }
+    fn field_end() -> HwpChar {
+        HwpChar::InlineCtrl {
+            code: 4,
+            payload: vec![0; 12],
+        }
+    }
+
+    #[test]
+    fn 하이퍼링크_범위() {
+        let para = Paragraph {
+            chars: vec![
+                HwpChar::Text('a'),
+                field_start(),
+                HwpChar::Text('네'),
+                HwpChar::Text('이'),
+                HwpChar::Text('버'),
+                field_end(),
+                HwpChar::Text('b'),
+            ],
+            ..Paragraph::default()
+        };
+        // a=1 WCHAR, ExtCtrl=8 → 링크 시작 1+8=9, '네이버'=3 → (9, 12).
+        assert_eq!(hyperlink_ranges(&para), vec![(9, 12)]);
+        let plain = Paragraph {
+            chars: vec![HwpChar::Text('a')],
+            ..Paragraph::default()
+        };
+        assert!(hyperlink_ranges(&plain).is_empty());
+    }
+
+    fn run_at(start: u32) -> InlineItem {
+        InlineItem::Run(ShapedRun {
+            font: Arc::new(LoadedFont {
+                data: Arc::new(Vec::new()),
+                index: 0,
+                family: String::new(),
+            }),
+            size_pt: 10.0,
+            x_scale: 1.0,
+            color: 0,
+            bold: false,
+            italic: false,
+            underline: false,
+            strike: false,
+            underline_color: 0xFFFF_FFFF,
+            shade_color: 0xFFFF_FFFF,
+            shadow: None,
+            outline: false,
+            emboss: false,
+            engrave: false,
+            glyphs: Vec::new(),
+            width_pt: 0.0,
+            text: String::new(),
+            start_wchar: start,
+        })
+    }
+
+    #[test]
+    fn 링크_스타일_적용() {
+        let mut items = vec![run_at(0), run_at(9), run_at(20)];
+        apply_link_style(&mut items, &[(9, 12)]);
+        let und: Vec<bool> = items
+            .iter()
+            .map(|i| matches!(i, InlineItem::Run(r) if r.underline))
+            .collect();
+        assert_eq!(und, vec![false, true, false]); // 9만 링크 범위
+        if let InlineItem::Run(r) = &items[1] {
+            assert_eq!(r.color, LINK_BLUE);
+            assert_eq!(r.underline_color, LINK_BLUE);
+        }
+        // 빈 범위는 무동작.
+        let mut items2 = vec![run_at(9)];
+        apply_link_style(&mut items2, &[]);
+        assert!(matches!(&items2[0], InlineItem::Run(r) if !r.underline));
+    }
 }

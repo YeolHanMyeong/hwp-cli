@@ -24,13 +24,13 @@ pub mod text;
 pub mod units;
 
 pub use control::{
-    BinRef, Cell, Control, GenericControl, GsoPlacement, PageDef, ParagraphList, Picture,
-    SectionDef, ShapeGeom, ShapeKind, Table,
+    BinRef, Cell, Control, Equation, GenericControl, GradientSpec, GsoPlacement, PageDef,
+    ParagraphList, Picture, SectionDef, ShapeGeom, ShapeKind, Table,
 };
 pub use document::{BinStream, DocMeta, Document, Section};
 pub use header::{
     BinDataItem, BorderFill, BorderLine, CharShape, DocHeader, DocumentProperties, FaceName,
-    LANG_COUNT, ParaShape, RawEntry, Style,
+    LANG_COUNT, NumFmt, NumLevel, ParaShape, RawEntry, Style,
 };
 pub use ids::{BinDataId, BorderFillId, CharShapeId, FaceNameId, ParaShapeId, StyleId};
 pub use opaque::OpaqueRecord;

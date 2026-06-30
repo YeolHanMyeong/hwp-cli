@@ -166,6 +166,18 @@ pub fn write_hwp_edited(doc: &hwp_model::Document, output: &std::path::Path) -> 
     }
 }
 
+/// 구조 편집(문단/표 행 추가·삭제)본을 hwp로 쓴다.
+///
+/// 모든 출처에 합성 경로(edited=true)를 강제한다 — 삽입된 문단/행에 문단끝 0x0d·
+/// 마지막문단 비트·PARA/셀 카운트 같은 불변식이 적용돼야 하기 때문(convert/new와
+/// 동일한 한글 수용 검증 경로). hwp5 무수정용 surgical `write_hwp_edited`와 분리한다.
+pub fn write_hwp_structural(
+    doc: &hwp_model::Document,
+    output: &std::path::Path,
+) -> anyhow::Result<()> {
+    write_hwp_impl(doc, output, false, true)
+}
+
 fn write_hwp_impl(
     doc: &hwp_model::Document,
     output: &std::path::Path,
