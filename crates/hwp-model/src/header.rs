@@ -126,19 +126,34 @@ impl CharShape {
         self.shade_color != 0xFFFF_FFFF
     }
 
-    /// 위첨자 (bit 16).
-    pub fn is_superscript(&self) -> bool {
-        self.attr & (1 << 16) != 0
+    /// 외곽선 종류 (bits 8~10, 0=없음). 스펙 표.
+    pub fn has_outline(&self) -> bool {
+        (self.attr >> 8) & 0x7 != 0
     }
 
-    /// 아래첨자 (bit 17).
-    pub fn is_subscript(&self) -> bool {
-        self.attr & (1 << 17) != 0
-    }
-
-    /// 그림자 효과 (bits 11~13).
+    /// 그림자 종류 (bits 11~12).
     pub fn has_shadow(&self) -> bool {
-        (self.attr >> 11) & 0x7 != 0
+        (self.attr >> 11) & 0x3 != 0
+    }
+
+    /// 양각 (bit 13).
+    pub fn is_emboss(&self) -> bool {
+        self.attr & (1 << 13) != 0
+    }
+
+    /// 음각 (bit 14).
+    pub fn is_engrave(&self) -> bool {
+        self.attr & (1 << 14) != 0
+    }
+
+    /// 위첨자 (bit 15).
+    pub fn is_superscript(&self) -> bool {
+        self.attr & (1 << 15) != 0
+    }
+
+    /// 아래첨자 (bit 16).
+    pub fn is_subscript(&self) -> bool {
+        self.attr & (1 << 16) != 0
     }
 
     /// 언어 슬롯의 수동 글자 위치(첨자 오프셋) % (-100~100). 위=양수.
@@ -339,14 +354,14 @@ mod char_effect_tests {
         };
         assert!(shaded.has_shade());
 
-        // 위/아래 첨자(bit16/17), 그림자(bits11~13).
+        // 위/아래 첨자(bit15/16), 그림자(bits11~12), 외곽선(8~10), 양각13/음각14.
         let sup = CharShape {
-            attr: 1 << 16,
+            attr: 1 << 15,
             ..CharShape::default()
         };
         assert!(sup.is_superscript() && !sup.is_subscript() && !sup.has_shadow());
         let sub = CharShape {
-            attr: 1 << 17,
+            attr: 1 << 16,
             ..CharShape::default()
         };
         assert!(sub.is_subscript() && !sub.is_superscript());
@@ -354,7 +369,22 @@ mod char_effect_tests {
             attr: 1 << 11,
             ..CharShape::default()
         };
-        assert!(shadow.has_shadow());
+        assert!(shadow.has_shadow() && !shadow.is_emboss());
+        let outline = CharShape {
+            attr: 1 << 8,
+            ..CharShape::default()
+        };
+        assert!(outline.has_outline());
+        let emboss = CharShape {
+            attr: 1 << 13,
+            ..CharShape::default()
+        };
+        assert!(emboss.is_emboss() && !emboss.has_shadow() && !emboss.is_engrave());
+        let engrave = CharShape {
+            attr: 1 << 14,
+            ..CharShape::default()
+        };
+        assert!(engrave.is_engrave() && !engrave.is_emboss());
 
         // 수동 글자위치(offsets%).
         let mut cs = CharShape::default();

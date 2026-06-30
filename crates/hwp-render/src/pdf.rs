@@ -198,6 +198,21 @@ pub fn render_pdf(list: &DisplayList, warnings: &mut Vec<String>) -> Result<Vec<
                             let d = run.size_pt * 0.06;
                             write_glyph_run(&mut content, &fonts[idx], *x, *y, h, run, sc, d, d);
                         }
+                        // 양각/음각 — 흰 하이라이트 사본 오프셋(양각=좌상, 음각=우하).
+                        if run.emboss || run.engrave {
+                            let d = run.size_pt * 0.05 * if run.emboss { -1.0 } else { 1.0 };
+                            write_glyph_run(
+                                &mut content,
+                                &fonts[idx],
+                                *x,
+                                *y,
+                                h,
+                                run,
+                                0x00FF_FFFF,
+                                d,
+                                d,
+                            );
+                        }
                         write_glyph_run(
                             &mut content,
                             &fonts[idx],
@@ -512,7 +527,12 @@ fn write_glyph_run(
     content.set_horizontal_scaling(run.x_scale * 100.0); // 장평(Tz)
     let (r, g, b) = colorref_rgb(color);
     content.set_fill_rgb(r, g, b);
-    if run.bold {
+    if run.outline {
+        // 외곽선 = 윤곽선만(채움 없음).
+        content.set_text_rendering_mode(TextRenderingMode::Stroke);
+        content.set_stroke_rgb(r, g, b);
+        content.set_line_width(run.size_pt * 0.025);
+    } else if run.bold {
         // 합성 굵게 = 채움+스트로크.
         content.set_text_rendering_mode(TextRenderingMode::FillStroke);
         content.set_stroke_rgb(r, g, b);
