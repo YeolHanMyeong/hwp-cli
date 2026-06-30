@@ -236,14 +236,22 @@ pub fn layout_document(
                     let max_size = items_max_size(&items).unwrap_or(10.0);
                     let baseline_y = content_bottom + max_size * 1.2;
                     para_top = Some(content_bottom);
-                    let last_y = place_wrapped(
-                        &mut page,
-                        items,
-                        body_left,
-                        baseline_y,
-                        body_width,
-                        max_size * 1.6,
-                    );
+                    // 한 줄에 들어가는 가운데/오른쪽 정렬은 폴백에서도 보정한다
+                    // (캐시 lineseg가 없는 합성·편집 문단). 양쪽/배분은 줄별 분배가
+                    // 필요해 폴백에선 왼쪽으로 둔다.
+                    let natural = items_width(&items);
+                    let align = doc
+                        .header
+                        .para_shapes
+                        .get(para.para_shape.0 as usize)
+                        .map_or(1, |p| p.alignment());
+                    let x = if natural <= body_width && (align == 2 || align == 3) {
+                        body_left + (body_width - natural) * if align == 3 { 0.5 } else { 1.0 }
+                    } else {
+                        body_left
+                    };
+                    let last_y =
+                        place_wrapped(&mut page, items, x, baseline_y, body_width, max_size * 1.6);
                     content_bottom = last_y + max_size * 0.4;
                 }
                 content_bottom = layout_para_objects(
