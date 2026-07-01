@@ -1,3 +1,4 @@
+pub mod bookmarks;
 pub mod cat;
 pub mod convert;
 pub mod diff;

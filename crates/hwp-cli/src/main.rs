@@ -129,6 +129,9 @@ enum Cmd {
         /// 누름틀 생성 "앵커=>이름" 또는 "앵커=>이름=값" — 앵커 텍스트 뒤에 %clk 필드 삽입 (반복 가능)
         #[arg(long = "create-field")]
         create_field: Vec<String>,
+        /// 책갈피 생성 "앵커=>이름" — 앵커 텍스트 뒤에 bokm 지점 표식 삽입 (반복 가능)
+        #[arg(long = "create-bookmark")]
+        create_bookmark: Vec<String>,
         /// 이미지 삽입 "앵커=>경로" 또는 "앵커=>경로@너비x높이"(mm) — 앵커 뒤에 그림 삽입 (반복 가능)
         #[arg(long = "insert-image")]
         insert_image: Vec<String>,
@@ -160,6 +163,14 @@ enum Cmd {
 
     /// 필드/누름틀 목록 표시 (이름·종류·값)
     Fields {
+        file: PathBuf,
+        /// JSON으로 출력
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// 책갈피 목록 표시 (이름)
+    Bookmarks {
         file: PathBuf,
         /// JSON으로 출력
         #[arg(long)]
@@ -309,6 +320,7 @@ fn main() -> anyhow::Result<()> {
             set_field,
             set_meta,
             create_field,
+            create_bookmark,
             insert_image,
             set_format,
             set_align,
@@ -326,6 +338,7 @@ fn main() -> anyhow::Result<()> {
             &set_field,
             &set_meta,
             &create_field,
+            &create_bookmark,
             &insert_image,
             &set_format,
             &set_align,
@@ -337,6 +350,7 @@ fn main() -> anyhow::Result<()> {
             verify,
         ),
         Cmd::Fields { file, json } => commands::fields::run(&file, json),
+        Cmd::Bookmarks { file, json } => commands::bookmarks::run(&file, json),
         Cmd::Slots { file, json } => commands::slots::run(&file, json),
         Cmd::Fill {
             input,

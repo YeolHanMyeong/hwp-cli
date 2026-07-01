@@ -20,6 +20,7 @@ pub fn run(
     set_fields: &[String],
     set_meta: &[String],
     create_fields: &[String],
+    create_bookmarks: &[String],
     insert_images: &[String],
     set_formats: &[String],
     set_aligns: &[String],
@@ -74,6 +75,18 @@ pub fn run(
         let (name, value) = rest.split_once('=').unwrap_or((rest, ""));
         if hwp_convert::create_field(&mut doc, anchor, name, value) {
             eprintln!("누름틀 생성: {anchor:?} 뒤에 이름={name:?} 값={value:?}");
+            edits += 1;
+        } else {
+            eprintln!("경고: 앵커 {anchor:?}를 찾지 못했습니다");
+        }
+    }
+
+    for spec in create_bookmarks {
+        let (anchor, name) = spec
+            .split_once("=>")
+            .with_context(|| format!("--create-bookmark 형식은 \"앵커=>이름\" 입니다: {spec:?}"))?;
+        if hwp_convert::create_bookmark(&mut doc, anchor, name) {
+            eprintln!("책갈피 생성: {anchor:?} 뒤에 이름={name:?}");
             edits += 1;
         } else {
             eprintln!("경고: 앵커 {anchor:?}를 찾지 못했습니다");
@@ -195,7 +208,7 @@ pub fn run(
 
     if edits == 0 {
         eprintln!(
-            "경고: 적용된 편집이 없습니다 (--replace/--set-cell/--set-field/--set-meta/--create-field/--insert-image/--set-format/--set-align/--insert-para/--delete-para/--add-row/--delete-row 확인)"
+            "경고: 적용된 편집이 없습니다 (--replace/--set-cell/--set-field/--set-meta/--create-field/--create-bookmark/--insert-image/--set-format/--set-align/--insert-para/--delete-para/--add-row/--delete-row 확인)"
         );
     }
 
