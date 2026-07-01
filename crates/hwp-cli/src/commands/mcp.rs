@@ -120,6 +120,7 @@ fn call_tool(name: &str, args: &Value, ctx: &Ctx) -> Value {
         "hwp_info" => tool_info(args),
         "hwp_read" => tool_read(args),
         "hwp_list_fields" => tool_list_fields(args),
+        "hwp_list_bookmarks" => tool_list_bookmarks(args),
         "hwp_render" => tool_render(args, ctx),
         "hwp_edit" => tool_edit(args),
         "hwp_convert" => tool_convert(args),
@@ -209,6 +210,18 @@ fn tool_list_fields(args: &Value) -> Result<Vec<Value>, String> {
         .collect();
     Ok(vec![text_content(
         &serde_json::to_string_pretty(&fields).unwrap_or_default(),
+    )])
+}
+
+fn tool_list_bookmarks(args: &Value) -> Result<Vec<Value>, String> {
+    let path = arg_str(args, "path")?;
+    let doc = load_document(Path::new(path)).map_err(|e| e.to_string())?;
+    let bookmarks: Vec<Value> = hwp_convert::list_bookmarks(&doc)
+        .iter()
+        .map(|b| json!({ "name": b.name }))
+        .collect();
+    Ok(vec![text_content(
+        &serde_json::to_string_pretty(&bookmarks).unwrap_or_default(),
     )])
 }
 
@@ -346,6 +359,23 @@ fn tool_edit(args: &Value) -> Result<Vec<Value>, String> {
             }
         }
     }
+    if let Some(arr) = args.get("create_bookmark").and_then(Value::as_array) {
+        for b in arr {
+            let anchor = b
+                .get("anchor")
+                .and_then(Value::as_str)
+                .ok_or("create_bookmark 항목에 anchor 필요")?;
+            let name = b
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("create_bookmark 항목에 name 필요")?;
+            if hwp_convert::create_bookmark(&mut doc, anchor, name) {
+                summary.push(format!("책갈피 생성 {anchor:?}→{name:?}"));
+            } else {
+                summary.push(format!("경고: 앵커 {anchor:?} 못 찾음"));
+            }
+        }
+    }
     let mut structural = false;
     if let Some(arr) = args.get("insert_image").and_then(Value::as_array) {
         for im in arr {
@@ -467,7 +497,7 @@ fn tool_edit(args: &Value) -> Result<Vec<Value>, String> {
     }
     if summary.is_empty() {
         return Err(
-            "적용할 편집이 없습니다 (replace/set_cell/set_field/create_field/set_format/set_align/insert_para/delete_para/add_row/delete_row 확인)"
+            "적용할 편집이 없습니다 (replace/set_cell/set_field/create_field/create_bookmark/set_format/set_align/insert_para/delete_para/add_row/delete_row 확인)"
                 .to_string(),
         );
     }
@@ -580,6 +610,13 @@ fn tool_defs() -> Vec<Value> {
             }, "required": ["path"]}
         }),
         json!({
+            "name": "hwp_list_bookmarks",
+            "description": "책갈피(bokm) 목록(이름)을 JSON으로.",
+            "inputSchema": {"type": "object", "properties": {
+                "path": {"type": "string"}
+            }, "required": ["path"]}
+        }),
+        json!({
             "name": "hwp_render",
             "description": "지정 페이지를 PNG 이미지로 렌더해 반환(에이전트가 문서를 직접 본다).",
             "inputSchema": {"type": "object", "properties": {
@@ -608,6 +645,9 @@ fn tool_defs() -> Vec<Value> {
                 "create_field": {"type": "array", "items": {"type": "object", "properties": {
                     "anchor": {"type": "string"}, "name": {"type": "string"}, "value": {"type": "string"}},
                     "required": ["anchor", "name"]}, "description": "앵커 텍스트 뒤에 %clk 누름틀 생성(이름·선택 표시값; set_field로 채움)"},
+                "create_bookmark": {"type": "array", "items": {"type": "object", "properties": {
+                    "anchor": {"type": "string"}, "name": {"type": "string"}},
+                    "required": ["anchor", "name"]}, "description": "앵커 텍스트 뒤에 책갈피(bokm 지점 표식) 생성"},
                 "insert_image": {"type": "array", "items": {"type": "object", "properties": {
                     "anchor": {"type": "string"}, "path": {"type": "string"},
                     "width_mm": {"type": "number"}, "height_mm": {"type": "number"}},
@@ -762,6 +802,7 @@ mod tests {
             "hwp_slots",
             "hwp_fill",
             "hwp_validate",
+            "hwp_list_bookmarks",
         ] {
             assert!(names.contains(&expected), "{expected} 누락");
         }
@@ -818,6 +859,21 @@ mod tests {
             img["data"].as_str().unwrap().len() > 100,
             "base64 PNG 비어있음"
         );
+    }
+
+    #[test]
+    fn call_hwp_list_bookmarks() {
+        if skip_if_no_fixtures() {
+            return;
+        }
+        let line = format!(
+            r#"{{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{{"name":"hwp_list_bookmarks","arguments":{{"path":"{}"}}}}}}"#,
+            fixture("hwp5/bookmark.hwp")
+        );
+        let v = call(&line);
+        assert_eq!(v["result"]["isError"], false);
+        let text = v["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("책갈피테스트"), "책갈피 이름: {text}");
     }
 
     #[test]

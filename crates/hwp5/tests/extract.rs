@@ -72,6 +72,18 @@ fn 빈_문서_추출() {
     }
 }
 
+/// 정품 bookmark.hwp의 책갈피(bokm) 읽기 — 이름이 정확히 복원돼야 한다(정답지).
+#[test]
+fn 책갈피_읽기() {
+    if skip_if_no_fixtures() {
+        return;
+    }
+    let result = hwp5::read_document(&fixture("bookmark.hwp")).unwrap();
+    let bms = hwp_convert::list_bookmarks(&result.document);
+    assert_eq!(bms.len(), 1, "책갈피 1개: {bms:?}");
+    assert_eq!(bms[0].name, "책갈피테스트");
+}
+
 /// 대형 문서: 구조 통계와 핵심 내용 불변식 (전체 스냅샷은 과대).
 #[test]
 fn annual_report_불변식() {

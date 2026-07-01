@@ -374,3 +374,23 @@ fn 누름틀_생성_이진_왕복() {
     assert_eq!(clk[0].name.as_deref(), Some("수신처"));
     assert_eq!(clk[0].value, "기획팀");
 }
+
+/// 신규 책갈피(bokm) 생성이 hwp5 이진 왕복을 통과한다 — code-22 ExtCtrl payload(역순
+/// ctrl_id) + bokm CTRL_DATA 이름 BSTR이 실제 writer→reader를 거쳐 정확히 복원되는지.
+#[test]
+fn 책갈피_생성_이진_왕복() {
+    let mut doc = hwp_convert::from_markdown("제목 문단\n\n다음 문단");
+    assert!(hwp_convert::create_bookmark(
+        &mut doc,
+        "제목",
+        "책갈피테스트"
+    ));
+
+    let out = tmp("bookmark.hwp");
+    hwp5::write_document(&doc, &out, &hwp5::WriteOptions::default()).unwrap();
+    let reread = hwp5::read_document(&out).unwrap();
+
+    let bms = hwp_convert::list_bookmarks(&reread.document);
+    assert_eq!(bms.len(), 1, "책갈피 1개가 왕복돼야: {bms:?}");
+    assert_eq!(bms[0].name, "책갈피테스트");
+}

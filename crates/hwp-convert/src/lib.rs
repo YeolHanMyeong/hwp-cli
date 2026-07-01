@@ -1,6 +1,7 @@
 //! IR ↔ markdown/JSON 변환.
 
 pub mod base64;
+pub mod bookmark;
 pub mod edit;
 pub mod field;
 pub mod format;
@@ -13,6 +14,7 @@ pub mod structure;
 
 use hwp_model::Document;
 
+pub use bookmark::{BookmarkInfo, create_bookmark, list_bookmarks};
 pub use edit::{add_rows, apply_meta, replace_text, set_cell, table_dims};
 pub use field::{
     FieldInfo, PlaceholderInfo, create_field, list_fields, scan_placeholders, set_field,
