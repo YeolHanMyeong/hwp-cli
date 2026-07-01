@@ -19,7 +19,8 @@ pub use bookmark::{
 };
 pub use edit::{add_rows, apply_meta, replace_text, set_cell, table_dims};
 pub use field::{
-    FieldInfo, PlaceholderInfo, create_field, list_fields, scan_placeholders, set_field,
+    FieldInfo, PlaceholderInfo, create_field, create_hyperlink, list_fields, scan_placeholders,
+    set_field,
 };
 pub use format::{CharFormat, set_char_format, set_para_align};
 pub use from_markdown::{default_header, from_markdown};

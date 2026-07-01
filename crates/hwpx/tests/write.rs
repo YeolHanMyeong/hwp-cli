@@ -195,3 +195,44 @@ fn 책갈피_생성_hwpx_왕복() {
     assert_eq!(bms.len(), 1, "{bms:?}");
     assert_eq!(bms[0].name, "책갈피테스트");
 }
+
+/// 하이퍼링크(%hlk) hwpx 왕복: create_hyperlink → write → fieldBegin HYPERLINK+Command → read.
+#[test]
+fn 하이퍼링크_생성_hwpx_왕복() {
+    let mut doc = hwp_convert::from_markdown("문서: 참고");
+    assert!(hwp_convert::create_hyperlink(
+        &mut doc,
+        "문서:",
+        "https://example.com/a",
+        "여기"
+    ));
+
+    let out = tmp("hyperlink.hwpx");
+    let warnings = hwpx::write_document(&doc, &out).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    // 쓴 XML에 fieldBegin type=HYPERLINK + Command(URL)가 있다.
+    let bytes = std::fs::read(&out).unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut xml = String::new();
+    {
+        use std::io::Read as _;
+        zip.by_name("Contents/section0.xml")
+            .unwrap()
+            .read_to_string(&mut xml)
+            .unwrap();
+    }
+    assert!(xml.contains(r#"type="HYPERLINK""#), "HYPERLINK 없음: {xml}");
+    assert!(xml.contains("example.com"), "Command URL 없음: {xml}");
+
+    // 재읽기 → list_fields로 종류·값·command 복원.
+    let reread = hwpx::read_document(&out).unwrap().document;
+    let fields = hwp_convert::list_fields(&reread);
+    let hlk: Vec<_> = fields.iter().filter(|f| f.ctrl_id == "%hlk").collect();
+    assert_eq!(hlk.len(), 1, "{fields:?}");
+    assert_eq!(hlk[0].value, "여기");
+    assert_eq!(
+        hlk[0].command.as_deref(),
+        Some("https\\://example.com/a;1;0;0;")
+    );
+}

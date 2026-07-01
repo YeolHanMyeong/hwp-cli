@@ -394,3 +394,30 @@ fn 책갈피_생성_이진_왕복() {
     assert_eq!(bms.len(), 1, "책갈피 1개가 왕복돼야: {bms:?}");
     assert_eq!(bms[0].name, "책갈피테스트");
 }
+
+/// 신규 하이퍼링크(%hlk) 생성이 hwp5 이진 왕복을 통과한다 — 필드 레코드 command(URL)
+/// 바이트가 실제 writer→reader를 거쳐 정확히 복원되는지.
+#[test]
+fn 하이퍼링크_생성_이진_왕복() {
+    let mut doc = hwp_convert::from_markdown("문서: 참고\n\n본문");
+    assert!(hwp_convert::create_hyperlink(
+        &mut doc,
+        "문서:",
+        "https://example.com/a",
+        "여기"
+    ));
+
+    let out = tmp("hyperlink.hwp");
+    hwp5::write_document(&doc, &out, &hwp5::WriteOptions::default()).unwrap();
+    let reread = hwp5::read_document(&out).unwrap();
+
+    let fields = hwp_convert::list_fields(&reread.document);
+    let hlk: Vec<_> = fields.iter().filter(|f| f.ctrl_id == "%hlk").collect();
+    assert_eq!(hlk.len(), 1, "하이퍼링크 1개가 왕복돼야: {fields:?}");
+    assert_eq!(hlk[0].kind, "하이퍼링크");
+    assert_eq!(hlk[0].value, "여기");
+    assert_eq!(
+        hlk[0].command.as_deref(),
+        Some("https\\://example.com/a;1;0;0;")
+    );
+}

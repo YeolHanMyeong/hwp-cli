@@ -132,6 +132,9 @@ enum Cmd {
         /// 책갈피 생성 "앵커=>이름" — 앵커 텍스트 뒤에 bokm 지점 표식 삽입 (반복 가능)
         #[arg(long = "create-bookmark")]
         create_bookmark: Vec<String>,
+        /// 하이퍼링크 생성 "앵커=>URL" 또는 "앵커=>표시=>URL" — 앵커 뒤에 %hlk 삽입 (반복 가능)
+        #[arg(long = "create-hyperlink")]
+        create_hyperlink: Vec<String>,
         /// 이미지 삽입 "앵커=>경로" 또는 "앵커=>경로@너비x높이"(mm) — 앵커 뒤에 그림 삽입 (반복 가능)
         #[arg(long = "insert-image")]
         insert_image: Vec<String>,
@@ -321,6 +324,7 @@ fn main() -> anyhow::Result<()> {
             set_meta,
             create_field,
             create_bookmark,
+            create_hyperlink,
             insert_image,
             set_format,
             set_align,
@@ -339,6 +343,7 @@ fn main() -> anyhow::Result<()> {
             &set_meta,
             &create_field,
             &create_bookmark,
+            &create_hyperlink,
             &insert_image,
             &set_format,
             &set_align,
