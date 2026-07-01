@@ -219,11 +219,14 @@ impl ParaShape {
 }
 
 /// 번호 매기기 한 수준의 형식.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NumLevel {
     /// 시작 번호.
     pub start: u32,
     pub fmt: NumFmt,
+    /// 형식 템플릿(`^N`=N수준 번호 자리, 예 "^1." "(^5)" "제^1조"). 빈 문자열=없음(렌더 전용).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub template: String,
 }
 
 impl Default for NumLevel {
@@ -231,6 +234,7 @@ impl Default for NumLevel {
         Self {
             start: 1,
             fmt: NumFmt::Digit,
+            template: String::new(),
         }
     }
 }

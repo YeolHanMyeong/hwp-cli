@@ -112,10 +112,10 @@ fn parse_id_mapping_child(
         tag::TAB_DEF => header.tab_defs.push(raw_entry(node)),
         tag::NUMBERING => {
             header.numberings.push(raw_entry(node));
-            // 렌더 전용: 원시 포맷 레이아웃은 불확실하므로 v1은 십진 7수준 기본.
+            // 렌더 전용: 수준별 형식 템플릿("^1." "(^5)" "제^1조")을 파싱한다.
             header
                 .numbering_levels
-                .push(vec![hwp_model::NumLevel::default(); 7]);
+                .push(parse_numbering_levels(&node.data));
         }
         tag::BULLET => {
             // 글머리 문자 = BULLET offset+8의 WCHAR(UTF-16LE).
@@ -391,5 +391,76 @@ fn raw_entry(node: &RecordNode) -> RawEntry {
     RawEntry {
         data: node.data.clone(),
         children: node.children.iter().map(to_opaque).collect(),
+    }
+}
+
+/// NUMBERING 레코드에서 7수준 형식 템플릿을 파싱한다(렌더 전용).
+/// 수준마다 `[속성 u32, 너비보정 u16, 본문거리 u16, 글자모양ref u32(=0xFFFFFFFF), 템플릿(HWP string)]`.
+/// 구조가 어긋나면 그 수준부터 기본값(빈 템플릿)으로 폴백한다(회귀 없음). 시작번호(대개 1)는
+/// 템플릿 뒤 오프셋이 유동적이라 v1은 start=1 유지(문서화).
+fn parse_numbering_levels(data: &[u8]) -> Vec<hwp_model::NumLevel> {
+    fn read_level(r: &mut ByteReader) -> Option<String> {
+        let _attr = r.read_u32().ok()?;
+        let _width = r.read_u16().ok()?; // 너비 보정
+        let _dist = r.read_u16().ok()?; // 본문과의 거리
+        // 글자모양 참조 u32 — 정품 번호 수준은 0xFFFFFFFF(없음). 아니면 미지 구조.
+        if r.read_u32().ok()? != 0xFFFF_FFFF {
+            return None;
+        }
+        r.read_hwp_string().ok() // 템플릿 = len u16 + UTF-16LE
+    }
+    let mut levels: Vec<hwp_model::NumLevel> = Vec::with_capacity(7);
+    let mut r = ByteReader::new(data);
+    for _ in 0..7 {
+        match read_level(&mut r) {
+            Some(template) => levels.push(hwp_model::NumLevel {
+                start: 1,
+                fmt: hwp_model::NumFmt::Digit,
+                template,
+            }),
+            None => break,
+        }
+    }
+    while levels.len() < 7 {
+        levels.push(hwp_model::NumLevel::default());
+    }
+    levels
+}
+
+#[cfg(test)]
+mod numbering_tests {
+    use super::parse_numbering_levels;
+
+    #[test]
+    fn 기본_번호정의_템플릿_7개() {
+        // DEFAULT_NUMBERING_DATA(write.rs)와 동일 바이트 — 수준별 템플릿 검증.
+        let data: &[u8] = &[
+            0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x32, 0x00, 0xff, 0xff, 0xff, 0xff, 0x03, 0x00,
+            0x5e, 0x00, 0x31, 0x00, 0x2e, 0x00, 0x0c, 0x01, 0x00, 0x00, 0x00, 0x00, 0x32, 0x00,
+            0xff, 0xff, 0xff, 0xff, 0x03, 0x00, 0x5e, 0x00, 0x32, 0x00, 0x2e, 0x00, 0x0c, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x32, 0x00, 0xff, 0xff, 0xff, 0xff, 0x03, 0x00, 0x5e, 0x00,
+            0x33, 0x00, 0x29, 0x00, 0x0c, 0x01, 0x00, 0x00, 0x00, 0x00, 0x32, 0x00, 0xff, 0xff,
+            0xff, 0xff, 0x03, 0x00, 0x5e, 0x00, 0x34, 0x00, 0x29, 0x00, 0x0c, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x32, 0x00, 0xff, 0xff, 0xff, 0xff, 0x04, 0x00, 0x28, 0x00, 0x5e, 0x00,
+            0x35, 0x00, 0x29, 0x00, 0x0c, 0x01, 0x00, 0x00, 0x00, 0x00, 0x32, 0x00, 0xff, 0xff,
+            0xff, 0xff, 0x04, 0x00, 0x28, 0x00, 0x5e, 0x00, 0x36, 0x00, 0x29, 0x00, 0x2c, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x32, 0x00, 0xff, 0xff, 0xff, 0xff, 0x02, 0x00, 0x5e, 0x00,
+            0x37, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00,
+            0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x00, 0x00,
+        ];
+        let levels = parse_numbering_levels(data);
+        let tmpls: Vec<&str> = levels.iter().map(|l| l.template.as_str()).collect();
+        assert_eq!(tmpls, ["^1.", "^2.", "^3)", "^4)", "(^5)", "(^6)", "^7"]);
+        assert!(levels.iter().all(|l| l.start == 1));
+    }
+
+    #[test]
+    fn 미지_구조는_기본값_폴백() {
+        // 글자모양ref가 0xFFFFFFFF 아님 → 첫 수준부터 폴백.
+        let data: &[u8] = &[0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 0, 0];
+        let levels = parse_numbering_levels(data);
+        assert_eq!(levels.len(), 7);
+        assert!(levels.iter().all(|l| l.template.is_empty()));
     }
 }

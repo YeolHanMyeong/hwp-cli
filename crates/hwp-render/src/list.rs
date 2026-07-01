@@ -30,6 +30,15 @@ impl ListState {
             *c = 0;
         }
         let levels = numbering_levels(doc, id);
+        // 최심 수준에 형식 템플릿이 있으면 적용("(^5)"→"(5)", "제^1조"→"제1조", "^1.^2."→"1.1.").
+        if let Some(tmpl) = levels
+            .and_then(|l| l.get(level - 1))
+            .map(|nl| nl.template.as_str())
+            && !tmpl.is_empty()
+        {
+            return Some(apply_template(tmpl, levels, &self.counters));
+        }
+        // 템플릿 없음: 기존 "1.", "1.1." 폴백.
         let parts: Vec<String> = (1..=level)
             .map(|lv| {
                 let fmt = levels
@@ -42,6 +51,33 @@ impl ListState {
             .collect();
         Some(format!("{}.", parts.join(".")))
     }
+}
+
+/// 템플릿의 각 `^K`(K=1~7)를 K수준 번호로 치환한다. `^` 뒤 비숫자·범위 밖은 그대로.
+fn apply_template(
+    tmpl: &str,
+    levels: Option<&[hwp_model::NumLevel]>,
+    counters: &[u32; 8],
+) -> String {
+    let mut out = String::new();
+    let mut chars = tmpl.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '^'
+            && let Some(k) = chars.peek().and_then(|d| d.to_digit(10))
+            && (1..=7).contains(&k)
+        {
+            chars.next(); // 숫자 소비
+            let k = k as usize;
+            let nl = levels.and_then(|l| l.get(k - 1));
+            let fmt = nl.map_or(NumFmt::Digit, |n| n.fmt);
+            let start = nl.map_or(1, |n| n.start);
+            let n = counters[k].max(1) + start.saturating_sub(1);
+            out.push_str(&format_number(n, fmt));
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn bullet_char(doc: &Document, id: usize) -> char {
@@ -165,6 +201,38 @@ mod tests {
         // 비목록 문단은 None.
         doc.header.para_shapes.push(mk(0, 0));
         assert_eq!(st.marker(&doc, &p(3)), None);
+    }
+
+    #[test]
+    fn 마커_템플릿() {
+        use hwp_model::{NumFmt, NumLevel, ParaShape, ParaShapeId, Paragraph};
+        let mut doc = Document::default();
+        let mk = |ty: u32, lv: u32| ParaShape {
+            attr1: (ty << 23) | (lv << 25),
+            numbering_id: 0,
+            ..ParaShape::default()
+        };
+        doc.header.para_shapes = vec![mk(2, 1), mk(2, 2), mk(2, 3)];
+        let lvl = |t: &str| NumLevel {
+            start: 1,
+            fmt: NumFmt::Digit,
+            template: t.to_string(),
+        };
+        // 수준1 "^1.", 수준2 "^1.^2." (중첩), 수준3 "제^3조"
+        doc.header.numbering_levels = vec![vec![lvl("^1."), lvl("^1.^2."), lvl("제^3조")]];
+        let mut st = ListState::default();
+        let p = |id| Paragraph {
+            para_shape: ParaShapeId(id),
+            ..Paragraph::default()
+        };
+        assert_eq!(st.marker(&doc, &p(0)).as_deref(), Some("1.")); // ^1.
+        assert_eq!(st.marker(&doc, &p(0)).as_deref(), Some("2.")); // ^1.
+        assert_eq!(st.marker(&doc, &p(1)).as_deref(), Some("2.1.")); // ^1.^2. 중첩
+        assert_eq!(st.marker(&doc, &p(2)).as_deref(), Some("제1조")); // 접두/접미
+        // 빈 템플릿이면 기존 폴백("1.").
+        doc.header.numbering_levels = vec![vec![NumLevel::default(); 7]];
+        let mut st2 = ListState::default();
+        assert_eq!(st2.marker(&doc, &p(0)).as_deref(), Some("1."));
     }
 
     #[test]

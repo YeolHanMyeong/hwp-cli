@@ -107,6 +107,8 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
     let mut current_para: Option<ParaShape> = None;
     let mut current_border: Option<BorderFill> = None;
     let mut current_numbering: Option<Vec<hwp_model::NumLevel>> = None;
+    // paraHead 텍스트(형식 템플릿 "^1." 등)를 담을 현재 수준(1-기반).
+    let mut current_para_head: Option<usize> = None;
     // hp:switch의 case/default 중복 — 첫 분기(신형 한글이 읽는 값)만 취한다
     let mut para_margin_done = false;
     let mut para_ls_done = false;
@@ -334,11 +336,14 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
                             let nl = hwp_model::NumLevel {
                                 start: attr_u32(e, "start").unwrap_or(1),
                                 fmt: num_fmt(attr(e, "numFormat").as_deref().unwrap_or("DIGIT")),
+                                template: String::new(),
                             };
                             if levels.len() < level {
                                 levels.resize(level, hwp_model::NumLevel::default());
                             }
                             levels[level - 1] = nl;
+                            // 비어 있지 않으면(텍스트 콘텐츠) 뒤따르는 Text를 템플릿으로 포착.
+                            current_para_head = if empty { None } else { Some(level) };
                         }
                     }
                     // 글머리표 정의: char 속성(없으면 기본 •).
@@ -532,8 +537,19 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
                         header.numbering_levels.push(levels);
                     }
                 }
+                b"paraHead" => current_para_head = None,
                 _ => {}
             },
+            Event::Text(ref t) => {
+                // paraHead 안이면 텍스트를 형식 템플릿으로 포착("^1." "(^2)" "제^3조").
+                if let Some(level) = current_para_head
+                    && let Some(levels) = &mut current_numbering
+                    && let Some(nl) = levels.get_mut(level - 1)
+                    && let Ok(s) = t.xml10_content()
+                {
+                    nl.template.push_str(s.trim());
+                }
+            }
             Event::Eof => break,
             _ => {}
         }
