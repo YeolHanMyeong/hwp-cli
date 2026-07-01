@@ -5,7 +5,9 @@ name: Release
 # 릴리스 절차: scripts/release.sh X.Y.Z  →  git push origin main && git push origin vX.Y.Z
 on:
   push:
-    tags: ["v[0-9]+.[0-9]+.[0-9]+*"] # v1.2.3, v1.2.3-rc1 등
+    # glob 패턴(정규식 아님) — 멀티자리/프리릴리스 모두 매칭(v10.2.3, v0.2.0-rc1).
+    # 정확한 버전 검증은 아래 verify-version 잡이 담당한다.
+    tags: ["v*.*.*"]
 
 permissions:
   contents: write

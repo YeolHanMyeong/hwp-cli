@@ -56,7 +56,10 @@ if [ "$new" != "$ver" ]; then
   exit 1
 fi
 
-cargo update --workspace >/dev/null # Cargo.lock 의 워크스페이스 크레이트 버전 동기화
+# Cargo.lock 의 워크스페이스 크레이트 버전만 재잠금. --workspace 는 워크스페이스
+# 패키지만 대상이고, --offline 로 레지스트리 조회를 막아 외부 의존성은 절대 bump 되지
+# 않게 한다(릴리스 커밋에 원치 않는 dependency 변경 혼입 방지).
+cargo update --workspace --offline >/dev/null
 
 git add Cargo.toml Cargo.lock
 git commit -m "chore(release): v$ver"
