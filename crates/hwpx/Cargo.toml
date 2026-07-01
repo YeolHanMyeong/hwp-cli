@@ -8,11 +8,13 @@ rust-version.workspace = true
 
 [dependencies]
 hwp-model = { workspace = true }
+# 필드 이름/명령 인코딩(CTRL_DATA)·OWPML 타입 매핑 재사용 — 내부 워크스페이스 크레이트라
+# 새 외부 의존성 없음(hwp5도 동일 의존, 순환 없음: hwp-convert→hwp-model만).
+hwp-convert = { workspace = true }
 zip = { workspace = true }
 quick-xml = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-hwp-convert = { workspace = true }
 zip = { workspace = true }

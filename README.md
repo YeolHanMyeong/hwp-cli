@@ -144,7 +144,8 @@ hwp edit report.hwp -o out.hwp \
     --add-row "0" --delete-row "1:3" --verify
 
 # 누름틀 생성 + 채우기 (앵커 텍스트 뒤에 %clk 필드 삽입 후 이름으로 채움)
-hwp edit form.hwp -o out.hwp \
+# 출력이 .hwp든 .hwpx든 필드가 보존된다(hwpx는 OWPML fieldBegin/fieldEnd로 왕복).
+hwp edit form.hwp -o out.hwpx \
     --create-field "수신:=>수신처" --set-field "수신처=홍길동" --verify
 
 # 이미지 삽입 (앵커 뒤에 그림 — 자연 크기 또는 "@너비x높이"mm)

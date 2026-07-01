@@ -33,6 +33,61 @@ pub struct FieldInfo {
     pub value: String,
 }
 
+/// 필드 종류 컨트롤 ID인지(누름틀·계산식·하이퍼링크 등).
+pub fn is_field_ctrl_id(ctrl_id: &[u8; 4]) -> bool {
+    matches!(
+        ctrl_id,
+        b"%clk"
+            | b"%fmu"
+            | b"%hlk"
+            | b"%mmg"
+            | b"%dte"
+            | b"%ddt"
+            | b"%xrf"
+            | b"%bmk"
+            | b"%pat"
+            | b"%smr"
+            | b"%usr"
+            | b"%unk"
+    )
+}
+
+/// 컨트롤 ID → OWPML fieldBegin type 속성.
+pub fn owpml_field_type(ctrl_id: &[u8; 4]) -> &'static str {
+    match ctrl_id {
+        b"%clk" => "CLICK_HERE",
+        b"%fmu" => "FORMULA",
+        b"%hlk" => "HYPERLINK",
+        b"%mmg" => "MAIL_MERGE",
+        b"%dte" => "DATE",
+        b"%ddt" => "DOCUMENT_DATE",
+        b"%xrf" => "CROSS_REF",
+        b"%bmk" => "BOOKMARK",
+        b"%pat" => "PATH",
+        b"%smr" => "SUMMARY",
+        b"%usr" => "USER_INFO",
+        _ => "UNKNOWN",
+    }
+}
+
+/// OWPML fieldBegin type → 컨트롤 ID(역매핑, 미지는 `%unk`).
+pub fn field_ctrl_id_from_owpml(t: &str) -> [u8; 4] {
+    match t {
+        "CLICK_HERE" => *b"%clk",
+        "FORMULA" => *b"%fmu",
+        "HYPERLINK" => *b"%hlk",
+        "MAIL_MERGE" => *b"%mmg",
+        "DATE" => *b"%dte",
+        "DOCUMENT_DATE" => *b"%ddt",
+        "CROSS_REF" | "CROSS_REFERENCE" => *b"%xrf",
+        "BOOKMARK" => *b"%bmk",
+        "PATH" | "FILE_PATH" => *b"%pat",
+        "SUMMARY" => *b"%smr",
+        "USER_INFO" => *b"%usr",
+        _ => *b"%unk",
+    }
+}
+
 fn kind_of(ctrl_id: &[u8; 4]) -> &'static str {
     match ctrl_id {
         b"%clk" => "누름틀",
@@ -105,7 +160,7 @@ fn field_value(chars: &[HwpChar], start: usize) -> String {
 }
 
 /// 필드 컨트롤에서 (이름, 명령)을 읽는다.
-fn field_meta(ctrl: &Control) -> (Option<String>, Option<String>) {
+pub fn field_meta(ctrl: &Control) -> (Option<String>, Option<String>) {
     let Control::Generic(g) = ctrl else {
         return (None, None);
     };
@@ -352,7 +407,7 @@ fn for_each_nested(ctrl: &Control, f: &mut impl FnMut(&Paragraph)) {
 }
 
 /// ExtCtrl payload(12B): 선두 4B = 역순 ctrl_id(리더가 역순으로 파싱), 나머지 0.
-pub(crate) fn rev_payload(ctrl_id: &[u8; 4]) -> Vec<u8> {
+pub fn rev_payload(ctrl_id: &[u8; 4]) -> Vec<u8> {
     let mut p = vec![0u8; 12];
     p[0] = ctrl_id[3];
     p[1] = ctrl_id[2];
@@ -362,7 +417,7 @@ pub(crate) fn rev_payload(ctrl_id: &[u8; 4]) -> Vec<u8> {
 }
 
 /// CTRL_DATA Parameter Set: 필드 이름 BSTR 1개(setid0·count1·id1·BSTR).
-fn make_field_ctrl_data(name: &str) -> Vec<u8> {
+pub fn make_field_ctrl_data(name: &str) -> Vec<u8> {
     let mut cd = vec![0u8, 0, 1, 0]; // setid=0, count=1
     cd.extend([1u8, 0, 1, 0]); // item id=1, type=BSTR(1)
     let units: Vec<u16> = name.encode_utf16().collect();

@@ -119,6 +119,8 @@ fn write_paragraph(
     let mut text_buf = String::new();
     let mut wchar_pos = 0u32;
     let mut emitted_any_run = false;
+    // 열려 있는 필드(FIELD_START)의 id — FIELD_END의 beginIDRef로 연결(필드 비중첩 가정).
+    let mut current_field_id: Option<u32> = None;
 
     macro_rules! open_run {
         ($shape:expr) => {
@@ -159,13 +161,25 @@ fn write_paragraph(
                 31 => text_buf.push(' '),
                 _ => {}
             },
-            HwpChar::InlineCtrl { code, .. } => {
-                if *code == 9 {
+            HwpChar::InlineCtrl { code, .. } => match *code {
+                9 => {
                     open_run!(cur_shape);
                     flush_text(out, &mut text_buf);
                     out.push_str("<hp:tab/>");
                 }
-            }
+                4 => {
+                    // FIELD_END — 앞의 fieldBegin과 beginIDRef로 연결.
+                    if let Some(fid) = current_field_id.take() {
+                        open_run!(cur_shape);
+                        flush_text(out, &mut text_buf);
+                        let _ = write!(
+                            out,
+                            r##"<hp:ctrl><hp:fieldEnd beginIDRef="{fid}" fieldid="{fid}"/></hp:ctrl>"##,
+                        );
+                    }
+                }
+                _ => {}
+            },
             HwpChar::ExtCtrl { ctrl_index, .. } => {
                 let Some(control) = ctrl_index.and_then(|i| para.controls.get(i as usize)) else {
                     wchar_pos += ch.wchar_width();
@@ -196,6 +210,30 @@ fn write_paragraph(
                         open_run!(cur_shape);
                         flush_text(out, &mut text_buf);
                         write_picture(out, doc, pic, ids, bins, warnings);
+                    }
+                    Control::Generic(g) if hwp_convert::field::is_field_ctrl_id(&g.ctrl_id) => {
+                        // 필드(누름틀·계산식·하이퍼링크 등) — fieldBegin 방출. 값 텍스트는
+                        // 뒤따르는 Text가 <hp:t>로, FIELD_END(InlineCtrl 4)가 fieldEnd로 닫는다.
+                        open_run!(cur_shape);
+                        flush_text(out, &mut text_buf);
+                        let (name, command) = hwp_convert::field::field_meta(control);
+                        let fid = ids.next();
+                        current_field_id = Some(fid);
+                        let ty = hwp_convert::field::owpml_field_type(&g.ctrl_id);
+                        let _ = write!(
+                            out,
+                            r##"<hp:ctrl><hp:fieldBegin id="{fid}" type="{ty}" name="{}" editable="1" dirty="0" zorder="-1" fieldid="{fid}" metaTag="""##,
+                            esc(name.as_deref().unwrap_or("")),
+                        );
+                        if let Some(cmd) = &command {
+                            let _ = write!(
+                                out,
+                                r##"><hp:parameters cnt="1" name=""><hp:stringParam name="Command">{}</hp:stringParam></hp:parameters></hp:fieldBegin></hp:ctrl>"##,
+                                esc(cmd),
+                            );
+                        } else {
+                            out.push_str("/></hp:ctrl>");
+                        }
                     }
                     Control::Generic(g) => {
                         warnings.push(format!(

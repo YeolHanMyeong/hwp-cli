@@ -120,3 +120,38 @@ fn markdown_생성_왕복() {
     assert!(md_out.contains("*기울임*"), "{md_out}");
     assert!(md_out.contains("| 1 | 2 |"), "{md_out}");
 }
+
+/// 필드(누름틀) hwpx 왕복: create_field → write → read → list_fields로 이름·값 복원.
+#[test]
+fn 필드_생성_hwpx_왕복() {
+    let mut doc = hwp_convert::from_markdown("수신: 부서명");
+    assert!(hwp_convert::create_field(&mut doc, "수신:", "수신처", ""));
+    assert_eq!(hwp_convert::set_field(&mut doc, "수신처", "홍길동"), 1);
+
+    let out = tmp("field.hwpx");
+    let warnings = hwpx::write_document(&doc, &out).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    // 쓴 XML에 fieldBegin/fieldEnd가 있다.
+    let bytes = std::fs::read(&out).unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut xml = String::new();
+    {
+        use std::io::Read as _;
+        zip.by_name("Contents/section0.xml")
+            .unwrap()
+            .read_to_string(&mut xml)
+            .unwrap();
+    }
+    assert!(xml.contains(r#"type="CLICK_HERE""#), "fieldBegin CLICK_HERE 없음");
+    assert!(xml.contains(r#"name="수신처""#), "필드 이름 없음");
+    assert!(xml.contains("<hp:fieldEnd"), "fieldEnd 없음");
+
+    // 재읽기 → list_fields로 이름·종류·값 복원.
+    let reread = hwpx::read_document(&out).unwrap().document;
+    let fields = hwp_convert::list_fields(&reread);
+    assert_eq!(fields.len(), 1, "{fields:?}");
+    assert_eq!(fields[0].ctrl_id, "%clk");
+    assert_eq!(fields[0].name.as_deref(), Some("수신처"));
+    assert_eq!(fields[0].value, "홍길동");
+}

@@ -10,6 +10,7 @@
 //! - 기타 개체(pic/rect/...) → ExtCtrl(11) + Control::Generic
 //!   (`hp:subList` 문단은 텍스트 추출을 위해 재귀 수집)
 
+use hwp_model::opaque::OpaqueRecord;
 use hwp_model::{
     Cell, CharShapeId, Control, Equation, GenericControl, GradientSpec, HwpChar, HwpUnit, LineSeg,
     PageDef, ParaShapeId, Paragraph, ParagraphList, Section, SectionDef, ShapeGeom, ShapeKind,
@@ -447,6 +448,43 @@ fn parse_ctrl(
         match &event {
             Event::Start(e) | Event::Empty(e) => {
                 let name = e.local_name().as_ref().to_vec();
+                // 필드: fieldBegin → ExtCtrl(3) + Generic %xxx(이름 CTRL_DATA), fieldEnd → InlineCtrl(4).
+                if name.as_slice() == b"fieldBegin" {
+                    let ty = attr(e, "type").unwrap_or_default();
+                    let ctrl_id = hwp_convert::field::field_ctrl_id_from_owpml(&ty);
+                    let fname = attr(e, "name").unwrap_or_default();
+                    // Start면 자식 <hp:parameters>의 Command를 읽는다(self-closing이면 없음).
+                    let command = if matches!(event, Event::Start(_)) {
+                        read_field_command(reader)?
+                    } else {
+                        None
+                    };
+                    let data = command.as_deref().map(encode_field_command).unwrap_or_default();
+                    let generic = GenericControl {
+                        ctrl_id,
+                        data,
+                        paragraph_lists: Vec::new(),
+                        extras: Vec::new(),
+                        raw_children: vec![OpaqueRecord {
+                            tag: 0x0057, // HWPTAG_CTRL_DATA — 이름 Parameter Set
+                            data: hwp_convert::field::make_field_ctrl_data(&fname),
+                            children: Vec::new(),
+                        }],
+                        gso_shapes: Vec::new(),
+                        equation: None,
+                    };
+                    push_ext_ctrl(para, wchar_pos, 3, ctrl_id);
+                    para.controls.push(Control::Generic(generic));
+                    continue;
+                }
+                if name.as_slice() == b"fieldEnd" {
+                    para.chars.push(HwpChar::InlineCtrl {
+                        code: 4,
+                        payload: vec![0u8; 12],
+                    });
+                    *wchar_pos += 8;
+                    continue;
+                }
                 // hwp5와 동일한 ctrl_id/컨트롤 문자 코드 매핑. 쪽번호·감추기·새번호는
                 // 코드 21(페이지 컨트롤)이며, hwp5 페이로드를 여기서 합성해 둔다(빈
                 // GenericControl이면 writer가 드롭). head/foot는 적용쪽+id를 8B로.
@@ -489,6 +527,45 @@ fn parse_ctrl(
         }
     }
     Ok(())
+}
+
+/// fieldBegin의 자식 `<hp:parameters>`에서 Command stringParam 텍스트를 읽는다
+/// (`</hp:fieldBegin>`까지). 없으면 None.
+fn read_field_command(reader: &mut XmlReader<'_>) -> Result<Option<String>> {
+    let mut in_command = false;
+    let mut command: Option<String> = None;
+    loop {
+        let event = next_event(reader)?;
+        match &event {
+            Event::Start(e) if e.local_name().as_ref() == b"stringParam" => {
+                in_command = attr(e, "name").as_deref() == Some("Command");
+            }
+            Event::Text(t) if in_command => {
+                let s = t.xml10_content().map_err(|e| HwpxError::Xml {
+                    entry: "fieldBegin/parameters".to_string(),
+                    message: e.to_string(),
+                })?;
+                command.get_or_insert_with(String::new).push_str(&s);
+            }
+            Event::End(e) if e.local_name().as_ref() == b"stringParam" => in_command = false,
+            Event::End(e) if e.local_name().as_ref() == b"fieldBegin" => break,
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(command)
+}
+
+/// 명령 문자열 → hwp5 필드 레코드 data(`속성4 기타1 len2 WCHAR[len] id4`) — parse_command의 역.
+fn encode_field_command(cmd: &str) -> Vec<u8> {
+    let units: Vec<u16> = cmd.encode_utf16().collect();
+    let mut data = vec![0u8; 5]; // 속성(4) + 기타(1)
+    data.extend((units.len() as u16).to_le_bytes());
+    for u in units {
+        data.extend(u.to_le_bytes());
+    }
+    data.extend([0u8; 4]); // id
+    data
 }
 
 /// hwpx vertRelTo → hwp5 코드 (PAPER=0, PAGE=1, PARA=2).
