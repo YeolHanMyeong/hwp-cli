@@ -428,29 +428,66 @@ pub fn make_field_ctrl_data(name: &str) -> Vec<u8> {
     cd
 }
 
-/// %clk 누름틀 컨트롤 레코드(이름 CTRL_DATA 포함).
-fn make_field_control(name: &str) -> Control {
-    Control::Generic(GenericControl {
-        ctrl_id: *b"%clk",
-        data: vec![0u8; 11], // 속성4 기타1 len2=0 id4
-        paragraph_lists: Vec::new(),
-        extras: Vec::new(),
-        raw_children: vec![OpaqueRecord {
+/// 필드 컨트롤 레코드. `name`이 있으면 CTRL_DATA(누름틀 이름), `command`가 있으면
+/// data에 명령(하이퍼링크 URL 등)을 싣는다.
+fn make_field_control(ctrl_id: [u8; 4], name: Option<&str>, command: Option<&str>) -> Control {
+    let data = match command {
+        Some(cmd) => make_field_command_data(cmd),
+        None => vec![0u8; 11], // 속성4 기타1 len2=0 id4
+    };
+    let raw_children = match name {
+        Some(nm) => vec![OpaqueRecord {
             tag: CTRL_DATA_TAG,
-            data: make_field_ctrl_data(name),
+            data: make_field_ctrl_data(nm),
             children: Vec::new(),
         }],
+        None => Vec::new(),
+    };
+    Control::Generic(GenericControl {
+        ctrl_id,
+        data,
+        paragraph_lists: Vec::new(),
+        extras: Vec::new(),
+        raw_children,
         gso_shapes: Vec::new(),
         equation: None,
     })
 }
 
-/// 필드 문자열: FIELD_START(ExtCtrl, 코드 3) + 표시값 + FIELD_END(InlineCtrl, 코드 4).
-fn make_field_chars(value: &str) -> Vec<HwpChar> {
+/// 필드 레코드 data: 속성(4)=0x00008800 기타(1) len(2) WCHAR[len] id(4) trailing(4).
+/// 정품 %hlk 구조 복제 — parse_command은 command만 읽으므로 id/trailing=0은 무해.
+fn make_field_command_data(command: &str) -> Vec<u8> {
+    let mut data = vec![0x00, 0x88, 0x00, 0x00, 0x00]; // attr=0x00008800, etc=0
+    let units: Vec<u16> = command.encode_utf16().collect();
+    data.extend((units.len() as u16).to_le_bytes());
+    for u in units {
+        data.extend(u.to_le_bytes());
+    }
+    data.extend([0u8; 8]); // id(4)=0 + trailing(4)=0
+    data
+}
+
+/// 하이퍼링크 필드 커맨드: `{URL};1;0;0;` — URL 특수문자를 정품 규칙으로 백슬래시 이스케이프.
+/// v1은 `\ ; :`만 이스케이프(정품 `http\://…` 확인). 복잡한 URL은 근사.
+fn hlk_command(url: &str) -> String {
+    let mut esc = String::with_capacity(url.len() + 8);
+    for c in url.chars() {
+        match c {
+            '\\' => esc.push_str("\\\\"),
+            ';' => esc.push_str("\\;"),
+            ':' => esc.push_str("\\:"),
+            _ => esc.push(c),
+        }
+    }
+    format!("{esc};1;0;0;")
+}
+
+/// 필드 문자열: FIELD_START(ExtCtrl, 코드 3, ctrl_id) + 표시값 + FIELD_END(InlineCtrl, 코드 4).
+fn make_field_chars(ctrl_id: [u8; 4], value: &str) -> Vec<HwpChar> {
     let mut chars = vec![HwpChar::ExtCtrl {
         code: FIELD_START,
-        ctrl_id: *b"%clk",
-        payload: rev_payload(b"%clk"),
+        ctrl_id,
+        payload: rev_payload(&ctrl_id),
         ctrl_index: None,
     }];
     chars.extend(build_value_chars(value));
@@ -472,8 +509,15 @@ pub(crate) fn relink_ctrl_index(para: &mut Paragraph) {
     }
 }
 
-/// 한 문단에서 앵커 텍스트 뒤에 누름틀을 삽입한다. 반환=삽입 여부.
-fn create_field_in_para(para: &mut Paragraph, anchor: &str, name: &str, value: &str) -> bool {
+/// 한 문단에서 앵커 텍스트 뒤에 필드(누름틀/하이퍼링크 등)를 삽입한다. 반환=삽입 여부.
+fn create_field_in_para(
+    para: &mut Paragraph,
+    anchor: &str,
+    ctrl_id: [u8; 4],
+    name: Option<&str>,
+    command: Option<&str>,
+    value: &str,
+) -> bool {
     let Some((cidx, wpos)) = find_match(&para.chars, anchor, 0) else {
         return false;
     };
@@ -485,8 +529,9 @@ fn create_field_in_para(para: &mut Paragraph, anchor: &str, name: &str, value: &
         .filter(|c| matches!(c, HwpChar::ExtCtrl { .. }))
         .count()
         .min(para.controls.len());
-    para.controls.insert(ci, make_field_control(name));
-    let field_chars = make_field_chars(value);
+    para.controls
+        .insert(ci, make_field_control(ctrl_id, name, command));
+    let field_chars = make_field_chars(ctrl_id, value);
     let inserted_w: u32 = field_chars.iter().map(HwpChar::wchar_width).sum();
     para.chars.splice(ins..ins, field_chars);
     adjust_runs(&mut para.char_shape_runs, iw, 0, inserted_w);
@@ -496,9 +541,16 @@ fn create_field_in_para(para: &mut Paragraph, anchor: &str, name: &str, value: &
     true
 }
 
-/// 본문/표 셀/글상자 문단을 재귀로 훑어 첫 매칭에 누름틀을 삽입한다.
-fn create_field_rec(para: &mut Paragraph, anchor: &str, name: &str, value: &str) -> bool {
-    if create_field_in_para(para, anchor, name, value) {
+/// 본문/표 셀/글상자 문단을 재귀로 훑어 첫 매칭에 필드를 삽입한다.
+fn create_field_rec(
+    para: &mut Paragraph,
+    anchor: &str,
+    ctrl_id: [u8; 4],
+    name: Option<&str>,
+    command: Option<&str>,
+    value: &str,
+) -> bool {
+    if create_field_in_para(para, anchor, ctrl_id, name, command, value) {
         return true;
     }
     for ctrl in &mut para.controls {
@@ -506,7 +558,7 @@ fn create_field_rec(para: &mut Paragraph, anchor: &str, name: &str, value: &str)
             Control::Table(t) => {
                 for cell in &mut t.cells {
                     for p in &mut cell.paragraphs {
-                        if create_field_rec(p, anchor, name, value) {
+                        if create_field_rec(p, anchor, ctrl_id, name, command, value) {
                             return true;
                         }
                     }
@@ -515,7 +567,7 @@ fn create_field_rec(para: &mut Paragraph, anchor: &str, name: &str, value: &str)
             Control::Generic(g) => {
                 for l in &mut g.paragraph_lists {
                     for p in &mut l.paragraphs {
-                        if create_field_rec(p, anchor, name, value) {
+                        if create_field_rec(p, anchor, ctrl_id, name, command, value) {
                             return true;
                         }
                     }
@@ -527,17 +579,36 @@ fn create_field_rec(para: &mut Paragraph, anchor: &str, name: &str, value: &str)
     false
 }
 
-/// `anchor` 텍스트를 가진 첫 문단의 그 뒤에 `name` 이름의 %clk 누름틀을 삽입한다
-/// (표시값 `value`, 보통 빈 문자열). 반환=삽입 여부. 삽입 후 `set_field`로 채울 수 있다.
-pub fn create_field(doc: &mut Document, anchor: &str, name: &str, value: &str) -> bool {
+/// 문서를 훑어 첫 앵커 매칭에 필드를 삽입한다(본문·표 셀·글상자 재귀).
+fn create_field_generic(
+    doc: &mut Document,
+    anchor: &str,
+    ctrl_id: [u8; 4],
+    name: Option<&str>,
+    command: Option<&str>,
+    value: &str,
+) -> bool {
     for section in &mut doc.sections {
         for para in &mut section.paragraphs {
-            if create_field_rec(para, anchor, name, value) {
+            if create_field_rec(para, anchor, ctrl_id, name, command, value) {
                 return true;
             }
         }
     }
     false
+}
+
+/// `anchor` 텍스트를 가진 첫 문단의 그 뒤에 `name` 이름의 %clk 누름틀을 삽입한다
+/// (표시값 `value`, 보통 빈 문자열). 반환=삽입 여부. 삽입 후 `set_field`로 채울 수 있다.
+pub fn create_field(doc: &mut Document, anchor: &str, name: &str, value: &str) -> bool {
+    create_field_generic(doc, anchor, *b"%clk", Some(name), None, value)
+}
+
+/// `anchor` 텍스트 뒤에 하이퍼링크(%hlk)를 삽입한다. `display`=클릭 표시 텍스트, `url`=대상.
+/// 반환=삽입 여부. hwp5·hwpx 양쪽에 동일하게 방출된다.
+pub fn create_hyperlink(doc: &mut Document, anchor: &str, url: &str, display: &str) -> bool {
+    let cmd = hlk_command(url);
+    create_field_generic(doc, anchor, *b"%hlk", None, Some(&cmd), display)
 }
 
 #[cfg(test)]
@@ -701,5 +772,50 @@ mod tests {
             _ => None,
         });
         assert_eq!(&payload.unwrap()[..4], b"klc%");
+    }
+
+    #[test]
+    fn hlk_command_정품_포맷() {
+        // work_report.hwp 정품 %hlk와 동일: URL의 `:`→`\:`, 뒤에 `;1;0;0;`.
+        assert_eq!(
+            hlk_command("http://hangeul.naver.com/font"),
+            "http\\://hangeul.naver.com/font;1;0;0;"
+        );
+    }
+
+    #[test]
+    fn make_field_command_data_바이트() {
+        // 정품 %hlk data 구조: attr=0x00008800·etc=0·len(2)·WCHAR·id(4)·trailing(4).
+        let cmd = "http\\://hangeul.naver.com/font;1;0;0;";
+        let data = make_field_command_data(cmd);
+        assert_eq!(&data[0..5], &[0x00, 0x88, 0x00, 0x00, 0x00]); // attr+etc
+        let len = u16::from_le_bytes([data[5], data[6]]) as usize;
+        assert_eq!(len, cmd.encode_utf16().count());
+        assert_eq!(len, 37); // 정품 work_report %hlk와 동일 길이
+        // parse_command이 커맨드를 그대로 복원한다.
+        assert_eq!(parse_command(&data).as_deref(), Some(cmd));
+        // 커맨드 뒤 id(4)+trailing(4)=0.
+        assert_eq!(&data[7 + len * 2..], &[0u8; 8]);
+    }
+
+    #[test]
+    fn create_hyperlink_삽입_후_읽기() {
+        let mut doc = crate::from_markdown::from_markdown("자세히: 여기");
+        assert!(create_hyperlink(
+            &mut doc,
+            "자세히:",
+            "https://example.com/path",
+            "링크"
+        ));
+        let fields = list_fields(&doc);
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].kind, "하이퍼링크");
+        assert_eq!(fields[0].ctrl_id, "%hlk");
+        assert_eq!(fields[0].name, None);
+        assert_eq!(fields[0].value, "링크");
+        assert_eq!(
+            fields[0].command.as_deref(),
+            Some("https\\://example.com/path;1;0;0;")
+        );
     }
 }

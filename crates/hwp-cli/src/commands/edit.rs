@@ -21,6 +21,7 @@ pub fn run(
     set_meta: &[String],
     create_fields: &[String],
     create_bookmarks: &[String],
+    create_hyperlinks: &[String],
     insert_images: &[String],
     set_formats: &[String],
     set_aligns: &[String],
@@ -87,6 +88,24 @@ pub fn run(
             .with_context(|| format!("--create-bookmark 형식은 \"앵커=>이름\" 입니다: {spec:?}"))?;
         if hwp_convert::create_bookmark(&mut doc, anchor, name) {
             eprintln!("책갈피 생성: {anchor:?} 뒤에 이름={name:?}");
+            edits += 1;
+        } else {
+            eprintln!("경고: 앵커 {anchor:?}를 찾지 못했습니다");
+        }
+    }
+
+    for spec in create_hyperlinks {
+        // "앵커=>URL"(표시=URL) 또는 "앵커=>표시=>URL". URL 쿼리의 '='와 충돌 없게 "=>"로 분할.
+        let parts: Vec<&str> = spec.split("=>").collect();
+        let (anchor, display, url) = match parts.as_slice() {
+            [a, u] => (*a, *u, *u),
+            [a, d, u] => (*a, *d, *u),
+            _ => anyhow::bail!(
+                "--create-hyperlink 형식은 \"앵커=>URL\" 또는 \"앵커=>표시=>URL\" 입니다: {spec:?}"
+            ),
+        };
+        if hwp_convert::create_hyperlink(&mut doc, anchor, url, display) {
+            eprintln!("하이퍼링크 생성: {anchor:?} 뒤에 표시={display:?} URL={url:?}");
             edits += 1;
         } else {
             eprintln!("경고: 앵커 {anchor:?}를 찾지 못했습니다");
@@ -208,7 +227,7 @@ pub fn run(
 
     if edits == 0 {
         eprintln!(
-            "경고: 적용된 편집이 없습니다 (--replace/--set-cell/--set-field/--set-meta/--create-field/--create-bookmark/--insert-image/--set-format/--set-align/--insert-para/--delete-para/--add-row/--delete-row 확인)"
+            "경고: 적용된 편집이 없습니다 (--replace/--set-cell/--set-field/--set-meta/--create-field/--create-bookmark/--create-hyperlink/--insert-image/--set-format/--set-align/--insert-para/--delete-para/--add-row/--delete-row 확인)"
         );
     }
 

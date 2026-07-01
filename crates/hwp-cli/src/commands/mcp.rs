@@ -376,6 +376,24 @@ fn tool_edit(args: &Value) -> Result<Vec<Value>, String> {
             }
         }
     }
+    if let Some(arr) = args.get("create_hyperlink").and_then(Value::as_array) {
+        for h in arr {
+            let anchor = h
+                .get("anchor")
+                .and_then(Value::as_str)
+                .ok_or("create_hyperlink 항목에 anchor 필요")?;
+            let url = h
+                .get("url")
+                .and_then(Value::as_str)
+                .ok_or("create_hyperlink 항목에 url 필요")?;
+            let display = h.get("display").and_then(Value::as_str).unwrap_or(url);
+            if hwp_convert::create_hyperlink(&mut doc, anchor, url, display) {
+                summary.push(format!("하이퍼링크 생성 {anchor:?}→{url:?}"));
+            } else {
+                summary.push(format!("경고: 앵커 {anchor:?} 못 찾음"));
+            }
+        }
+    }
     let mut structural = false;
     if let Some(arr) = args.get("insert_image").and_then(Value::as_array) {
         for im in arr {
@@ -497,7 +515,7 @@ fn tool_edit(args: &Value) -> Result<Vec<Value>, String> {
     }
     if summary.is_empty() {
         return Err(
-            "적용할 편집이 없습니다 (replace/set_cell/set_field/create_field/create_bookmark/set_format/set_align/insert_para/delete_para/add_row/delete_row 확인)"
+            "적용할 편집이 없습니다 (replace/set_cell/set_field/create_field/create_bookmark/create_hyperlink/set_format/set_align/insert_para/delete_para/add_row/delete_row 확인)"
                 .to_string(),
         );
     }
@@ -648,6 +666,9 @@ fn tool_defs() -> Vec<Value> {
                 "create_bookmark": {"type": "array", "items": {"type": "object", "properties": {
                     "anchor": {"type": "string"}, "name": {"type": "string"}},
                     "required": ["anchor", "name"]}, "description": "앵커 텍스트 뒤에 책갈피(bokm 지점 표식) 생성"},
+                "create_hyperlink": {"type": "array", "items": {"type": "object", "properties": {
+                    "anchor": {"type": "string"}, "url": {"type": "string"}, "display": {"type": "string"}},
+                    "required": ["anchor", "url"]}, "description": "앵커 텍스트 뒤에 하이퍼링크(%hlk) 생성(display 생략 시 URL 표시)"},
                 "insert_image": {"type": "array", "items": {"type": "object", "properties": {
                     "anchor": {"type": "string"}, "path": {"type": "string"},
                     "width_mm": {"type": "number"}, "height_mm": {"type": "number"}},
