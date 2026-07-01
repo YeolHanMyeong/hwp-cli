@@ -260,9 +260,12 @@ fn shape_piece(
                 .is_some_and(|g| g.0 != 0)
     };
 
-    // (글꼴, 텍스트, 시작 wchar) 세그먼트로 분할 — Text 글자는 각 1 wchar.
+    // (글꼴, 텍스트, 시작 wchar) 세그먼트로 분할. start_wchar는 UTF-16 코드유닛
+    // 오프셋이므로 문자마다 len_utf16()(BMP=1, 그 외=2)만큼 진행한다(비-BMP 글자에서
+    // start_wchar 어긋나 링크범위·lineseg 매핑이 깨지지 않게).
     let mut segments: Vec<(Arc<LoadedFont>, String, u32)> = Vec::new();
-    for (cur, c) in (start_wchar..).zip(text.chars()) {
+    let mut cur = start_wchar;
+    for c in text.chars() {
         let font = if primary_covers(c) {
             primary.clone()
         } else {
@@ -272,6 +275,7 @@ fn shape_piece(
             Some((f, t, _)) if Arc::ptr_eq(f, &font) => t.push(c),
             _ => segments.push((font, c.to_string(), cur)),
         }
+        cur += c.len_utf16() as u32;
     }
 
     segments
@@ -459,10 +463,13 @@ pub fn shape_plain(
     } else {
         1
     };
-    // 링크/마커는 단일 런만 사용 — 첫 세그먼트만 취한다(글자별 폴백은 본문 텍스트 전용).
-    shape_piece(store, doc, Some(&cs), lang, text, 0)
-        .into_iter()
-        .next()
+    // 합성 텍스트(수식/마커)는 단일 Run만 배치하므로 주 글꼴로 통짜 셰이핑한다.
+    // shape_piece의 글자별 폴백은 여러 Run으로 쪼개지는데, 여기서 첫 세그먼트만 취하면
+    // 나머지 글자가 사라진다(내용 누락). 미지원 글자는 tofu로 두되 누락은 막는다
+    // (글자별 폴백은 본문 shape_range 경로 전용).
+    let face_id = cs.face_ids.get(lang).copied().unwrap_or(0);
+    let font = store.resolve(doc, lang, face_id)?;
+    shape_with_font(&font, &cs, lang, text, 0, cs.is_bold())
 }
 
 /// 각주/미주 본문 마커(윗첨자 번호). 주변 글자모양을 따라 ~65% 크기로 줄이고
@@ -589,5 +596,19 @@ mod link_tests {
         let mut items2 = vec![run_at(9)];
         apply_link_style(&mut items2, &[]);
         assert!(matches!(&items2[0], InlineItem::Run(r) if !r.underline));
+    }
+
+    #[test]
+    fn shape_plain_전체_텍스트_보존() {
+        // 회귀 가드: shape_plain 이 (구버전처럼) 폴백 첫 세그먼트만 취해 나머지 글자를
+        // 버리지 않고 전체 텍스트를 셰이핑해야 한다. 폰트 부재 환경은 resolve→None 으로
+        // 스킵(폰트 있는 CI에서 검출).
+        let doc = hwp_convert::from_markdown("x"); // default_header(함초롬바탕) 폰트 포함
+        let mut store = FontStore::new();
+        let text = "abc 123 가나다";
+        if let Some(run) = shape_plain(&mut store, &doc, text, 10.0, 0) {
+            assert_eq!(run.text, text, "전체 텍스트 보존(세그먼트 누락 없음)");
+            assert!(!run.glyphs.is_empty(), "글리프 생성됨");
+        }
     }
 }

@@ -889,22 +889,27 @@ fn layout_table(
             .iter()
             .sum();
         let (ml, mr, mt, mb) = cell_margins(table, cell);
-        let mut scratch = PageList {
-            width_pt: page.width_pt,
-            height_pt: page.height_pt,
-            items: Vec::new(),
+        // 빈 셀은 스크래치 레이아웃(할당+셰이핑)을 생략 — 내용 높이 0(여백 mt+mb는 아래서 반영).
+        let content_h = if cell.paragraphs.is_empty() {
+            0.0
+        } else {
+            let mut scratch = PageList {
+                width_pt: page.width_pt,
+                height_pt: page.height_pt,
+                items: Vec::new(),
+            };
+            let mut scratch_warn = Vec::new();
+            layout_box_paragraphs(
+                doc,
+                store,
+                &mut scratch,
+                &cell.paragraphs,
+                0.0,
+                0.0,
+                (cw - ml - mr).max(4.0),
+                &mut scratch_warn,
+            )
         };
-        let mut scratch_warn = Vec::new();
-        let content_h = layout_box_paragraphs(
-            doc,
-            store,
-            &mut scratch,
-            &cell.paragraphs,
-            0.0,
-            0.0,
-            (cw - ml - mr).max(4.0),
-            &mut scratch_warn,
-        );
         content_h_by_cell.push(content_h);
         let needed = content_h + mt + mb;
         let span = (cell.row_span as usize).max(1);
