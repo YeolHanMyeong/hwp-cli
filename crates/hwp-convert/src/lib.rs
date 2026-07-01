@@ -14,7 +14,9 @@ pub mod structure;
 
 use hwp_model::Document;
 
-pub use bookmark::{BookmarkInfo, create_bookmark, list_bookmarks};
+pub use bookmark::{
+    BookmarkInfo, bookmark_name, create_bookmark, list_bookmarks, make_bokm_ctrl_data,
+};
 pub use edit::{add_rows, apply_meta, replace_text, set_cell, table_dims};
 pub use field::{
     FieldInfo, PlaceholderInfo, create_field, list_fields, scan_placeholders, set_field,

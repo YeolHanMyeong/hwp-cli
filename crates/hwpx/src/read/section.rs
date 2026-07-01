@@ -459,7 +459,10 @@ fn parse_ctrl(
                     } else {
                         None
                     };
-                    let data = command.as_deref().map(encode_field_command).unwrap_or_default();
+                    let data = command
+                        .as_deref()
+                        .map(encode_field_command)
+                        .unwrap_or_default();
                     let generic = GenericControl {
                         ctrl_id,
                         data,
@@ -483,6 +486,26 @@ fn parse_ctrl(
                         payload: vec![0u8; 12],
                     });
                     *wchar_pos += 8;
+                    continue;
+                }
+                // 책갈피(지점 표식): <hp:bookmark name="…"/> → ExtCtrl(22) + Generic bokm(이름 CTRL_DATA).
+                if name.as_slice() == b"bookmark" {
+                    let bname = attr(e, "name").unwrap_or_default();
+                    let generic = GenericControl {
+                        ctrl_id: *b"bokm",
+                        data: Vec::new(),
+                        paragraph_lists: Vec::new(),
+                        extras: Vec::new(),
+                        raw_children: vec![OpaqueRecord {
+                            tag: 0x0057, // HWPTAG_CTRL_DATA — 이름 Parameter Set
+                            data: hwp_convert::bookmark::make_bokm_ctrl_data(&bname),
+                            children: Vec::new(),
+                        }],
+                        gso_shapes: Vec::new(),
+                        equation: None,
+                    };
+                    push_ext_ctrl(para, wchar_pos, 22, *b"bokm");
+                    para.controls.push(Control::Generic(generic));
                     continue;
                 }
                 // hwp5와 동일한 ctrl_id/컨트롤 문자 코드 매핑. 쪽번호·감추기·새번호는

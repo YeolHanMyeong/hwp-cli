@@ -143,7 +143,10 @@ fn 필드_생성_hwpx_왕복() {
             .read_to_string(&mut xml)
             .unwrap();
     }
-    assert!(xml.contains(r#"type="CLICK_HERE""#), "fieldBegin CLICK_HERE 없음");
+    assert!(
+        xml.contains(r#"type="CLICK_HERE""#),
+        "fieldBegin CLICK_HERE 없음"
+    );
     assert!(xml.contains(r#"name="수신처""#), "필드 이름 없음");
     assert!(xml.contains("<hp:fieldEnd"), "fieldEnd 없음");
 
@@ -154,4 +157,41 @@ fn 필드_생성_hwpx_왕복() {
     assert_eq!(fields[0].ctrl_id, "%clk");
     assert_eq!(fields[0].name.as_deref(), Some("수신처"));
     assert_eq!(fields[0].value, "홍길동");
+}
+
+/// 책갈피(bokm) hwpx 왕복: create_bookmark → write → `<hp:bookmark name>` → read → list_bookmarks.
+#[test]
+fn 책갈피_생성_hwpx_왕복() {
+    let mut doc = hwp_convert::from_markdown("제목 문단\n\n본문");
+    assert!(hwp_convert::create_bookmark(
+        &mut doc,
+        "제목",
+        "책갈피테스트"
+    ));
+
+    let out = tmp("bookmark.hwpx");
+    let warnings = hwpx::write_document(&doc, &out).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    // 쓴 XML에 <hp:bookmark name="…"/>가 있다.
+    let bytes = std::fs::read(&out).unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut xml = String::new();
+    {
+        use std::io::Read as _;
+        zip.by_name("Contents/section0.xml")
+            .unwrap()
+            .read_to_string(&mut xml)
+            .unwrap();
+    }
+    assert!(
+        xml.contains(r#"<hp:bookmark name="책갈피테스트""#),
+        "hp:bookmark 없음: {xml}"
+    );
+
+    // 재읽기 → list_bookmarks로 이름 복원.
+    let reread = hwpx::read_document(&out).unwrap().document;
+    let bms = hwp_convert::list_bookmarks(&reread);
+    assert_eq!(bms.len(), 1, "{bms:?}");
+    assert_eq!(bms[0].name, "책갈피테스트");
 }

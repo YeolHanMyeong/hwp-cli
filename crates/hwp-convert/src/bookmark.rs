@@ -50,7 +50,7 @@ fn collect_bookmarks(para: &Paragraph, out: &mut Vec<BookmarkInfo>) {
         {
             let name = ctrl_index
                 .and_then(|idx| para.controls.get(idx as usize))
-                .and_then(bokm_name)
+                .and_then(bookmark_name)
                 .unwrap_or_default();
             out.push(BookmarkInfo { name });
         }
@@ -76,8 +76,9 @@ fn collect_bookmarks(para: &Paragraph, out: &mut Vec<BookmarkInfo>) {
     }
 }
 
-/// bokm 컨트롤에서 책갈피 이름을 읽는다.
-fn bokm_name(ctrl: &Control) -> Option<String> {
+/// bokm 컨트롤(Generic)에서 책갈피 이름을 읽는다. hwpx writer가 `<hp:bookmark name>`
+/// 방출 시 재사용한다.
+pub fn bookmark_name(ctrl: &Control) -> Option<String> {
     let Control::Generic(g) = ctrl else {
         return None;
     };
@@ -111,7 +112,8 @@ fn decode_utf16le(b: &[u8]) -> String {
 
 /// bokm CTRL_DATA Parameter Set 바이트(정품 한글과 동일 레이아웃).
 /// setid=0x021b · count=1 · id=0x40000000 · type=1(BSTR) · len(2B) · 이름.
-fn make_bokm_ctrl_data(name: &str) -> Vec<u8> {
+/// hwpx reader가 `<hp:bookmark name>` → bokm Generic 합성 시 재사용한다.
+pub fn make_bokm_ctrl_data(name: &str) -> Vec<u8> {
     let mut cd = vec![0x1b, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x40, 0x01, 0x00];
     let units: Vec<u16> = name.encode_utf16().collect();
     cd.extend((units.len() as u16).to_le_bytes());
