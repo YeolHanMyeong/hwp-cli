@@ -235,6 +235,18 @@ fn write_paragraph(
                             out.push_str("/></hp:ctrl>");
                         }
                     }
+                    Control::Generic(g) if g.ctrl_id == *b"bokm" => {
+                        // 책갈피(지점 표식) — <hp:bookmark name="…"/>. 필드와 달리 END 없음.
+                        open_run!(cur_shape);
+                        flush_text(out, &mut text_buf);
+                        let name =
+                            hwp_convert::bookmark::bookmark_name(control).unwrap_or_default();
+                        let _ = write!(
+                            out,
+                            r##"<hp:ctrl><hp:bookmark name="{}"/></hp:ctrl>"##,
+                            esc(&name)
+                        );
+                    }
                     Control::Generic(g) => {
                         warnings.push(format!(
                             "DROP: hwpx 쓰기 미지원 컨트롤 드롭: {:?}",
