@@ -874,7 +874,7 @@ fn layout_table(
             row_h[r] = row_h[r].max(cell.height.to_pt() as f32);
         }
     }
-    fill_unknown(&mut col_w, 60.0);
+    derive_col_widths(&mut col_w, table);
     fill_unknown(&mut row_h, 18.0);
 
     // 측정 패스: 실제 내용 높이로 행 높이를 확장한다(저장된 cell.height는 한글의 줄바꿈
@@ -1176,7 +1176,9 @@ fn layout_box_para_iter<'a>(
         let mut para_top: Option<f32> = None;
         let tabs = crate::tab::tab_stops(doc, para);
         // 목록 마커(셀 안 번호/불릿) — 렌더 패스에서만 counter 진행(측정 패스는 None).
-        let marker = list_state.as_deref_mut().and_then(|ls| ls.marker(doc, para));
+        let marker = list_state
+            .as_deref_mut()
+            .and_then(|ls| ls.marker(doc, para));
 
         if para.line_segs.is_empty() {
             if para.chars.is_empty() {
@@ -1301,6 +1303,52 @@ fn layout_box_para_iter<'a>(
         }
     }
     content_bottom
+}
+
+/// 열 폭 확정: `col_span==1`로 못 정한 열을 병합 셀(`col_span>1`)에서 유도하고, 표의 실제
+/// 총 폭(행별 셀 폭 합의 최대)에 맞춰 스케일한다. 병합 위주 표가 평균 폴백으로 페이지를
+/// 넘던 문제(잉크 초과)를 해소한다. 정상 표(전부 `col_span==1`)는 스케일 s≈1이라 무영향.
+fn derive_col_widths(col_w: &mut [f32], table: &Table) {
+    let cols = col_w.len();
+    // 1) 병합 셀에서 미지 열 유도 (작은 병합 먼저 확정해야 큰 병합이 남은 미지에 정확히 배분).
+    let mut spanning: Vec<_> = table.cells.iter().filter(|c| c.col_span > 1).collect();
+    spanning.sort_by_key(|c| c.col_span);
+    for cell in spanning {
+        let c = cell.col as usize;
+        let end = (c + cell.col_span as usize).min(cols);
+        if c >= end {
+            continue;
+        }
+        let known: f32 = col_w[c..end].iter().filter(|w| **w > 0.0).sum();
+        let unknown: Vec<usize> = (c..end).filter(|&i| col_w[i] <= 0.0).collect();
+        let cw = cell.width.to_pt() as f32;
+        if !unknown.is_empty() && cw > known {
+            let each = (cw - known) / unknown.len() as f32;
+            for i in unknown {
+                col_w[i] = each;
+            }
+        }
+    }
+    // 2) 그래도 미지면 평균 폴백(기존 동작).
+    fill_unknown(col_w, 60.0);
+    // 3) 표의 실제 총 폭에 스케일(유도 잔차 보정 + 안전망). 정상 표는 sum==table_width라 s=1.
+    let table_width = table_true_width(table);
+    let sum: f32 = col_w.iter().sum();
+    if table_width > 0.0 && sum > 0.0 {
+        let s = table_width / sum;
+        for w in col_w.iter_mut() {
+            *w *= s;
+        }
+    }
+}
+
+/// 표의 실제 총 폭(pt) = 행별 셀 폭 합의 최대(모든 열을 커버하는 행 = 표 폭).
+fn table_true_width(table: &Table) -> f32 {
+    let mut by_row: std::collections::HashMap<u16, f32> = std::collections::HashMap::new();
+    for cell in &table.cells {
+        *by_row.entry(cell.row).or_default() += cell.width.to_pt() as f32;
+    }
+    by_row.values().copied().fold(0.0, f32::max)
 }
 
 fn fill_unknown(values: &mut [f32], fallback: f32) {
@@ -1765,5 +1813,88 @@ mod justify_tests {
         );
         let mut right = vec![run(&[10.0, 10.0])];
         assert!((align_line(&mut right, 2, 40.0, 20.0, false) - 20.0).abs() < 0.01);
+    }
+}
+
+#[cfg(test)]
+mod table_width_tests {
+    use super::*;
+    use hwp_model::{BorderFillId, Cell, HwpUnit};
+
+    fn cell(col: u16, row: u16, col_span: u16, width: i32) -> Cell {
+        Cell {
+            list_attr: 0,
+            col,
+            row,
+            col_span,
+            row_span: 1,
+            width: HwpUnit(width),
+            height: HwpUnit(1800),
+            margins: [0; 4],
+            border_fill: BorderFillId(1),
+            header_tail: Vec::new(),
+            paragraphs: Vec::new(),
+        }
+    }
+
+    fn table(rows: u16, cols: u16, cells: Vec<Cell>) -> Table {
+        Table {
+            common_data: Vec::new(),
+            placement: None,
+            attr: 0,
+            rows,
+            cols,
+            cell_spacing: 0,
+            inner_margins: [0; 4],
+            row_cell_counts: Vec::new(),
+            border_fill: BorderFillId(1),
+            table_tail: Vec::new(),
+            cells,
+            extras: Vec::new(),
+        }
+    }
+
+    /// 병합 셀만 커버하는 열(col_span==1 셀 없음)이 병합 셀 폭에서 유도돼야 한다.
+    #[test]
+    fn 병합_열_폭_유도() {
+        // row0: [col0 span2 w=200pt][col2 span1 w=100pt]
+        // row1: [col0 span1 w=80pt][col1 span2 w=220pt]  → col1은 병합 셀에서만 유도.
+        let cells = vec![
+            cell(0, 0, 2, 20000),
+            cell(2, 0, 1, 10000),
+            cell(0, 1, 1, 8000),
+            cell(1, 1, 2, 22000),
+        ];
+        let t = table(2, 3, cells);
+        // layout_table와 동일하게 col_span==1로 초기화.
+        let mut col_w = vec![0.0f32; 3];
+        for c in &t.cells {
+            if c.col_span == 1 {
+                col_w[c.col as usize] = col_w[c.col as usize].max(c.width.to_pt() as f32);
+            }
+        }
+        assert_eq!(col_w, vec![80.0, 0.0, 100.0]); // col1 미지
+
+        derive_col_widths(&mut col_w, &t);
+        assert!((col_w[1] - 120.0).abs() < 0.01, "col1 유도값: {col_w:?}");
+        assert!(col_w.iter().all(|w| *w > 0.0), "미지 열 없어야: {col_w:?}");
+        assert!(
+            (col_w.iter().sum::<f32>() - 300.0).abs() < 0.5,
+            "총 폭=표 실제 폭 300pt: {col_w:?}"
+        );
+    }
+
+    /// 정상 표(전부 col_span==1)는 열 폭이 불변이어야 한다(스케일 s=1).
+    #[test]
+    fn 정상_표_열폭_불변() {
+        let cells = vec![
+            cell(0, 0, 1, 10000),
+            cell(1, 0, 1, 15000),
+            cell(2, 0, 1, 5000),
+        ];
+        let t = table(1, 3, cells);
+        let mut col_w = vec![100.0f32, 150.0, 50.0];
+        derive_col_widths(&mut col_w, &t);
+        assert_eq!(col_w, vec![100.0, 150.0, 50.0]);
     }
 }
