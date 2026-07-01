@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # release.yml 이 태그 릴리스 전에 이 test 잡을 재사용(테스트 통과 게이트)한다.
+  workflow_call:
 
 env:
   CARGO_TERM_COLOR: always

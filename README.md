@@ -77,6 +77,31 @@ cargo install --path crates/hwp-cli   # `hwp` 바이너리 설치
 
 > 이후 예시에서 `<repo>`는 위에서 클론한 디렉터리의 절대 경로를 가리킨다.
 
+### 다운로드 (사전 빌드 바이너리)
+
+각 [릴리스](https://github.com/YeolHanMyeong/hwp-cli/releases)에 플랫폼별 `hwp` 아카이브와 `.sha256` 체크섬이 첨부된다:
+
+| 플랫폼 | 아카이브 |
+|---|---|
+| Linux x86_64 | `hwp-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` |
+| macOS Apple Silicon | `hwp-vX.Y.Z-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `hwp-vX.Y.Z-x86_64-apple-darwin.tar.gz` |
+| Windows x86_64 | `hwp-vX.Y.Z-x86_64-pc-windows-msvc.zip` |
+
+압축을 풀어 `hwp`를 PATH에 두면 된다(체크섬 검증: `shasum -a 256 -c hwp-*.sha256`).
+렌더/PDF엔 CJK 폰트가 필요하고(위 폰트 지정 참고), 텍스트 추출·변환은 폰트 없이 동작한다.
+
+### 릴리스 (메인테이너)
+
+버전은 워크스페이스 `Cargo.toml`의 `[workspace.package] version`이 단일 기준(SSOT)이다.
+
+```sh
+scripts/release.sh 0.2.0                        # 버전 bump + 커밋 + 태그 (푸시는 수동)
+git push origin main && git push origin v0.2.0  # 태그 푸시가 릴리스를 트리거
+```
+
+`vX.Y.Z` 태그를 푸시하면 `release.yml`이 ① 테스트(fmt/clippy/test) 통과 ② 태그↔`Cargo.toml` 버전 일치를 확인한 **뒤에만** 4개 플랫폼 바이너리를 빌드해 GitHub Release로 게시한다. 태그가 커밋된 버전과 다르면 릴리스가 차단된다.
+
 ## 빠른 시작 (Quickstart)
 
 ```sh

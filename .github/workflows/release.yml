@@ -1,0 +1,77 @@
+name: Release
+
+# vX.Y.Z 태그를 푸시하면: (1) 테스트 통과 (2) 태그↔Cargo.toml 버전 일치 를 확인한
+# 뒤에만, 플랫폼별 `hwp` 바이너리를 빌드해 GitHub Release(아카이브 + sha256)로 게시한다.
+# 릴리스 절차: scripts/release.sh X.Y.Z  →  git push origin main && git push origin vX.Y.Z
+on:
+  push:
+    # glob 패턴(정규식 아님) — 멀티자리/프리릴리스 모두 매칭(v10.2.3, v0.2.0-rc1).
+    # 정확한 버전 검증은 아래 verify-version 잡이 담당한다.
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # 테스트 통과 게이트 — ci.yml 의 fmt/clippy/test 잡을 그대로 재사용(단일 진실).
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  # 버전 관리 게이트 — 태그가 Cargo.toml [workspace.package] version 과 일치해야 릴리스.
+  verify-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 태그 ↔ Cargo.toml 버전 일치 확인
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          ver=$(awk '/^\[workspace\.package\]/{p=1;next} /^\[/{p=0} p&&/^version[[:space:]]*=/{sub(/^version[[:space:]]*=[[:space:]]*"/,"");sub(/".*/,"");print;exit}' Cargo.toml)
+          echo "tag=$tag  Cargo.toml=$ver"
+          if [ "$tag" != "$ver" ]; then
+            echo "::error::태그 v$tag 가 Cargo.toml [workspace.package] version=$ver 와 불일치. scripts/release.sh 로 버전 bump 후 태깅하세요."
+            exit 1
+          fi
+
+  # 릴리스 셸 생성(커밋/PR 기반 자동 노트) — 한 번만. 이미 있으면 건너뜀(재실행 안전).
+  create-release:
+    needs: [test, verify-version]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: GitHub Release 생성
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+
+  # 플랫폼별 `hwp` 바이너리 빌드 → 아카이브(tar.gz/zip) + sha256 을 릴리스에 업로드.
+  upload-assets:
+    needs: create-release
+    strategy:
+      fail-fast: false # 한 타깃 실패가 다른 타깃을 취소하지 않게
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      # 릴리스 바이너리는 stable 로 빌드(최신 최적화). MSRV 호환은 test 잡이 이미 보장.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: hwp
+          target: ${{ matrix.target }}
+          archive: $bin-$tag-$target
+          checksum: sha256
+          token: ${{ secrets.GITHUB_TOKEN }}
