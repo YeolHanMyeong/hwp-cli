@@ -5,7 +5,13 @@
 
 pub const MIMETYPE: &str = "application/hwp+zip";
 
-pub const VERSION_XML: &str = r##"<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hv:HCFVersion xmlns:hv="http://www.hancom.co.kr/hwpml/2011/version" tagetApplication="WORDPROCESSOR" major="5" minor="1" micro="1" buildNumber="0" os="1" xmlVersion="1.5" application="hwp-cli" appVersion="0.2.0"/>"##;
+// appVersion 은 작성 프로그램(hwp-cli) 버전 메타데이터라 크레이트 버전을 따른다
+// (major/minor/micro/xmlVersion 등 포맷 호환 상수는 고정 — 절대 변경 금지).
+pub const VERSION_XML: &str = concat!(
+    r##"<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><hv:HCFVersion xmlns:hv="http://www.hancom.co.kr/hwpml/2011/version" tagetApplication="WORDPROCESSOR" major="5" minor="1" micro="1" buildNumber="0" os="1" xmlVersion="1.5" application="hwp-cli" appVersion=""##,
+    env!("CARGO_PKG_VERSION"),
+    r##""/>"##
+);
 
 pub const CONTAINER_XML: &str = r##"<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><ocf:container xmlns:ocf="urn:oasis:names:tc:opendocument:xmlns:container" xmlns:hpf="http://www.hancom.co.kr/schema/2011/hpf"><ocf:rootfiles><ocf:rootfile full-path="Contents/content.hpf" media-type="application/hwpml-package+xml"/><ocf:rootfile full-path="Preview/PrvText.txt" media-type="text/plain"/><ocf:rootfile full-path="META-INF/container.rdf" media-type="application/rdf+xml"/></ocf:rootfiles></ocf:container>"##;
 

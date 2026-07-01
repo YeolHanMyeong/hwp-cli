@@ -63,6 +63,15 @@ pub fn run(
         );
     }
 
+    // 자리표시자 치환은 HWPX(ZIP) 패키지 외과 수술 전용 — .hwp는 모호한 ZIP 오류 대신 명확히 거절.
+    // (.hwp 표 채우기는 위 --data tables 경로가 IR로 처리한다.)
+    if crate::format::detect(input)? != crate::format::FileFormat::Hwpx {
+        anyhow::bail!(
+            "{}: 자리표시자 치환(기본 fill)은 HWPX 입력 전용입니다 (.hwp는 --data의 tables 표 채우기만 지원)",
+            input.display()
+        );
+    }
+
     let counts = hwpx::patch::fill_placeholders(input, output, &values)
         .map_err(|e| anyhow::anyhow!("fill 실패: {e}"))?;
     let total: usize = counts.values().sum();

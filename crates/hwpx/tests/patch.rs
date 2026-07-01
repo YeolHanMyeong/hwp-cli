@@ -96,3 +96,28 @@ fn fill_reports_unfilled_as_zero() {
     let _ = std::fs::remove_file(&src);
     let _ = std::fs::remove_file(&out);
 }
+
+#[test]
+fn fill_동일_입출력_경로_거부() {
+    // 제자리 치환(input==output)은 File::create(O_TRUNC)가 입력을 먼저 비워 손상되므로
+    // 즉시 거부돼야 한다(입력 파일은 그대로 보존).
+    let dir = std::env::temp_dir();
+    let f = dir.join("hwpx_patch_inplace.hwpx");
+    build_fixture(&f);
+    let orig_len = std::fs::metadata(&f).unwrap().len();
+
+    let mut values = BTreeMap::new();
+    values.insert("기관명".to_string(), "x".to_string());
+    let err = hwpx::patch::fill_placeholders(&f, &f, &values).unwrap_err();
+    assert!(
+        err.to_string().contains("같습니다"),
+        "동일 경로는 거부돼야: {err}"
+    );
+    assert_eq!(
+        std::fs::metadata(&f).unwrap().len(),
+        orig_len,
+        "거부는 truncate 이전 — 입력 보존"
+    );
+
+    let _ = std::fs::remove_file(&f);
+}

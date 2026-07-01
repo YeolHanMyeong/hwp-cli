@@ -94,6 +94,11 @@ fn validate_hwpx(path: &Path, errors: &mut Vec<String>, warnings: &mut Vec<Strin
     if !names.iter().any(|n| n.starts_with("Contents/section")) {
         errors.push("본문 섹션(Contents/section*.xml) 없음".to_string());
     }
+    // 패키징 규칙: mimetype이 첫 엔트리여야 한다(write 경로가 강제하는 불변식). 리더는
+    // 이름으로 읽어 순서가 어긋나도 열리므로 하드 에러 대신 경고로만 표면화한다.
+    if names.first().map(String::as_str) != Some("mimetype") {
+        warnings.push("mimetype이 첫 엔트리가 아님 (패키징 규칙 위반)".to_string());
+    }
 
     match hwpx::read_document(path) {
         Ok(r) => warnings.extend(r.warnings),

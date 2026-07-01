@@ -31,7 +31,9 @@ fn read_lpwstr(b: &[u8], off: usize) -> Option<String> {
     }
     let count = u32_at(b, off + 4)? as usize; // 코드 유닛 수(널 종단자 포함)
     let chars_start = off + 8;
-    let mut units = Vec::with_capacity(count.saturating_sub(1));
+    // 손상/악의 count(최대 ~8.5GB 예약) 방어: 남은 바이트 기준 상한으로 capacity 클램프.
+    let max_units = b.len().saturating_sub(chars_start) / 2;
+    let mut units = Vec::with_capacity(count.saturating_sub(1).min(max_units));
     for i in 0..count {
         let u = u16_at(b, chars_start + i * 2)?;
         if u == 0 {

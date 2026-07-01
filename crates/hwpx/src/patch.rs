@@ -23,6 +23,18 @@ pub fn fill_placeholders(
     output: &Path,
     values: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, usize>> {
+    // 제자리 치환 방지: input==output이면 File::create(O_TRUNC)가 입력을 먼저 비워
+    // 스트리밍 복사가 손상된다. canonicalize로 ./·심링크·상대경로까지 비교(출력이
+    // 아직 없으면 canonicalize 실패 → 같을 수 없으므로 통과).
+    if let (Ok(a), Ok(b)) = (input.canonicalize(), output.canonicalize())
+        && a == b
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "입력과 출력 경로가 같습니다 (제자리 치환 미지원): 다른 출력 경로를 지정하세요",
+        )
+        .into());
+    }
     let reader = File::open(input)?;
     let mut archive = zip::ZipArchive::new(reader)?;
     let out = File::create(output)?;

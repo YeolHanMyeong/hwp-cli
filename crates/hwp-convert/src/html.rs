@@ -89,20 +89,24 @@ fn render_paragraph(doc: &Document, para: &Paragraph, out: &mut String) {
         .and_then(|n| n.trim().parse::<usize>().ok())
         .filter(|n| (1..=6).contains(n));
 
-    let body = render_inline(doc, para, out);
+    // 블록(표 등)은 별도 버퍼에 모아 문단 텍스트 뒤에 append — 출력 순서 문단→블록 보존
+    // (odt.rs 와 동일). 이전엔 render_inline 이 블록을 out 에 바로 써 표가 <p> 앞에 나왔다.
+    let mut blocks = String::new();
+    let body = render_inline(doc, para, &mut blocks);
     let body = body.trim_end();
-    if body.is_empty() {
-        return;
+    if !body.is_empty() {
+        if let Some(level) = heading {
+            out.push_str(&format!("<h{level}>"));
+            out.push_str(body);
+            out.push_str(&format!("</h{level}>\n"));
+        } else {
+            out.push_str("<p>");
+            out.push_str(body);
+            out.push_str("</p>\n");
+        }
     }
-    if let Some(level) = heading {
-        out.push_str(&format!("<h{level}>"));
-        out.push_str(body);
-        out.push_str(&format!("</h{level}>\n"));
-    } else {
-        out.push_str("<p>");
-        out.push_str(body);
-        out.push_str("</p>\n");
-    }
+    // 블록은 텍스트 유무와 무관하게 항상 flush(표만 있는 문단이 누락되지 않게).
+    out.push_str(&blocks);
 }
 
 /// 문단의 인라인 내용을 HTML 문자열로 반환한다.
