@@ -171,6 +171,39 @@ impl FontStore {
         result
     }
 
+    /// 주어진 문자에 (.notdef 아닌) 글리프가 있는 커버리지 폴백 글꼴을 찾는다
+    /// (함초롬 우선 → CJK 폴백). 주 글꼴이 특정 글자를 못 가질 때 그 글자만 이
+    /// 글꼴로 바꿔 두부(□) 글리프를 방지한다. 문자별 결과를 캐시한다.
+    pub fn font_covering(&mut self, c: char) -> Option<Arc<LoadedFont>> {
+        const COVERAGE_FALLBACKS: &[&str] = &[
+            "함초롬바탕",
+            "HCR Batang",
+            "함초롬돋움",
+            "HCR Dotum",
+            "Noto Serif CJK KR",
+            "Noto Sans CJK KR",
+            "NanumMyeongjo",
+            "NanumGothic",
+            "Apple SD Gothic Neo",
+            "AppleMyungjo",
+        ];
+        let key = format!("\u{1}cover:{}", c as u32);
+        if let Some(cached) = self.resolved.get(&key) {
+            return cached.clone();
+        }
+        let mut result = None;
+        for name in COVERAGE_FALLBACKS {
+            if let Some(font) = self.try_family(name)
+                && font_has_char(&font, c)
+            {
+                result = Some(font);
+                break;
+            }
+        }
+        self.resolved.insert(key, result.clone());
+        result
+    }
+
     fn try_family(&mut self, name: &str) -> Option<Arc<LoadedFont>> {
         let id = self.db.query(&Query {
             families: &[Family::Name(name)],
@@ -209,4 +242,12 @@ impl Default for FontStore {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 글꼴이 해당 문자에 (.notdef 아닌) 글리프를 갖는지.
+fn font_has_char(font: &LoadedFont, c: char) -> bool {
+    rustybuzz::ttf_parser::Face::parse(&font.data, font.index)
+        .ok()
+        .and_then(|f| f.glyph_index(c))
+        .is_some_and(|g| g.0 != 0)
 }

@@ -206,9 +206,12 @@ pub fn shape_range_notes(
             continue;
         }
         let shape = doc.header.char_shapes.get(piece.shape_id as usize);
-        match shape_piece(store, doc, shape, piece.lang, &piece.text, piece.start) {
-            Some(run) => out.push(InlineItem::Run(run)),
-            None => warnings.push(format!("셰이핑 실패: {:?}", piece.text)),
+        let runs = shape_piece(store, doc, shape, piece.lang, &piece.text, piece.start);
+        if runs.is_empty() {
+            warnings.push(format!("셰이핑 실패: {:?}", piece.text));
+        }
+        for run in runs {
+            out.push(InlineItem::Run(run));
         }
     }
     for (_, item) in item_iter {
@@ -217,6 +220,9 @@ pub fn shape_range_notes(
     out
 }
 
+/// 한 조각을 셰이핑한다. 해석된 주 글꼴이 일부 글자를 갖지 않으면(.notdef) 그
+/// 글자만 커버리지 폴백 글꼴로 바꿔, 글꼴 경계마다 별도 [`ShapedRun`]으로 나눈다
+/// (예: macOS "휴먼명조"에 ❍(U+274D)가 없을 때 함초롬/Noto로 폴백 — 두부(□) 방지).
 fn shape_piece(
     store: &mut FontStore,
     doc: &Document,
@@ -224,12 +230,69 @@ fn shape_piece(
     lang: usize,
     text: &str,
     start_wchar: u32,
-) -> Option<ShapedRun> {
+) -> Vec<ShapedRun> {
     let default_shape = CharShape::default();
     let cs = shape.unwrap_or(&default_shape);
     let face_id = cs.face_ids.get(lang).copied().unwrap_or(0);
-    let font = store.resolve(doc, lang, face_id)?;
+    let Some(primary) = store.resolve(doc, lang, face_id) else {
+        return Vec::new();
+    };
 
+    // 요청 글꼴이 굵은(heavy) 계열인데 대체 글꼴엔 굵은 페이스가 없으면 faux-bold로
+    // 보강한다(예: HY견고딕/헤드라인M → 함초롬돋움 regular).
+    let face_name = doc
+        .header
+        .fonts
+        .get(lang)
+        .and_then(|f| f.get(face_id as usize))
+        .map(|f| f.name.as_str())
+        .unwrap_or("");
+    let bold = cs.is_bold() || is_heavy_name(face_name);
+
+    // 글자별 글꼴 배정: primary가 글리프를 가지면 primary, 아니면 커버리지 폴백.
+    let primary_face = rustybuzz::ttf_parser::Face::parse(&primary.data, primary.index).ok();
+    let primary_covers = |c: char| {
+        // 공백·제어는 항상 primary 사용(불필요한 폴백 분할 방지).
+        c.is_whitespace()
+            || primary_face
+                .as_ref()
+                .and_then(|f| f.glyph_index(c))
+                .is_some_and(|g| g.0 != 0)
+    };
+
+    // (글꼴, 텍스트, 시작 wchar) 세그먼트로 분할 — Text 글자는 각 1 wchar.
+    let mut segments: Vec<(Arc<LoadedFont>, String, u32)> = Vec::new();
+    for (cur, c) in (start_wchar..).zip(text.chars()) {
+        let font = if primary_covers(c) {
+            primary.clone()
+        } else {
+            store.font_covering(c).unwrap_or_else(|| primary.clone())
+        };
+        match segments.last_mut() {
+            Some((f, t, _)) if Arc::ptr_eq(f, &font) => t.push(c),
+            _ => segments.push((font, c.to_string(), cur)),
+        }
+    }
+
+    segments
+        .into_iter()
+        .filter_map(|(font, seg_text, seg_start)| {
+            shape_with_font(&font, cs, lang, &seg_text, seg_start, bold)
+        })
+        .collect()
+}
+
+/// 주어진 글꼴 하나로 텍스트를 셰이핑해 [`ShapedRun`]을 만든다(첨자·자간·장평·
+/// 음영/그림자/외곽선/양각/음각 효과 필드까지 채운다). `bold`는 호출부가 결정
+/// (요청이 굵음이거나, 굵은 페이스 없는 heavy 글꼴이라 faux-bold가 필요할 때 true).
+fn shape_with_font(
+    font: &Arc<LoadedFont>,
+    cs: &CharShape,
+    lang: usize,
+    text: &str,
+    start_wchar: u32,
+    bold: bool,
+) -> Option<ShapedRun> {
     let face = rustybuzz::Face::from_slice(&font.data, font.index)?;
     let upem = face.units_per_em() as f32;
 
@@ -278,11 +341,11 @@ fn shape_piece(
     }
 
     Some(ShapedRun {
-        font,
+        font: font.clone(),
         size_pt,
         x_scale,
         color: cs.text_color,
-        bold: cs.is_bold(),
+        bold,
         italic: cs.is_italic(),
         underline: cs.has_underline(),
         strike: cs.has_strike(),
@@ -301,6 +364,22 @@ fn shape_piece(
         text: text.to_string(),
         start_wchar,
     })
+}
+
+/// 글꼴 이름이 굵은(heavy/bold) 계열인지 — 대체 글꼴 faux-bold 판단용.
+fn is_heavy_name(name: &str) -> bool {
+    const HEAVY: &[&str] = &[
+        "견고딕",
+        "견명조",
+        "헤드라인",
+        "굵은",
+        "Heavy",
+        "Black",
+        "ExtraBold",
+        "Ultra",
+        "Bold",
+    ];
+    HEAVY.iter().any(|k| name.contains(k))
 }
 
 /// 하이퍼링크 색(COLORREF 0x00BBGGRR = 파랑).
@@ -380,7 +459,10 @@ pub fn shape_plain(
     } else {
         1
     };
+    // 링크/마커는 단일 런만 사용 — 첫 세그먼트만 취한다(글자별 폴백은 본문 텍스트 전용).
     shape_piece(store, doc, Some(&cs), lang, text, 0)
+        .into_iter()
+        .next()
 }
 
 /// 각주/미주 본문 마커(윗첨자 번호). 주변 글자모양을 따라 ~65% 크기로 줄이고
@@ -407,7 +489,10 @@ fn note_mark_run(
     cs.base_size = ((base_size as f32) * 0.65).max(500.0) as i32;
     cs.attr = 0; // 마커엔 굵게/기울임 등 합성 효과 불필요
     let text = number.to_string();
-    let mut run = shape_piece(store, doc, Some(&cs), 1, &text, pos)?;
+    // 마커는 단일 런(숫자) — 첫 세그먼트만 취한다.
+    let mut run = shape_piece(store, doc, Some(&cs), 1, &text, pos)
+        .into_iter()
+        .next()?;
     // 윗첨자: 위로 올림(y-up 좌표, 백엔드가 baseline-y에서 y_offset만큼 올림).
     let raise = (base_size as f32 / 100.0) * 0.34;
     for g in &mut run.glyphs {
