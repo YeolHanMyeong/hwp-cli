@@ -175,10 +175,11 @@ fn apply_format(mut cs: CharShape, fmt: &CharFormat) -> CharShape {
         }
     }
     if let Some(s) = fmt.strike {
-        cs.attr &= !(0x7 << 18); // 취소선 비트 18~20
+        cs.attr &= !(0x7 << 18); // 취소선 비트 18~20 (바이트 왕복 보존)
         if s {
             cs.attr |= 1 << 18;
         }
+        cs.strike = s; // 의미 플래그 — has_strike/렌더/hwpx SOLID 쓰기 근거
     }
     if let Some(sz) = fmt.size_pt {
         cs.base_size = (sz * 100.0).round().max(100.0) as i32;

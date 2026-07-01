@@ -223,7 +223,8 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
                             let shape = attr(e, "shape");
                             let visible = matches!(shape.as_deref(), Some(s) if s != "NONE" && !s.contains("3D"));
                             if visible {
-                                cs.attr |= 1 << 18;
+                                cs.attr |= 1 << 18; // 바이트 왕복 보존
+                                cs.strike = true; // 의미 플래그 (has_strike 근거)
                             }
                         }
                     }
