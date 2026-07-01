@@ -39,7 +39,7 @@ semver_ok "$ver" || { echo "오류: 시맨틱 버전 형식이 아닙니다: '$v
 cd "$(git rev-parse --show-toplevel)"
 
 [ -z "$(git status --porcelain)" ] || { echo "오류: 작업 트리가 깨끗하지 않습니다. 커밋/스태시 후 다시 실행하세요." >&2; exit 1; }
-if git rev-parse "v$ver" >/dev/null 2>&1; then
+if git rev-parse -q --verify "refs/tags/v$ver" >/dev/null; then
   echo "오류: 태그 v$ver 가 이미 존재합니다." >&2; exit 1
 fi
 
