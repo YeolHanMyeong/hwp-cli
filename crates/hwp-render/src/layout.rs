@@ -298,6 +298,7 @@ pub fn layout_document(
                     body_left,
                     para_top.unwrap_or(content_bottom),
                     content_bottom,
+                    body_width,
                     warnings,
                 );
                 continue;
@@ -395,6 +396,7 @@ pub fn layout_document(
                 body_left,
                 para_top.unwrap_or(content_bottom),
                 content_bottom,
+                body_width,
                 warnings,
             );
         }
@@ -663,6 +665,7 @@ fn layout_para_objects(
     x: f32,
     anchor_top: f32,
     content_bottom: f32,
+    avail_width: f32,
     warnings: &mut Vec<String>,
 ) -> f32 {
     let mut bottom = content_bottom;
@@ -671,7 +674,7 @@ fn layout_para_objects(
     for control in &para.controls {
         match control {
             Control::Table(table) => {
-                let h = layout_table(doc, store, page, table, x, object_y, warnings);
+                let h = layout_table(doc, store, page, table, x, object_y, avail_width, warnings);
                 bottom = bottom.max(object_y + h);
                 object_y += h; // 한 문단에 개체가 여럿이면 세로로 이어 배치
             }
@@ -850,6 +853,7 @@ fn cell_margins(table: &Table, cell: &hwp_model::Cell) -> (f32, f32, f32, f32) {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn layout_table(
     doc: &Document,
     store: &mut FontStore,
@@ -857,6 +861,7 @@ fn layout_table(
     table: &Table,
     x: f32,
     y: f32,
+    avail_width: f32,
     warnings: &mut Vec<String>,
 ) -> f32 {
     let cols = table.cols.max(1) as usize;
@@ -874,7 +879,7 @@ fn layout_table(
             row_h[r] = row_h[r].max(cell.height.to_pt() as f32);
         }
     }
-    derive_col_widths(&mut col_w, table);
+    derive_col_widths(&mut col_w, table, avail_width);
     fill_unknown(&mut row_h, 18.0);
 
     // 측정 패스: 실제 내용 높이로 행 높이를 확장한다(저장된 cell.height는 한글의 줄바꿈
@@ -1296,6 +1301,7 @@ fn layout_box_para_iter<'a>(
             origin_x,
             para_top.unwrap_or(content_bottom),
             content_bottom,
+            width,
             warnings,
         );
         if content_bottom > before_objects {
@@ -1306,9 +1312,10 @@ fn layout_box_para_iter<'a>(
 }
 
 /// 열 폭 확정: `col_span==1`로 못 정한 열을 병합 셀(`col_span>1`)에서 유도하고, 표의 실제
-/// 총 폭(행별 셀 폭 합의 최대)에 맞춰 스케일한다. 병합 위주 표가 평균 폴백으로 페이지를
-/// 넘던 문제(잉크 초과)를 해소한다. 정상 표(전부 `col_span==1`)는 스케일 s≈1이라 무영향.
-fn derive_col_widths(col_w: &mut [f32], table: &Table) {
+/// 총 폭(행별 셀 폭 합의 최대)에 맞춰 스케일한다. 표 실제 폭이 가용 폭(`avail_width`,
+/// 본문/셀 폭)을 넘으면 가용 폭에 맞춰 축소한다(한글 동작). 병합 위주 표가 평균 폴백으로
+/// 페이지를 넘던 문제(잉크 초과)를 해소한다. 정상 표(실제 폭 ≤ 가용)는 s≈1이라 무영향.
+fn derive_col_widths(col_w: &mut [f32], table: &Table, avail_width: f32) {
     let cols = col_w.len();
     // 1) 병합 셀에서 미지 열 유도 (작은 병합 먼저 확정해야 큰 병합이 남은 미지에 정확히 배분).
     let mut spanning: Vec<_> = table.cells.iter().filter(|c| c.col_span > 1).collect();
@@ -1331,11 +1338,15 @@ fn derive_col_widths(col_w: &mut [f32], table: &Table) {
     }
     // 2) 그래도 미지면 평균 폴백(기존 동작).
     fill_unknown(col_w, 60.0);
-    // 3) 표의 실제 총 폭에 스케일(유도 잔차 보정 + 안전망). 정상 표는 sum==table_width라 s=1.
-    let table_width = table_true_width(table);
+    // 3) 스케일 목표 = 표 실제 폭(유도 잔차 보정 + 안전망), 단 가용 폭 초과 시 가용 폭에
+    //    맞춘다(한글 축소 동작). 정상 표는 sum==table_width≤avail라 s=1.
+    let mut target = table_true_width(table);
+    if avail_width > 0.0 && target > avail_width {
+        target = avail_width;
+    }
     let sum: f32 = col_w.iter().sum();
-    if table_width > 0.0 && sum > 0.0 {
-        let s = table_width / sum;
+    if target > 0.0 && sum > 0.0 {
+        let s = target / sum;
         for w in col_w.iter_mut() {
             *w *= s;
         }
@@ -1875,7 +1886,7 @@ mod table_width_tests {
         }
         assert_eq!(col_w, vec![80.0, 0.0, 100.0]); // col1 미지
 
-        derive_col_widths(&mut col_w, &t);
+        derive_col_widths(&mut col_w, &t, f32::MAX); // 캡 무발동
         assert!((col_w[1] - 120.0).abs() < 0.01, "col1 유도값: {col_w:?}");
         assert!(col_w.iter().all(|w| *w > 0.0), "미지 열 없어야: {col_w:?}");
         assert!(
@@ -1894,7 +1905,26 @@ mod table_width_tests {
         ];
         let t = table(1, 3, cells);
         let mut col_w = vec![100.0f32, 150.0, 50.0];
-        derive_col_widths(&mut col_w, &t);
+        derive_col_widths(&mut col_w, &t, f32::MAX); // 캡 무발동
         assert_eq!(col_w, vec![100.0, 150.0, 50.0]);
+    }
+
+    /// 표 실제 폭(300pt)이 가용 폭(150pt)을 넘으면 가용 폭에 맞춰 축소하되 비율 유지.
+    #[test]
+    fn 본문폭_초과_표_축소() {
+        let cells = vec![
+            cell(0, 0, 1, 10000),
+            cell(1, 0, 1, 15000),
+            cell(2, 0, 1, 5000),
+        ];
+        let t = table(1, 3, cells); // 실제 폭 300pt
+        let mut col_w = vec![100.0f32, 150.0, 50.0];
+        derive_col_widths(&mut col_w, &t, 150.0);
+        let sum: f32 = col_w.iter().sum();
+        assert!((sum - 150.0).abs() < 0.5, "가용 폭 150pt로 축소: {col_w:?}");
+        // 상대 비율 2:3:1 유지.
+        assert!((col_w[0] - 50.0).abs() < 0.5, "{col_w:?}");
+        assert!((col_w[1] - 75.0).abs() < 0.5, "{col_w:?}");
+        assert!((col_w[2] - 25.0).abs() < 0.5, "{col_w:?}");
     }
 }
