@@ -247,6 +247,59 @@ fn write_paragraph(
                             esc(&name)
                         );
                     }
+                    Control::Generic(g) if g.ctrl_id == *b"pgnp" && g.data.len() >= 12 => {
+                        // 쪽번호 위치 — reader build_pgnp의 역(12B: props[format|pos<<8] +
+                        // 6B 0 + side_char u16). 정답지: 한글 export <hp:pageNum>.
+                        open_run!(cur_shape);
+                        flush_text(out, &mut text_buf);
+                        let props =
+                            u32::from_le_bytes([g.data[0], g.data[1], g.data[2], g.data[3]]);
+                        let side = u16::from_le_bytes([g.data[10], g.data[11]]);
+                        let side_s = char::from_u32(u32::from(side))
+                            .filter(|c| *c != '\0')
+                            .map(String::from)
+                            .unwrap_or_default();
+                        let _ = write!(
+                            out,
+                            r##"<hp:ctrl><hp:pageNum pos="{}" formatType="DIGIT" sideChar="{}"/></hp:ctrl>"##,
+                            page_num_pos_name(((props >> 8) & 0xFF) as u8),
+                            esc(&side_s),
+                        );
+                    }
+                    Control::Generic(g) if g.ctrl_id == *b"pghd" && g.data.len() >= 4 => {
+                        // 쪽 감추기 — reader build_pghd의 역(4B 비트맵).
+                        open_run!(cur_shape);
+                        flush_text(out, &mut text_buf);
+                        let mask = u32::from_le_bytes([g.data[0], g.data[1], g.data[2], g.data[3]]);
+                        let b = |bit: u32| u8::from(mask & (1 << bit) != 0);
+                        let _ = write!(
+                            out,
+                            r##"<hp:ctrl><hp:pageHiding hideHeader="{}" hideFooter="{}" hideMasterPage="{}" hideBorder="{}" hideFill="{}" hidePageNum="{}"/></hp:ctrl>"##,
+                            b(0),
+                            b(1),
+                            b(2),
+                            b(3),
+                            b(4),
+                            b(5),
+                        );
+                    }
+                    Control::Generic(g) if g.ctrl_id == *b"nwno" && g.data.len() >= 6 => {
+                        // 새 번호 지정 — reader build_nwno의 역(종류 u32 + num u16).
+                        open_run!(cur_shape);
+                        flush_text(out, &mut text_buf);
+                        let num = u16::from_le_bytes([g.data[4], g.data[5]]);
+                        let _ = write!(
+                            out,
+                            r##"<hp:ctrl><hp:newNum num="{num}" numType="PAGE"/></hp:ctrl>"##,
+                        );
+                    }
+                    Control::Generic(g) if g.ctrl_id == *b"atno" => {
+                        // 자동 번호(쪽) — 코퍼스 export에 인라인 정답지가 없어 표준형으로
+                        // 방출(v1). 페이로드는 reader build_atno가 실측 표준 12B로 복원.
+                        open_run!(cur_shape);
+                        flush_text(out, &mut text_buf);
+                        out.push_str(r##"<hp:ctrl><hp:autoNum numType="PAGE"/></hp:ctrl>"##);
+                    }
                     Control::Generic(g) if !g.gso_shapes.is_empty() => {
                         // hwpx-출신 구조화 도형(rect/ellipse/line/…) — ShapeGeom 재직렬화.
                         open_run!(cur_shape);
@@ -516,6 +569,23 @@ fn write_draw_text(
         }
     }
     out.push_str("</hp:subList></hp:drawText>");
+}
+
+/// hwp5 쪽번호 위치 코드 → OWPML pos 속성(reader `build_pgnp` 역매핑).
+fn page_num_pos_name(code: u8) -> &'static str {
+    match code {
+        1 => "TOP_LEFT",
+        2 => "TOP_CENTER",
+        3 => "TOP_RIGHT",
+        4 => "BOTTOM_LEFT",
+        5 => "BOTTOM_CENTER",
+        6 => "BOTTOM_RIGHT",
+        7 => "OUTSIDE_TOP",
+        8 => "OUTSIDE_BOTTOM",
+        9 => "INSIDE_TOP",
+        10 => "INSIDE_BOTTOM",
+        _ => "NONE",
+    }
 }
 
 /// gso 공통 헤더의 attr 비트 + 오프셋으로 `<hp:pos …/>` 를 만든다(⑱ 역매핑 — 쌍 대조 검증).

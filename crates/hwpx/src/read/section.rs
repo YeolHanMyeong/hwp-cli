@@ -427,6 +427,16 @@ fn build_pghd(e: &BytesStart<'_>) -> Vec<u8> {
     mask.to_le_bytes().to_vec()
 }
 
+/// hwpx `<hp:autoNum/>` → hwp5 atno(자동 번호) 12B. 실측 표준값(사업계획서.hwp 전수
+/// `0u32, 4u32, 0u32` — 쪽 번호 자동): 종류/모양 세부 해석은 정답지 확보 후 정밀화.
+fn build_atno() -> Vec<u8> {
+    let mut v = Vec::with_capacity(12);
+    v.extend_from_slice(&0u32.to_le_bytes());
+    v.extend_from_slice(&4u32.to_le_bytes());
+    v.extend_from_slice(&0u32.to_le_bytes());
+    v
+}
+
 /// hwpx `<hp:newNum num/>` → hwp5 nwno(새 번호 지정) 6B. `종류(u32=0,PAGE)` + `번호(u16)`.
 /// 정품 실측: num=1 → `000000000100`.
 fn build_nwno(e: &BytesStart<'_>) -> Vec<u8> {
@@ -517,7 +527,9 @@ fn parse_ctrl(
                     b"footer" => (*b"foot", 16, head_foot_data(e)),
                     b"footNote" => (*b"fn  ", 17, Vec::new()),
                     b"endNote" => (*b"en  ", 17, Vec::new()),
-                    b"autoNum" => (*b"atno", 18, Vec::new()),
+                    // 자동 번호(쪽): 실측 표준 페이로드 12B(사업계획서.hwp 전수 동일) 복원.
+                    // 빈 페이로드면 hwp5 writer의 strip이 드롭한다(왕복 갭 방지).
+                    b"autoNum" => (*b"atno", 18, build_atno()),
                     b"pageNum" => (*b"pgnp", 21, build_pgnp(e)),
                     b"pageHiding" => (*b"pghd", 21, build_pghd(e)),
                     b"newNum" => (*b"nwno", 21, build_nwno(e)),

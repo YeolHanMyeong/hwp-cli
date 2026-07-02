@@ -492,3 +492,98 @@ fn 장식_도형_hwp5출신_hwpx_왕복() {
     // 글자처럼취급(gso attr bit0=1)이 anchored로 복원 — 재렌더 시 흐름 위치 배치의 근거.
     assert!(s.anchored, "treatAsChar=1 → anchored");
 }
+
+/// 쪽 컨트롤(쪽번호/감추기/새번호/자동번호)이 hwpx 왕복에서 hwp5 페이로드를 바이트
+/// 동일하게 복원한다 — writer(속성 방출)와 reader(build_*)가 정확한 역쌍임을 단정.
+/// 이전엔 writer가 전부 드롭(코퍼스 87건).
+#[test]
+fn 쪽_컨트롤_hwpx_페이로드_왕복() {
+    use hwp_model::{Control, GenericControl, HwpChar};
+
+    // (ctrl_id, code, payload) — reader build_* 레이아웃/실측 표준값.
+    let mut pgnp = vec![0u8; 12];
+    pgnp[0..4].copy_from_slice(&(5u32 << 8).to_le_bytes()); // BOTTOM_CENTER
+    pgnp[10..12].copy_from_slice(&(u16::from(b'-')).to_le_bytes());
+    let pghd = 0x21u32.to_le_bytes().to_vec(); // 머리말+쪽번호 감춤(정품 실측 표지값)
+    let mut nwno = vec![0u8; 6];
+    nwno[4..6].copy_from_slice(&7u16.to_le_bytes());
+    let atno = {
+        let mut v = Vec::new();
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&4u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v
+    };
+    let specs: Vec<([u8; 4], u16, Vec<u8>)> = vec![
+        (*b"pgnp", 21, pgnp),
+        (*b"pghd", 21, pghd),
+        (*b"nwno", 21, nwno),
+        (*b"atno", 18, atno),
+    ];
+
+    let mut doc = hwp_convert::from_markdown("본문\n\n둘째");
+    let para = &mut doc.sections[0].paragraphs[1];
+    for (cid, code, data) in &specs {
+        let idx = para.controls.len() as u32;
+        para.chars.push(HwpChar::ExtCtrl {
+            code: *code,
+            ctrl_id: *cid,
+            payload: vec![0u8; 12],
+            ctrl_index: Some(idx),
+        });
+        para.controls.push(Control::Generic(GenericControl {
+            ctrl_id: *cid,
+            data: data.clone(),
+            paragraph_lists: Vec::new(),
+            extras: Vec::new(),
+            raw_children: Vec::new(),
+            gso_shapes: Vec::new(),
+            equation: None,
+        }));
+    }
+    para.header.ctrl_mask = 0;
+
+    let out = tmp("page_ctrls.hwpx");
+    let warnings = hwpx::write_document(&doc, &out).unwrap();
+    assert!(!warnings.iter().any(|w| w.contains("DROP")), "{warnings:?}");
+
+    // XML 정답지 형식 확인.
+    let bytes = std::fs::read(&out).unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut xml = String::new();
+    {
+        use std::io::Read as _;
+        zip.by_name("Contents/section0.xml")
+            .unwrap()
+            .read_to_string(&mut xml)
+            .unwrap();
+    }
+    assert!(
+        xml.contains(r#"<hp:pageNum pos="BOTTOM_CENTER" formatType="DIGIT" sideChar="-"/>"#),
+        "pageNum: {xml}"
+    );
+    assert!(
+        xml.contains(r#"hideHeader="1""#) && xml.contains(r#"hidePageNum="1""#),
+        "pageHiding: {xml}"
+    );
+    assert!(
+        xml.contains(r#"<hp:newNum num="7" numType="PAGE"/>"#),
+        "newNum: {xml}"
+    );
+    assert!(xml.contains("<hp:autoNum "), "autoNum: {xml}");
+
+    // 재읽기 → 페이로드 바이트 동일.
+    let reread = hwpx::read_document(&out).unwrap().document;
+    for (cid, _, want) in &specs {
+        let got = reread.sections[0]
+            .paragraphs
+            .iter()
+            .flat_map(|p| &p.controls)
+            .find_map(|c| match c {
+                Control::Generic(g) if g.ctrl_id == *cid => Some(&g.data),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{} 재읽기 실패", String::from_utf8_lossy(cid)));
+        assert_eq!(got, want, "{} 페이로드 왕복", String::from_utf8_lossy(cid));
+    }
+}
