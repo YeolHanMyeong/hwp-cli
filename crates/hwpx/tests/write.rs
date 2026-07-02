@@ -349,6 +349,7 @@ fn 도형_shapegeom_hwpx_왕복() {
         border_style: 1, // DASH
         arrow_start: 0,
         arrow_end: 0,
+        anchored: false,
     };
     let poly = ShapeGeom {
         kind: ShapeKind::Polygon,
@@ -365,6 +366,7 @@ fn 도형_shapegeom_hwpx_왕복() {
         border_style: 0,
         arrow_start: 0,
         arrow_end: 0,
+        anchored: false,
     };
     let gso = GenericControl {
         ctrl_id: *b"rect",
@@ -487,4 +489,6 @@ fn 장식_도형_hwp5출신_hwpx_왕복() {
     assert_eq!(s.kind, ShapeKind::Line);
     assert_eq!((s.w, s.h), (49608, 4));
     assert_eq!(s.border_width, 32);
+    // 글자처럼취급(gso attr bit0=1)이 anchored로 복원 — 재렌더 시 흐름 위치 배치의 근거.
+    assert!(s.anchored, "treatAsChar=1 → anchored");
 }

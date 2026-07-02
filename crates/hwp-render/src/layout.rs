@@ -785,9 +785,38 @@ fn layout_para_objects(
                 };
                 crate::shape_draw::draw_gso_shapes(g, origin, doc, page, warnings);
             }
-            // hwpx 구조화 도형(rect/ellipse/line/polygon/curve).
+            // hwpx 구조화 도형(rect/ellipse/line/polygon/curve) — 글상자 텍스트 포함.
             Control::Generic(g) if !g.gso_shapes.is_empty() => {
-                crate::shape_draw::draw_ir_shapes(&g.gso_shapes, page);
+                // 글자처럼(anchored) 도형은 흐름 위치로 이동(clone-조정 — 원본 불변).
+                let adjusted: Vec<hwp_model::ShapeGeom> = g
+                    .gso_shapes
+                    .iter()
+                    .map(|s| {
+                        let mut s2 = s.clone();
+                        if s.anchored {
+                            s2.x = (x * 100.0) as i32;
+                            s2.y = (object_y * 100.0) as i32;
+                        }
+                        s2
+                    })
+                    .collect();
+                crate::shape_draw::draw_ir_shapes(&adjusted, page);
+                // 글상자 텍스트: 첫 도형 bbox 안에 배치(v1 단일 단 — hwp5 arm의 다단은 미지원).
+                if !g.paragraph_lists.is_empty() {
+                    let s0 = &adjusted[0];
+                    let (bx, by) = (s0.x as f32 / 100.0, s0.y as f32 / 100.0);
+                    let bw = (s0.w as f32 / 100.0).max(8.0);
+                    let bh = s0.h as f32 / 100.0;
+                    let flat = g.paragraph_lists.iter().flat_map(|l| l.paragraphs.iter());
+                    let inner =
+                        layout_box_para_iter(doc, store, page, flat, bx, by, bw, warnings, None);
+                    if s0.anchored {
+                        // 흐름 전진(hwp5 인라인 글상자와 동형).
+                        let used = (inner - by).max(bh);
+                        bottom = bottom.max(by + used);
+                        object_y += used;
+                    }
+                }
             }
             // 수식(hp:equation) — 상자+스크립트 텍스트로 근사.
             Control::Generic(g) if g.equation.is_some() => {

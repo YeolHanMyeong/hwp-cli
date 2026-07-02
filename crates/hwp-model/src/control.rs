@@ -272,10 +272,17 @@ pub struct ShapeGeom {
     /// 선 끝 화살촉: 0=없음, 그 외=화살촉. Line에만 의미.
     #[serde(default, skip_serializing_if = "is_zero_u8")]
     pub arrow_end: u8,
+    /// 글자처럼 취급(hp:pos treatAsChar) — 참이면 x/y 대신 텍스트 흐름 위치에 배치.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub anchored: bool,
 }
 
 fn is_zero_u8(v: &u8) -> bool {
     *v == 0
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 /// 그러데이션 채움 명세(렌더러 display::Gradient로 변환).
