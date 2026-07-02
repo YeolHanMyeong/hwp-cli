@@ -416,6 +416,19 @@ pub fn rev_payload(ctrl_id: &[u8; 4]) -> Vec<u8> {
     p
 }
 
+/// FIELD_END(코드 4) payload(12B): 역순 ctrl_id 3바이트(`%` 제외) + 0.
+/// 정품 실측(테스트.hwp 한글 제작): %hlk END = `6b 6c 68 00`(="klh\0"). END payload가
+/// 전부 0이면 한글이 FIELD_START↔END 짝을 못 지어 필드 미완성 → **클릭 이동 불가**
+/// (4차 정답지 대조 확정). START는 `%`까지(4B) 담고 END는 `%`를 뺀 3B만 담는다.
+pub fn field_end_payload(ctrl_id: &[u8; 4]) -> Vec<u8> {
+    let mut p = vec![0u8; 12];
+    p[0] = ctrl_id[3];
+    p[1] = ctrl_id[2];
+    p[2] = ctrl_id[1];
+    // p[3] = 0 ('%' 마커는 END에 담지 않음)
+    p
+}
+
 /// CTRL_DATA Parameter Set: 필드 이름 BSTR 1개(setid0·count1·id1·BSTR).
 pub fn make_field_ctrl_data(name: &str) -> Vec<u8> {
     let mut cd = vec![0u8, 0, 1, 0]; // setid=0, count=1
@@ -515,7 +528,7 @@ fn make_field_chars(ctrl_id: [u8; 4], value: &str) -> Vec<HwpChar> {
     chars.extend(build_value_chars(value));
     chars.push(HwpChar::InlineCtrl {
         code: FIELD_END,
-        payload: vec![0u8; 12],
+        payload: field_end_payload(&ctrl_id),
     });
     chars
 }
@@ -969,6 +982,30 @@ mod tests {
             "링크 구간 뒤 원래 글자모양 복원: {:?}",
             para.char_shape_runs
         );
+    }
+
+    #[test]
+    fn field_end_payload_ctrl_id_담김() {
+        // 정품(테스트.hwp 한글 제작) FIELD_END = 역순 ctrl_id 3B(`%` 제외) + 0.
+        // %hlk END = 6b 6c 68 00…; 전부 0이면 한글이 필드 짝을 못 지어 클릭 불가.
+        assert_eq!(
+            field_end_payload(b"%hlk"),
+            vec![0x6b, 0x6c, 0x68, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        );
+        // 생성한 하이퍼링크의 FIELD_END(InlineCtrl 코드4) payload가 비영(ctrl_id 담김).
+        let mut doc = crate::from_markdown::from_markdown("여기: 자리");
+        assert!(create_hyperlink(&mut doc, "여기:", "https://x.io", "링크"));
+        let end = doc.sections[0].paragraphs[0]
+            .chars
+            .iter()
+            .find_map(|c| match c {
+                HwpChar::InlineCtrl { code, payload } if *code == FIELD_END => {
+                    Some(payload.clone())
+                }
+                _ => None,
+            })
+            .expect("FIELD_END");
+        assert_eq!(&end[..3], &[0x6b, 0x6c, 0x68], "END payload에 역순 ctrl_id");
     }
 
     #[test]

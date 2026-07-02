@@ -447,6 +447,27 @@ fn build_nwno(e: &BytesStart<'_>) -> Vec<u8> {
     v
 }
 
+/// para.chars에서 아직 닫히지 않은 가장 안쪽 FIELD_START(코드 3)의 ctrl_id를 찾는다(LIFO).
+/// fieldEnd는 아직 push 전이라 depth=0에서 뒤→앞 스캔(중첩 필드 대응).
+fn matching_field_start(chars: &[HwpChar]) -> Option<[u8; 4]> {
+    let mut depth = 0u32;
+    for ch in chars.iter().rev() {
+        match ch {
+            HwpChar::InlineCtrl { code: 4, .. } => depth += 1,
+            HwpChar::ExtCtrl {
+                code: 3, ctrl_id, ..
+            } => {
+                if depth == 0 {
+                    return Some(*ctrl_id);
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn parse_ctrl(
     reader: &mut XmlReader<'_>,
     para: &mut Paragraph,
@@ -493,10 +514,13 @@ fn parse_ctrl(
                     continue;
                 }
                 if name.as_slice() == b"fieldEnd" {
-                    para.chars.push(HwpChar::InlineCtrl {
-                        code: 4,
-                        payload: vec![0u8; 12],
-                    });
+                    // FIELD_END payload = 매칭 FIELD_START의 역순 ctrl_id 3B(`%` 제외).
+                    // 전부 0이면 한글이 필드 짝을 못 지어 하이퍼링크 클릭이 안 된다
+                    // (정답지 대조 확정). LIFO로 짝을 찾는다.
+                    let payload = matching_field_start(&para.chars)
+                        .map(|cid| hwp_convert::field::field_end_payload(&cid))
+                        .unwrap_or_else(|| vec![0u8; 12]);
+                    para.chars.push(HwpChar::InlineCtrl { code: 4, payload });
                     *wchar_pos += 8;
                     continue;
                 }
