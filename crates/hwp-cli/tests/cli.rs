@@ -534,6 +534,31 @@ fn 변환_장식_도형_보존() {
         "hwpx 텍스트 추출이 원본 hwp와 동일해야"
     );
 
+    // ★도형 z-order 보존(㉗): 예전엔 전부 zOrder="0"으로 뭉개 한글이 겹친 도형을
+    // undefined 순서로 그려 표지가 빈 화면이 됐다. 원본 gso z-order(고유 1~143)를
+    // 실값으로 방출하는지 확인 — zOrder 값이 다수 고유해야(전부 0 회귀 방지).
+    let xml = std::process::Command::new("unzip")
+        .args(["-p"])
+        .arg(&out)
+        .arg("Contents/section0.xml")
+        .output()
+        .unwrap()
+        .stdout;
+    let xml = String::from_utf8_lossy(&xml);
+    let zorders: std::collections::HashSet<&str> = xml
+        .match_indices("zOrder=\"")
+        .map(|(i, _)| {
+            let rest = &xml[i + 8..];
+            &rest[..rest.find('"').unwrap_or(0)]
+        })
+        .collect();
+    assert!(
+        zorders.len() >= 20,
+        "도형 zOrder가 다수 고유해야(전부 0 회귀 방지): 고유값 {}종 = {:?}",
+        zorders.len(),
+        zorders
+    );
+
     let _ = std::fs::remove_file(&out);
 }
 

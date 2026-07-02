@@ -461,7 +461,9 @@ fn make_field_control(ctrl_id: [u8; 4], name: Option<&str>, command: Option<&str
 /// 결정론적 비영 id를 부여(같은 명령=같은 id, 서로 다른 URL=다른 id).
 pub fn make_field_command_data(ctrl_id: &[u8; 4], command: &str) -> Vec<u8> {
     let (attr, etc): (u32, u8) = match ctrl_id {
-        b"%hlk" => (0x0000_8800, 0),
+        // 정품 한글 %hlk 실측 = 0x0000a800(bit 0x2000 포함). 0x00008800(work_report 복제)만
+        // 쓰면 파랑+밑줄은 되나 한글이 클릭 이동을 하지 않는다(2차 실기 확인).
+        b"%hlk" => (0x0000_a800, 0),
         b"%fmu" => (0x0000_0000, 0x08),
         _ => (0x0000_0000, 0),
     };
@@ -884,7 +886,7 @@ mod tests {
         // 정품 %hlk data 구조: attr=0x00008800·etc=0·len(2)·WCHAR·id(4≠0)·trailing(4).
         let cmd = "http\\://hangeul.naver.com/font;1;0;0;";
         let data = make_field_command_data(b"%hlk", cmd);
-        assert_eq!(&data[0..5], &[0x00, 0x88, 0x00, 0x00, 0x00]); // attr+etc
+        assert_eq!(&data[0..5], &[0x00, 0xa8, 0x00, 0x00, 0x00]); // attr=0x0000a800+etc
         let len = u16::from_le_bytes([data[5], data[6]]) as usize;
         assert_eq!(len, cmd.encode_utf16().count());
         assert_eq!(len, 37); // 정품 work_report %hlk와 동일 길이
@@ -908,7 +910,7 @@ mod tests {
         let fmu = make_field_command_data(b"%fmu", "=SUM(A1:A2)");
         assert_eq!(&fmu[0..5], &[0x00, 0x00, 0x00, 0x00, 0x08]);
         let hlk = make_field_command_data(b"%hlk", "x;1;0;0;");
-        assert_eq!(&hlk[0..5], &[0x00, 0x88, 0x00, 0x00, 0x00]);
+        assert_eq!(&hlk[0..5], &[0x00, 0xa8, 0x00, 0x00, 0x00]);
     }
 
     #[test]
