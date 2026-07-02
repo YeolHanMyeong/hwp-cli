@@ -1000,7 +1000,9 @@ fn collect_shape(
                 fill = parse_color(&c);
             }
         }
-        n if n.starts_with(b"pt") => {
+        // pt0~N은 Polygon/Curve의 기하 점만 취한다. Rect/Ellipse/Arc의 pt0~3은 bbox
+        // 모서리(정품 형식)라 sz로 왕복하므로 무시(안 그러면 도형에 헛점이 붙는다).
+        n if n.starts_with(b"pt") && matches!(kind, ShapeKind::Polygon | ShapeKind::Curve) => {
             if let (Some(px), Some(py)) = (attr_i32(e, "x"), attr_i32(e, "y")) {
                 points.push((px, py));
             }
