@@ -536,3 +536,49 @@ fn 변환_장식_도형_보존() {
 
     let _ = std::fs::remove_file(&out);
 }
+
+/// ★완전 왕복 기함: work_report.hwp → hwpx → hwp — 글상자 텍스트·%hlk 하이퍼링크·도형이
+/// 양방향 변환을 모두 살아남는다(⑱~㉒의 종합). 이전엔 역방향에서 글상자가 통째 드롭.
+#[test]
+fn 변환_완전_왕복_hwp_hwpx_hwp() {
+    if skip_if_no_fixtures() {
+        return;
+    }
+    let src = fixture("hwp5/work_report.hwp");
+    if !src.exists() {
+        eprintln!("스킵: work_report.hwp 없음");
+        return;
+    }
+    let mid = tmp("hwp_cli_rt.hwpx");
+    let dst = tmp("hwp_cli_rt.hwp");
+    for (i, o) in [(&src, &mid), (&mid.clone(), &dst)] {
+        let r = hwp()
+            .arg("convert")
+            .arg(i)
+            .arg("-o")
+            .arg(o)
+            .output()
+            .unwrap();
+        assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+        let stderr = String::from_utf8_lossy(&r.stderr);
+        assert!(!stderr.contains("DROP"), "드롭 없어야: {stderr}");
+    }
+
+    // 텍스트(글상자 포함) 완전 동일.
+    let cat_a = hwp().arg("cat").arg(&src).output().unwrap();
+    let cat_b = hwp().arg("cat").arg(&dst).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&cat_a.stdout),
+        String::from_utf8_lossy(&cat_b.stdout),
+        "왕복 후 텍스트 동일해야"
+    );
+
+    // 글상자 안 하이퍼링크 생존.
+    let fields = hwp().args(["fields", "--json"]).arg(&dst).output().unwrap();
+    let j = String::from_utf8_lossy(&fields.stdout);
+    assert!(j.contains("%hlk"), "왕복 후 %hlk 보존: {j}");
+    assert!(j.contains("설치하기"), "하이퍼링크 표시값 보존: {j}");
+
+    let _ = std::fs::remove_file(&mid);
+    let _ = std::fs::remove_file(&dst);
+}

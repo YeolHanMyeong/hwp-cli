@@ -105,6 +105,42 @@ fn fill_nested(
 ) {
     let nctrl = doc.sections[si].paragraphs[pi].controls.len();
     for ci in 0..nctrl {
+        // 글상자(hwpx-출신 Generic: gso_shapes 보유) 안 문단 — 박스 폭 기준,
+        // 리스트마다 v_pos 리셋(박스 상대). hwp5-출신 글상자는 raw_children 원본이
+        // 방출되므로 무관(문단 line_segs 이미 보유 시 건너뜀).
+        if let Control::Generic(snap_g) = &snap.sections[si].paragraphs[pi].controls[ci] {
+            if !snap_g.gso_shapes.is_empty() && !snap_g.paragraph_lists.is_empty() {
+                // LIST_HEADER 안쪽 여백(283×2)을 뺀 본문 폭.
+                let bw = (snap_g.gso_shapes[0].w - 566).max(1);
+                let lists: Vec<usize> = snap_g
+                    .paragraph_lists
+                    .iter()
+                    .map(|l| l.paragraphs.len())
+                    .collect();
+                for (li, &npara) in lists.iter().enumerate() {
+                    let mut bv = 0i32;
+                    for lpi in 0..npara {
+                        let Control::Generic(snap_g) =
+                            &snap.sections[si].paragraphs[pi].controls[ci]
+                        else {
+                            unreachable!();
+                        };
+                        let src = &snap_g.paragraph_lists[li].paragraphs[lpi];
+                        if !src.line_segs.is_empty() {
+                            continue;
+                        }
+                        let segs =
+                            compute_linesegs(store, snap, src, bw, i32::MAX, &mut bv, warnings);
+                        if let Control::Generic(g) =
+                            &mut doc.sections[si].paragraphs[pi].controls[ci]
+                        {
+                            g.paragraph_lists[li].paragraphs[lpi].line_segs = segs;
+                        }
+                    }
+                }
+            }
+            continue;
+        }
         let Control::Table(snap_t) = &snap.sections[si].paragraphs[pi].controls[ci] else {
             continue;
         };

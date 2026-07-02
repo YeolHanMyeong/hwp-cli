@@ -421,3 +421,98 @@ fn 하이퍼링크_생성_이진_왕복() {
         Some("https\\://example.com/a;1;0;0;")
     );
 }
+
+/// hwpx-출신 글상자(구조화 도형 + 문단)가 hwp5 gso로 역합성돼 이진 왕복을 통과한다 —
+/// 이전엔 "hwp5 페이로드가 없는 컨트롤"로 통째 드롭(텍스트 소실). 재읽기 구조가 정품
+/// 글상자와 동형(SHAPE_COMPONENT[LIST_HEADER, PARA…, SC_RECT])이어야 한다.
+#[test]
+fn 글상자_역합성_이진_왕복() {
+    use hwp_model::{CharShapeId, Control, GenericControl, HwpChar, Paragraph, ParagraphList};
+
+    let mut doc = hwp_convert::from_markdown("본문 문단\n\n둘째 문단");
+    let boxed = Paragraph {
+        chars: "상자속글".chars().map(HwpChar::Text).collect(),
+        char_shape_runs: vec![(0, CharShapeId(0))],
+        ..Default::default()
+    };
+    let shape = hwp_model::ShapeGeom {
+        kind: hwp_model::ShapeKind::Rect,
+        x: 0,
+        y: 0,
+        w: 4000,
+        h: 2000,
+        points: Vec::new(),
+        fill: 0x00CCEEFF,
+        fill_gradient: None,
+        border_color: 0x000000FF,
+        border_width: 40,
+        round_ratio: 0,
+        border_style: 0,
+        arrow_start: 0,
+        arrow_end: 0,
+        anchored: true,
+    };
+    let gso = GenericControl {
+        ctrl_id: *b"rect", // hwpx reader가 만드는 형태
+        data: Vec::new(),
+        paragraph_lists: vec![ParagraphList {
+            header_data: Vec::new(),
+            paragraphs: vec![boxed],
+        }],
+        extras: Vec::new(),
+        raw_children: Vec::new(),
+        gso_shapes: vec![shape],
+        equation: None,
+    };
+    // 둘째 문단에 앵커(ExtCtrl 코드 11) + 컨트롤 부착.
+    let para = &mut doc.sections[0].paragraphs[1];
+    let idx = para.controls.len() as u32;
+    para.chars.push(HwpChar::ExtCtrl {
+        code: 11,
+        ctrl_id: *b"rect",
+        payload: vec![0u8; 12],
+        ctrl_index: Some(idx),
+    });
+    para.controls.push(Control::Generic(gso));
+    para.header.ctrl_mask = 0;
+
+    let out = tmp("gso_reverse.hwp");
+    let warnings = hwp5::write_document(&doc, &out, &hwp5::WriteOptions::default()).unwrap();
+    assert!(
+        !warnings.iter().any(|w| w.contains("페이로드가 없는")),
+        "역합성으로 드롭이 없어야: {warnings:?}"
+    );
+
+    let reread = hwp5::read_document(&out).unwrap().document;
+    assert!(
+        reread.plain_text().contains("상자속글"),
+        "글상자 텍스트 왕복: {}",
+        reread.plain_text()
+    );
+    // 구조: gso → SHAPE_COMPONENT[LIST_HEADER, PARA…, SC_RECT] (정품 동형).
+    let g = reread.sections[0]
+        .paragraphs
+        .iter()
+        .flat_map(|p| &p.controls)
+        .find_map(|c| match c {
+            hwp_model::Control::Generic(g) if g.ctrl_id == *b"gso " => Some(g),
+            _ => None,
+        })
+        .expect("역합성 gso");
+    let sc = g
+        .raw_children
+        .iter()
+        .find(|r| r.tag == 0x4C)
+        .expect("SHAPE_COMPONENT");
+    let tags: Vec<u16> = sc.children.iter().map(|c| c.tag).collect();
+    assert!(tags.contains(&0x48), "LIST_HEADER: {tags:?}");
+    assert!(tags.contains(&0x42), "PARA_HEADER: {tags:?}");
+    assert!(tags.contains(&0x4F), "SC_RECTANGLE: {tags:?}");
+    // 기하/스타일 복원(⑲ 변환기로 교차 검증).
+    let shapes = hwp_convert::gso::shapes_from_raw(&g.raw_children);
+    assert_eq!(shapes.len(), 1, "{shapes:?}");
+    assert_eq!(shapes[0].kind, hwp_model::ShapeKind::Rect);
+    assert_eq!((shapes[0].w, shapes[0].h), (4000, 2000));
+    assert_eq!(shapes[0].border_width, 40);
+    assert_eq!(shapes[0].fill, 0x00CCEEFF);
+}

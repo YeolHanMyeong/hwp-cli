@@ -11,7 +11,8 @@ use std::path::Path;
 
 use hwp_model::{
     BorderLine, Cell, CharShape, Control, Document, FaceName, HwpChar, LANG_COUNT, Metadata,
-    OpaqueRecord, ParaShape, Paragraph, Picture, RawEntry, Section, SectionDef, Style, Table,
+    OpaqueRecord, ParaShape, Paragraph, Picture, RawEntry, Section, SectionDef, ShapeGeom,
+    ShapeKind, Style, Table,
 };
 
 use crate::codec::{ByteWriter, compress};
@@ -51,7 +52,10 @@ pub fn write_document(doc: &Document, path: &Path, opts: &WriteOptions) -> Resul
     // 단 편집으로 새로 삽입된 그림(extras 빈 Picture)은 출처와 무관하게 합성해야
     // strip_unwritable_pictures에 드롭되지 않는다.
     let synth_pictures = doc.meta.source_format != "hwp5" || has_synthesizable_picture(doc);
-    let synthesize = synth_pictures || opts.edited;
+    // hwpx-출신 구조화 도형/글상자(gso_shapes)는 hwp5 gso 레코드로 역합성해야
+    // strip에 드롭되지 않는다(그림 합성과 동일 게이트 논리).
+    let synth_gso = doc.meta.source_format != "hwp5" || has_synthesizable_gso(doc);
+    let synthesize = synth_pictures || synth_gso || opts.edited;
     let normalized;
     let doc = if needs_normalize(doc) || synthesize {
         let mut d = doc.clone();
@@ -59,6 +63,9 @@ pub fn write_document(doc: &Document, path: &Path, opts: &WriteOptions) -> Resul
         // 합성한다 — 합성되면 extras가 채워져 아래 strip이 드롭하지 않는다.
         if synth_pictures {
             synthesize_pictures(&mut d, &mut warnings);
+        }
+        if synth_gso {
+            synthesize_gso_shapes(&mut d, &mut warnings);
         }
         for section in &mut d.sections {
             for para in &mut section.paragraphs {
@@ -444,6 +451,290 @@ fn build_picture_extras(
             children: Vec::new(),
         }],
     }]
+}
+
+// ── hwpx-출신 도형/글상자 → hwp5 gso 역합성 ──────────────────────────────
+//
+// hwpx reader가 만든 구조화 도형(GenericControl.gso_shapes)은 hwp5 레코드가 없어
+// 지금까지 통째로 드롭됐다(strip). 정품 SHAPE_COMPONENT 템플릿(코퍼스 실쌍 장식선,
+// hwp-convert/src/gso.rs 파서와 같은 출처)을 패치해 CTRL_HEADER(gso) 트리를 합성한다
+// — build_picture_extras(그림 합성, 한글 수용 검증)와 동일 방법론.
+
+/// 실쌍 정품 장식선의 SHAPE_COMPONENT 252B(CHID "$lin"×2 + 크기 + 행렬 3개 +
+/// 테두리 13B + 채우기). CHID/크기/회전중심/행렬/테두리/채우기를 패치해 쓴다.
+const SHAPE_SC_TEMPLATE: &str = "6e696c246e696c240000000000000000000001006400000064000000c8c1000004000000000000000000e4600000020000000100000000000000f03f000000000000000000000000000000000000000000000000000000000000f03f0000000000000000e17a14ae47017f400000000000000000000000000000000000000000000000007b14ae47e17aa43f0000000000000000000000000000f03f000000000000008000000000000000000000000000000000000000000000f03f00000000000000000000000020000000410000c000010000000000000000000000ffffffff00000000000000000000000000000000000000000001e76b390000";
+
+/// 글상자 LIST_HEADER 28B(정품 work_report 실측): nparas(i32)@0 · attr(0x20)@4 ·
+/// 안쪽여백 283×4@8 · width@16 · 8B 0. nparas/width를 패치한다.
+const TEXTBOX_LIST_HEADER_TEMPLATE: &str =
+    "01000000200000001b011b011b011b01054600000000000000000000";
+
+/// 3×2 단위행렬 48B(f64 LE: e1=1, e2..e4=0, e5=1, e6=0).
+fn write_identity_mat(buf: &mut [u8]) {
+    buf.fill(0);
+    buf[0..8].copy_from_slice(&1f64.to_le_bytes());
+    buf[32..40].copy_from_slice(&1f64.to_le_bytes());
+}
+
+/// ShapeGeom border_style(0=SOLID…5=LONG_DASH) → hwp5 테두리선 종류(1실선…6장대시).
+fn shape_style_to_hwp5(style: u8) -> u32 {
+    u32::from(style.min(5)) + 1
+}
+
+/// 도형들의 첫 도형을 SHAPE_COMPONENT(+기하 자식)로 합성한다. Curve/Arc 등 미지원
+/// kind는 텍스트가 있으면 Rect 프레임으로 대체(텍스트 보존 우선), 없으면 None(드롭 유지).
+fn build_shape_sc(
+    shapes: &[ShapeGeom],
+    has_text: bool,
+    warnings: &mut Vec<String>,
+) -> Option<OpaqueRecord> {
+    let s = shapes.first()?;
+    if shapes.len() > 1 {
+        warnings.push(format!(
+            "다중 도형 gso — 첫 도형만 hwp5로 합성({}개 중)",
+            shapes.len()
+        ));
+    }
+    let (w, h) = (s.w.max(1), s.h.max(1));
+    let (chid, geom): (&[u8; 4], Option<OpaqueRecord>) = match s.kind {
+        ShapeKind::Rect => (b"cer$", Some(geom_rect(s.round_ratio, w, h))),
+        ShapeKind::Line => {
+            let (p0, p1) = if s.points.len() >= 2 {
+                (s.points[0], s.points[1])
+            } else {
+                ((0, 0), (w, h))
+            };
+            let mut d = Vec::with_capacity(20);
+            d.extend_from_slice(&p0.0.to_le_bytes());
+            d.extend_from_slice(&p0.1.to_le_bytes());
+            d.extend_from_slice(&p1.0.to_le_bytes());
+            d.extend_from_slice(&p1.1.to_le_bytes());
+            d.extend_from_slice(&0u32.to_le_bytes());
+            (
+                b"nil$",
+                Some(OpaqueRecord {
+                    tag: tag::SHAPE_COMPONENT_LINE,
+                    data: d,
+                    children: Vec::new(),
+                }),
+            )
+        }
+        ShapeKind::Ellipse => {
+            let mut d = Vec::with_capacity(28);
+            d.extend_from_slice(&0u32.to_le_bytes()); // attr
+            for &(x, y) in &[(w / 2, h / 2), (w, h / 2), (w / 2, h)] {
+                d.extend_from_slice(&x.to_le_bytes());
+                d.extend_from_slice(&y.to_le_bytes());
+            }
+            (
+                b"lle$",
+                Some(OpaqueRecord {
+                    tag: tag::SHAPE_COMPONENT_ELLIPSE,
+                    data: d,
+                    children: Vec::new(),
+                }),
+            )
+        }
+        ShapeKind::Polygon if s.points.len() >= 2 => {
+            let mut d = Vec::with_capacity(4 + s.points.len() * 8);
+            d.extend_from_slice(&(s.points.len() as u16).to_le_bytes());
+            d.extend_from_slice(&0u16.to_le_bytes());
+            for &(x, y) in &s.points {
+                d.extend_from_slice(&x.to_le_bytes());
+                d.extend_from_slice(&y.to_le_bytes());
+            }
+            (
+                b"lop$",
+                Some(OpaqueRecord {
+                    tag: tag::SHAPE_COMPONENT_POLYGON,
+                    data: d,
+                    children: Vec::new(),
+                }),
+            )
+        }
+        _ if has_text => {
+            // Curve/Arc 등 — 텍스트 보존이 우선이므로 무테두리 Rect 프레임으로 대체.
+            warnings.push("미지원 도형 kind — 글상자 Rect 프레임으로 대체".to_string());
+            (b"cer$", Some(geom_rect(0, w, h)))
+        }
+        _ => {
+            warnings.push("DROP: 미지원 도형 kind(Curve/Arc 등) — hwp5 합성 생략".to_string());
+            return None;
+        }
+    };
+    let geom = geom?;
+
+    let mut sc = hex_to_bytes(SHAPE_SC_TEMPLATE);
+    sc[0..4].copy_from_slice(chid);
+    sc[4..8].copy_from_slice(chid);
+    let wb = w.to_le_bytes();
+    let hb = h.to_le_bytes();
+    sc[20..24].copy_from_slice(&wb); // 초기 폭
+    sc[24..28].copy_from_slice(&hb); // 초기 높이
+    sc[28..32].copy_from_slice(&wb); // 현재 폭
+    sc[32..36].copy_from_slice(&hb); // 현재 높이
+    sc[42..46].copy_from_slice(&(w / 2).to_le_bytes()); // 회전 중심 x
+    sc[46..50].copy_from_slice(&(h / 2).to_le_bytes()); // 회전 중심 y
+    // 행렬 → 단위(템플릿의 scale 496.08/0.04 제거 — 기하를 실좌표로 쓰므로).
+    write_identity_mat(&mut sc[100..148]);
+    write_identity_mat(&mut sc[148..196]);
+    // 테두리 @196: color(4)+width(4)+lattr(4).
+    if s.border_width > 0 {
+        sc[196..200].copy_from_slice(&s.border_color.to_le_bytes());
+        sc[200..204].copy_from_slice(&s.border_width.to_le_bytes());
+        sc[204..208]
+            .copy_from_slice(&(0xc000_0040u32 | shape_style_to_hwp5(s.border_style)).to_le_bytes());
+    } else {
+        sc[196..200].copy_from_slice(&0u32.to_le_bytes());
+        sc[200..204].copy_from_slice(&0u32.to_le_bytes());
+        sc[204..208].copy_from_slice(&0xc000_0040u32.to_le_bytes()); // 선 종류 0=없음
+    }
+    // 채우기 @209: type(4) + 면색(4).
+    if s.fill != 0xFFFF_FFFF {
+        sc[209..213].copy_from_slice(&1u32.to_le_bytes());
+        sc[213..217].copy_from_slice(&s.fill.to_le_bytes());
+    } else {
+        sc[209..213].copy_from_slice(&0u32.to_le_bytes());
+    }
+
+    Some(OpaqueRecord {
+        tag: tag::SHAPE_COMPONENT,
+        data: sc,
+        children: vec![geom],
+    })
+}
+
+fn geom_rect(round_ratio: u8, w: i32, h: i32) -> OpaqueRecord {
+    let mut d = Vec::with_capacity(33);
+    d.push(round_ratio.min(100));
+    for &(x, y) in &[(0, 0), (w, 0), (w, h), (0, h)] {
+        d.extend_from_slice(&i32::to_le_bytes(x));
+        d.extend_from_slice(&i32::to_le_bytes(y));
+    }
+    OpaqueRecord {
+        tag: tag::SHAPE_COMPONENT_RECTANGLE,
+        data: d,
+        children: Vec::new(),
+    }
+}
+
+/// hwpx-출신 구조화 도형(gso 아닌 ctrl_id + gso_shapes 보유)이 있는지 재귀 검사.
+fn has_synthesizable_gso(doc: &Document) -> bool {
+    fn in_para(p: &Paragraph) -> bool {
+        p.controls.iter().any(|c| match c {
+            Control::Generic(g) => {
+                (g.ctrl_id != *b"gso " && !g.gso_shapes.is_empty())
+                    || g.paragraph_lists
+                        .iter()
+                        .any(|l| l.paragraphs.iter().any(in_para))
+            }
+            Control::Table(t) => t
+                .cells
+                .iter()
+                .any(|cell| cell.paragraphs.iter().any(in_para)),
+            _ => false,
+        })
+    }
+    doc.sections
+        .iter()
+        .any(|s| s.paragraphs.iter().any(in_para))
+}
+
+/// hwpx-출신 도형/글상자 Generic을 hwp5 gso 컨트롤로 역합성한다(본문·표 셀·글상자 재귀).
+/// - `data` = gso 공통 42B: attr(정품 실측 — 인라인 0x042a6001/떠있음 0x040a6000, 그림
+///   합성과 동일 값) + 오프셋/크기 + 유니크 instance_id + 빈 설명 BSTR.
+/// - `raw_children` = [SHAPE_COMPONENT(정품 템플릿 패치) + 기하 자식]. 글상자 문단은
+///   paragraph_lists에 남겨 emit_control의 혼합 arm이 LIST_HEADER+emit_paragraph로 방출.
+/// - chars의 대응 ExtCtrl(ctrl_id/payload)도 동기 패치(PARA_TEXT에 그대로 쓰임).
+fn synthesize_gso_shapes(doc: &mut Document, warnings: &mut Vec<String>) {
+    let mut inst: u32 = 0x5000_0000;
+    for section in &mut doc.sections {
+        for para in &mut section.paragraphs {
+            synth_gso_para(para, &mut inst, warnings);
+        }
+    }
+}
+
+fn synth_gso_para(para: &mut Paragraph, inst: &mut u32, warnings: &mut Vec<String>) {
+    for control in &mut para.controls {
+        match control {
+            Control::Table(t) => {
+                for cell in &mut t.cells {
+                    for cp in &mut cell.paragraphs {
+                        synth_gso_para(cp, inst, warnings);
+                    }
+                }
+            }
+            Control::Generic(g) => {
+                for list in &mut g.paragraph_lists {
+                    for lp in &mut list.paragraphs {
+                        synth_gso_para(lp, inst, warnings);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut converted: Vec<u32> = Vec::new();
+    for (i, control) in para.controls.iter_mut().enumerate() {
+        let Control::Generic(g) = control else {
+            continue;
+        };
+        if g.ctrl_id == *b"gso "
+            || g.gso_shapes.is_empty()
+            || !g.raw_children.is_empty()
+            || !g.data.is_empty()
+        {
+            continue;
+        }
+        let has_text = !g.paragraph_lists.is_empty();
+        let Some(sc) = build_shape_sc(&g.gso_shapes, has_text, warnings) else {
+            continue;
+        };
+        let s0 = &g.gso_shapes[0];
+        let attr: u32 = if s0.anchored {
+            0x042a_6001
+        } else {
+            0x040a_6000
+        };
+        let inst_id = *inst;
+        *inst += 1;
+        let mut common = Vec::with_capacity(42);
+        common.extend_from_slice(&attr.to_le_bytes());
+        common.extend_from_slice(&s0.y.to_le_bytes()); // vert offset
+        common.extend_from_slice(&s0.x.to_le_bytes()); // horz offset
+        common.extend_from_slice(&s0.w.max(1).to_le_bytes());
+        common.extend_from_slice(&s0.h.max(1).to_le_bytes());
+        common.extend_from_slice(&0u32.to_le_bytes()); // z-order
+        common.extend_from_slice(&0u32.to_le_bytes()); // 바깥 여백(왼/위)
+        common.extend_from_slice(&0u32.to_le_bytes()); // 바깥 여백(오른/아래)
+        common.extend_from_slice(&inst_id.to_le_bytes());
+        common.extend_from_slice(&0u32.to_le_bytes()); // 쪽 나눔 방지
+        common.extend_from_slice(&0u16.to_le_bytes()); // 설명 BSTR 길이 0
+        g.ctrl_id = *b"gso ";
+        g.data = common;
+        g.raw_children = vec![sc];
+        g.gso_shapes = Vec::new();
+        converted.push(i as u32);
+    }
+    if converted.is_empty() {
+        return;
+    }
+    for ch in &mut para.chars {
+        if let HwpChar::ExtCtrl {
+            ctrl_id,
+            payload,
+            ctrl_index: Some(ci),
+            ..
+        } = ch
+            && converted.contains(ci)
+        {
+            *ctrl_id = *b"gso ";
+            if payload.len() >= 4 {
+                payload[0..4].copy_from_slice(b" osg"); // 역순 "gso "
+            }
+        }
+    }
 }
 
 /// 편집으로 삽입된 그림(도형 레코드 미보유 = extras 빈 Picture)이 있는지 재귀 검사.
@@ -1594,6 +1885,59 @@ fn emit_control(
                 w.write_bytes(&DEFAULT_COLD_DATA);
             } else {
                 w.write_bytes(&g.data);
+            }
+            // 합성 글상자(hwpx 출신 역합성): raw_children = [SHAPE_COMPONENT(문단 레코드
+            // 없음)] + paragraph_lists. SHAPE_COMPONENT 안에 LIST_HEADER(정품 템플릿) +
+            // emit_paragraph(문단 불변식: 0x0d/bit31/char_shape) + 기하 자식을 주입한다.
+            // hwp5 원본 글상자는 raw_children에 LIST_HEADER/PARA가 이미 있어 이 arm에
+            // 해당하지 않는다(아래 무손실 경로 유지).
+            if g.ctrl_id == *b"gso "
+                && !g.paragraph_lists.is_empty()
+                && g.raw_children.len() == 1
+                && g.raw_children[0].tag == tag::SHAPE_COMPONENT
+                && !g.raw_children[0]
+                    .children
+                    .iter()
+                    .any(|c| c.tag == tag::LIST_HEADER || c.tag == tag::PARA_HEADER)
+            {
+                let sc = &g.raw_children[0];
+                let nparas: i32 = g
+                    .paragraph_lists
+                    .iter()
+                    .map(|l| l.paragraphs.len() as i32)
+                    .sum();
+                let mut lh = hex_to_bytes(TEXTBOX_LIST_HEADER_TEMPLATE);
+                lh[0..4].copy_from_slice(&nparas.to_le_bytes());
+                if sc.data.len() >= 32 {
+                    // 글상자 본문 폭 = SHAPE_COMPONENT 현재 폭.
+                    lh[16..20].copy_from_slice(&sc.data[28..32]);
+                }
+                let mut sc_children = vec![RecordNode {
+                    tag: tag::LIST_HEADER,
+                    data: lh,
+                    children: Vec::new(),
+                }];
+                for list in &g.paragraph_lists {
+                    for p in &list.paragraphs {
+                        sc_children.push(emit_paragraph(
+                            p,
+                            synthesize,
+                            preserve_linesegs,
+                            add_tracking_tail,
+                            warnings,
+                        ));
+                    }
+                }
+                sc_children.extend(sc.children.iter().map(opaque_to_node));
+                return RecordNode {
+                    tag: tag::CTRL_HEADER,
+                    data: w.into_bytes(),
+                    children: vec![RecordNode {
+                        tag: tag::SHAPE_COMPONENT,
+                        data: sc.data.clone(),
+                        children: sc_children,
+                    }],
+                };
             }
             // 원본 hwp5 자식 서브트리가 있으면 중첩 그대로 방출(무손실).
             // paragraph_lists/extras는 텍스트 추출 전용이므로 평탄화하지 않는다.
