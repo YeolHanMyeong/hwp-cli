@@ -778,6 +778,7 @@ mod tests {
             border_style: 0,
             arrow_start: 0,
             arrow_end: 0,
+            anchored: false,
         };
         draw_ir_shapes(&[rect], &mut page);
         assert_eq!(page.items.len(), 1);
@@ -817,6 +818,7 @@ mod tests {
             border_style: 0,
             arrow_start: 0,
             arrow_end: 0,
+            anchored: false,
         };
         draw_ir_shapes(&[invisible], &mut p2);
         assert!(p2.items.is_empty(), "보이지 않는 도형은 생략");
@@ -850,6 +852,7 @@ mod tests {
             border_style: 0,
             arrow_start: 0,
             arrow_end: 0,
+            anchored: false,
         };
         draw_ir_shapes(&[shape], &mut page);
         assert_eq!(page.items.len(), 1);
@@ -901,6 +904,7 @@ mod tests {
             border_style: 0,
             arrow_start: 0,
             arrow_end: 0,
+            anchored: false,
         };
         // 직각: Move + Line×3 + Close = 5개, CubicTo 없음.
         let sharp = ir_shape_path(&base);
@@ -996,6 +1000,7 @@ mod tests {
             border_style: 1, // 파선
             arrow_start: 0,
             arrow_end: 1, // 끝 화살촉
+            anchored: false,
         };
         draw_ir_shapes(&[line], &mut page);
         // 선 path 1개 + 화살촉 path 1개 = 2.

@@ -671,6 +671,7 @@ fn write_gso(
             border_style: style.map_or(0, |s| s.border_style),
             arrow_start: 0,
             arrow_end: 0,
+            anchored: attr & 1 != 0,
         };
         let pos = gso_pos_xml(attr, voff, hoff);
         write_shape_element(
@@ -721,8 +722,14 @@ fn write_ir_shapes(
     warnings: &mut Vec<String>,
 ) {
     for (i, s) in g.gso_shapes.iter().enumerate() {
+        // 글자처럼(anchored)이면 정품 인라인 관례(PARA/COLUMN), 아니면 PAPER 절대 좌표.
+        let (treat, vrel, hrel) = if s.anchored {
+            (1, "PARA", "COLUMN")
+        } else {
+            (0, "PAPER", "PAPER")
+        };
         let pos = format!(
-            r##"<hp:pos treatAsChar="0" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PAPER" horzRelTo="PAPER" vertAlign="TOP" horzAlign="LEFT" vertOffset="{}" horzOffset="{}"/>"##,
+            r##"<hp:pos treatAsChar="{treat}" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="{vrel}" horzRelTo="{hrel}" vertAlign="TOP" horzAlign="LEFT" vertOffset="{}" horzOffset="{}"/>"##,
             s.y, s.x,
         );
         let text = if i == 0 { Some(g) } else { None };

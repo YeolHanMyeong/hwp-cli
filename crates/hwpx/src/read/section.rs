@@ -941,10 +941,14 @@ fn collect_shape(
     let mut border_style = 0u8;
     let mut arrow_start = 0u8;
     let mut arrow_end = 0u8;
+    let mut anchored = false;
     let mut read_attrs = |e: &BytesStart<'_>| match e.local_name().as_ref() {
         b"pos" => {
             x = attr_offset_i32(e, "horzOffset").unwrap_or(x);
             y = attr_offset_i32(e, "vertOffset").unwrap_or(y);
+            if attr(e, "treatAsChar").as_deref() == Some("1") {
+                anchored = true;
+            }
         }
         b"sz" => {
             w = attr_i32(e, "width").unwrap_or(w);
@@ -1038,6 +1042,7 @@ fn collect_shape(
             border_style,
             arrow_start,
             arrow_end,
+            anchored,
         });
     }
     Ok(())
