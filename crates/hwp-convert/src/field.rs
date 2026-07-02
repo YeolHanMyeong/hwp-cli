@@ -10,7 +10,7 @@
 //! 교체하고 char_shape_run을 보정한다 — 쓰기는 편집 경로(write_hwp_edited)를 거친다.
 
 use hwp_model::opaque::OpaqueRecord;
-use hwp_model::{Control, Document, GenericControl, HwpChar, Paragraph};
+use hwp_model::{CharShapeId, Control, Document, GenericControl, HwpChar, Paragraph};
 
 use crate::edit::{adjust_runs, find_match, utf16_len};
 
@@ -509,7 +509,60 @@ pub(crate) fn relink_ctrl_index(para: &mut Paragraph) {
     }
 }
 
+/// 하이퍼링크 표시 텍스트용 글자모양(파랑 + 밑줄)을 header에 확보하고 id를 돌려준다.
+/// 정품 하이퍼링크(work_report "설치하기")는 별도 charPr(파랑+밑줄)를 쓴다 — 이 글자
+/// 모양이 없으면 한글이 링크로 인식/표시하지 않는다(실기 확인). 이미 있으면 재사용.
+fn hyperlink_char_shape(doc: &mut Document) -> CharShapeId {
+    const BLUE: u32 = 0x00FF_0000; // COLORREF 0x00BBGGRR = RGB(0,0,255)
+    if let Some(i) = doc
+        .header
+        .char_shapes
+        .iter()
+        .position(|c| c.text_color == BLUE && c.underline_kind() == 1)
+    {
+        return CharShapeId(i as u16);
+    }
+    let mut cs = doc.header.char_shapes.first().cloned().unwrap_or_default();
+    cs.text_color = BLUE;
+    cs.underline_color = BLUE;
+    cs.attr = (cs.attr & !(0x3 << 2)) | (1 << 2); // 밑줄 종류 1(글자 아래)
+    if cs.shade_color == 0 {
+        cs.shade_color = 0xFFFF_FFFF; // 검정 음영 방지
+    }
+    let id = doc.header.char_shapes.len() as u16;
+    doc.header.char_shapes.push(cs);
+    CharShapeId(id)
+}
+
+/// char_shape_runs의 [start, end) WCHAR 구간을 `shape`로 지정하고 end에서 이전 모양을 복원.
+fn apply_run_style(runs: &mut Vec<(u32, CharShapeId)>, start: u32, end: u32, shape: CharShapeId) {
+    if end <= start {
+        return;
+    }
+    let after = runs
+        .iter()
+        .rfind(|(p, _)| *p <= end)
+        .map(|(_, id)| *id)
+        .unwrap_or_default();
+    runs.retain(|(p, _)| *p < start || *p > end);
+    runs.push((start, shape));
+    runs.push((end, after));
+    runs.sort_by_key(|(p, _)| *p);
+    let mut out: Vec<(u32, CharShapeId)> = Vec::with_capacity(runs.len());
+    for &(p, id) in runs.iter() {
+        match out.last() {
+            Some(&(_, lid)) if lid == id => {} // 같은 모양 연속 — 잉여 경계 제거
+            _ => out.push((p, id)),
+        }
+    }
+    if out.first().map(|(p, _)| *p) != Some(0) {
+        out.insert(0, (0, CharShapeId::default()));
+    }
+    *runs = out;
+}
+
 /// 한 문단에서 앵커 텍스트 뒤에 필드(누름틀/하이퍼링크 등)를 삽입한다. 반환=삽입 여부.
+/// `value_shape`가 있으면 표시 텍스트 구간에 그 글자모양(하이퍼링크 파랑+밑줄)을 적용한다.
 fn create_field_in_para(
     para: &mut Paragraph,
     anchor: &str,
@@ -517,6 +570,7 @@ fn create_field_in_para(
     name: Option<&str>,
     command: Option<&str>,
     value: &str,
+    value_shape: Option<CharShapeId>,
 ) -> bool {
     let Some((cidx, wpos)) = find_match(&para.chars, anchor, 0) else {
         return false;
@@ -535,6 +589,16 @@ fn create_field_in_para(
     let inserted_w: u32 = field_chars.iter().map(HwpChar::wchar_width).sum();
     para.chars.splice(ins..ins, field_chars);
     adjust_runs(&mut para.char_shape_runs, iw, 0, inserted_w);
+    // 표시 텍스트 구간 = [iw + FIELD_START(8), + display] 에 하이퍼링크 글자모양 적용.
+    if let Some(shape) = value_shape {
+        let dstart = iw + 8;
+        apply_run_style(
+            &mut para.char_shape_runs,
+            dstart,
+            dstart + utf16_len(value),
+            shape,
+        );
+    }
     relink_ctrl_index(para);
     para.header.ctrl_mask = 0; // writer가 chars에서 재계산(FIELD_START bit3 포함)
     para.line_segs.clear();
@@ -549,8 +613,9 @@ fn create_field_rec(
     name: Option<&str>,
     command: Option<&str>,
     value: &str,
+    value_shape: Option<CharShapeId>,
 ) -> bool {
-    if create_field_in_para(para, anchor, ctrl_id, name, command, value) {
+    if create_field_in_para(para, anchor, ctrl_id, name, command, value, value_shape) {
         return true;
     }
     for ctrl in &mut para.controls {
@@ -558,7 +623,7 @@ fn create_field_rec(
             Control::Table(t) => {
                 for cell in &mut t.cells {
                     for p in &mut cell.paragraphs {
-                        if create_field_rec(p, anchor, ctrl_id, name, command, value) {
+                        if create_field_rec(p, anchor, ctrl_id, name, command, value, value_shape) {
                             return true;
                         }
                     }
@@ -567,7 +632,7 @@ fn create_field_rec(
             Control::Generic(g) => {
                 for l in &mut g.paragraph_lists {
                     for p in &mut l.paragraphs {
-                        if create_field_rec(p, anchor, ctrl_id, name, command, value) {
+                        if create_field_rec(p, anchor, ctrl_id, name, command, value, value_shape) {
                             return true;
                         }
                     }
@@ -587,10 +652,11 @@ fn create_field_generic(
     name: Option<&str>,
     command: Option<&str>,
     value: &str,
+    value_shape: Option<CharShapeId>,
 ) -> bool {
     for section in &mut doc.sections {
         for para in &mut section.paragraphs {
-            if create_field_rec(para, anchor, ctrl_id, name, command, value) {
+            if create_field_rec(para, anchor, ctrl_id, name, command, value, value_shape) {
                 return true;
             }
         }
@@ -601,14 +667,24 @@ fn create_field_generic(
 /// `anchor` 텍스트를 가진 첫 문단의 그 뒤에 `name` 이름의 %clk 누름틀을 삽입한다
 /// (표시값 `value`, 보통 빈 문자열). 반환=삽입 여부. 삽입 후 `set_field`로 채울 수 있다.
 pub fn create_field(doc: &mut Document, anchor: &str, name: &str, value: &str) -> bool {
-    create_field_generic(doc, anchor, *b"%clk", Some(name), None, value)
+    create_field_generic(doc, anchor, *b"%clk", Some(name), None, value, None)
 }
 
 /// `anchor` 텍스트 뒤에 하이퍼링크(%hlk)를 삽입한다. `display`=클릭 표시 텍스트, `url`=대상.
-/// 반환=삽입 여부. hwp5·hwpx 양쪽에 동일하게 방출된다.
+/// 반환=삽입 여부. hwp5·hwpx 양쪽에 동일하게 방출된다. 표시 텍스트에 하이퍼링크 글자모양
+/// (파랑+밑줄)을 적용해 한글이 링크로 인식/표시하게 한다(실기 확인 — 미적용 시 평문 취급).
 pub fn create_hyperlink(doc: &mut Document, anchor: &str, url: &str, display: &str) -> bool {
     let cmd = hlk_command(url);
-    create_field_generic(doc, anchor, *b"%hlk", None, Some(&cmd), display)
+    let shape = hyperlink_char_shape(doc);
+    create_field_generic(
+        doc,
+        anchor,
+        *b"%hlk",
+        None,
+        Some(&cmd),
+        display,
+        Some(shape),
+    )
 }
 
 #[cfg(test)]
@@ -817,5 +893,51 @@ mod tests {
             fields[0].command.as_deref(),
             Some("https\\://example.com/path;1;0;0;")
         );
+    }
+
+    #[test]
+    fn create_hyperlink_표시텍스트_파랑밑줄() {
+        // 정품 하이퍼링크처럼 표시 텍스트에 파랑+밑줄 글자모양이 입혀져야 한다
+        // (없으면 한글이 평문 취급 — 실기 확인).
+        let mut doc = crate::from_markdown::from_markdown("여기: 자리");
+        assert!(create_hyperlink(
+            &mut doc,
+            "여기:",
+            "https://x.io",
+            "링크텍스트"
+        ));
+        // 파랑+밑줄 글자모양이 header에 추가됐다.
+        let hlk = doc
+            .header
+            .char_shapes
+            .iter()
+            .position(|c| c.text_color == 0x00FF_0000 && c.underline_kind() == 1)
+            .expect("하이퍼링크 글자모양");
+        let para = &doc.sections[0].paragraphs[0];
+        // 표시 텍스트 구간에 하이퍼링크 글자모양 run이 존재한다(위치는 선두 컨트롤에
+        // 따라 달라지므로 값으로 확인). 표시 텍스트 5 WCHAR("링크텍스트") 폭.
+        let hlk_run = para
+            .char_shape_runs
+            .iter()
+            .find(|(_, id)| id.0 == hlk as u16)
+            .map(|(p, _)| *p)
+            .expect("하이퍼링크 글자모양 run");
+        // 링크 구간 뒤(원래 모양)로 복원하는 경계가 있어야 한다.
+        assert!(
+            para.char_shape_runs
+                .iter()
+                .any(|(p, id)| *p > hlk_run && id.0 != hlk as u16),
+            "링크 구간 뒤 원래 글자모양 복원: {:?}",
+            para.char_shape_runs
+        );
+    }
+
+    #[test]
+    fn create_field_누름틀은_글자모양_불변() {
+        // %clk 누름틀은 하이퍼링크 글자모양을 추가하지 않는다(파랑 미적용).
+        let mut doc = crate::from_markdown::from_markdown("수신: 부서");
+        let before = doc.header.char_shapes.len();
+        assert!(create_field(&mut doc, "수신:", "수신처", ""));
+        assert_eq!(doc.header.char_shapes.len(), before, "글자모양 추가 없음");
     }
 }

@@ -422,11 +422,11 @@ fn 하이퍼링크_생성_이진_왕복() {
     );
 }
 
-/// hwpx-출신 글상자(구조화 도형 + 문단)가 hwp5 gso로 역합성돼 이진 왕복을 통과한다 —
-/// 이전엔 "hwp5 페이로드가 없는 컨트롤"로 통째 드롭(텍스트 소실). 재읽기 구조가 정품
-/// 글상자와 동형(SHAPE_COMPONENT[LIST_HEADER, PARA…, SC_RECT])이어야 한다.
+/// hwpx-출신 글상자(구조화 도형 + 문단)는 안전 저하된다: SHAPE_COMPONENT 재합성이
+/// 한글 실기에서 손상 판정됐기에(㉕), 글상자 텍스트를 본문으로 hoist해 보존하고 도형
+/// 래퍼는 생략한다. 왕복 결과는 유효(텍스트 보존)하고, gso/도형 레코드는 남지 않는다.
 #[test]
-fn 글상자_역합성_이진_왕복() {
+fn 글상자_hwpx출신_안전저하_텍스트보존() {
     use hwp_model::{CharShapeId, Control, GenericControl, HwpChar, Paragraph, ParagraphList};
 
     let mut doc = hwp_convert::from_markdown("본문 문단\n\n둘째 문단");
@@ -476,43 +476,28 @@ fn 글상자_역합성_이진_왕복() {
     para.controls.push(Control::Generic(gso));
     para.header.ctrl_mask = 0;
 
-    let out = tmp("gso_reverse.hwp");
+    let out = tmp("gso_degrade.hwp");
     let warnings = hwp5::write_document(&doc, &out, &hwp5::WriteOptions::default()).unwrap();
     assert!(
-        !warnings.iter().any(|w| w.contains("페이로드가 없는")),
-        "역합성으로 드롭이 없어야: {warnings:?}"
+        warnings.iter().any(|w| w.contains("본문 텍스트로 저하")),
+        "글상자 저하 경고: {warnings:?}"
     );
 
     let reread = hwp5::read_document(&out).unwrap().document;
+    // 글상자 텍스트가 본문으로 hoist돼 보존된다.
     assert!(
         reread.plain_text().contains("상자속글"),
-        "글상자 텍스트 왕복: {}",
+        "글상자 텍스트 보존: {}",
         reread.plain_text()
     );
-    // 구조: gso → SHAPE_COMPONENT[LIST_HEADER, PARA…, SC_RECT] (정품 동형).
-    let g = reread.sections[0]
-        .paragraphs
+    // gso/도형 레코드는 남지 않는다(래퍼 생략).
+    let has_gso = reread
+        .sections
         .iter()
+        .flat_map(|s| &s.paragraphs)
         .flat_map(|p| &p.controls)
-        .find_map(|c| match c {
-            hwp_model::Control::Generic(g) if g.ctrl_id == *b"gso " => Some(g),
-            _ => None,
-        })
-        .expect("역합성 gso");
-    let sc = g
-        .raw_children
-        .iter()
-        .find(|r| r.tag == 0x4C)
-        .expect("SHAPE_COMPONENT");
-    let tags: Vec<u16> = sc.children.iter().map(|c| c.tag).collect();
-    assert!(tags.contains(&0x48), "LIST_HEADER: {tags:?}");
-    assert!(tags.contains(&0x42), "PARA_HEADER: {tags:?}");
-    assert!(tags.contains(&0x4F), "SC_RECTANGLE: {tags:?}");
-    // 기하/스타일 복원(⑲ 변환기로 교차 검증).
-    let shapes = hwp_convert::gso::shapes_from_raw(&g.raw_children);
-    assert_eq!(shapes.len(), 1, "{shapes:?}");
-    assert_eq!(shapes[0].kind, hwp_model::ShapeKind::Rect);
-    assert_eq!((shapes[0].w, shapes[0].h), (4000, 2000));
-    assert_eq!(shapes[0].border_width, 40);
-    assert_eq!(shapes[0].fill, 0x00CCEEFF);
+        .any(|c| matches!(c, Control::Generic(g) if g.ctrl_id == *b"gso "));
+    assert!(!has_gso, "gso 래퍼는 저하로 제거돼야");
+    // 손상 원인이던 "페이로드가 없는 컨트롤 드롭"은 없다(텍스트 hoist로 대체).
+    assert!(!reread.plain_text().is_empty(), "유효 문서(빈 본문 아님)");
 }
