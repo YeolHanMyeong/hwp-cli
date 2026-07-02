@@ -461,14 +461,18 @@ fn write_header_footer(
     let _ = write!(out, "</hp:{el}></hp:ctrl>");
 }
 
-/// hwp5 gso 공통 개체 헤더(20B+): attr(u32)@0, 세로 오프셋@4, 가로 오프셋@8, 폭@12, 높이@16.
-/// hwp5 `parse_picture_gso`/hwp-render `parse_gso_box`와 동일 레이아웃(역의존 불가라 로컬 복제).
-fn parse_gso_header(data: &[u8]) -> Option<(u32, i32, i32, i32, i32)> {
+/// hwp5 gso 공통 개체 헤더(20B+): attr(u32)@0, 세로 오프셋@4, 가로 오프셋@8, 폭@12, 높이@16,
+/// **z-order@20**. hwp5 `parse_picture_gso`/hwp-render `parse_gso_box`와 동일 레이아웃(역의존
+/// 불가라 로컬 복제). z-order는 도형 겹침 순서 — 이를 `zOrder="0"`로 뭉개면 한글이 다중 도형을
+/// undefined 순서로 그려 덮개 도형이 내용을 가린다(annual 표지 빈 화면 원인). 헤더가 짧아
+/// z-order가 없으면 0.
+fn parse_gso_header(data: &[u8]) -> Option<(u32, i32, i32, i32, i32, i32)> {
     if data.len() < 20 {
         return None;
     }
     let rd = |o: usize| i32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
-    Some((rd(0) as u32, rd(4), rd(8), rd(12), rd(16)))
+    let zorder = if data.len() >= 24 { rd(20) } else { 0 };
+    Some((rd(0) as u32, rd(4), rd(8), rd(12), rd(16), zorder))
 }
 
 /// COLORREF(0x00BBGGRR) → "#RRGGBB" (reader `parse_color`의 역).
@@ -615,6 +619,7 @@ fn write_shape_element(
     bins: &mut BinCollector,
     sz: (i32, i32),
     pos_xml: &str,
+    zorder: i32,
     text: Option<&GenericControl>,
     preserve_linesegs: bool,
     warnings: &mut Vec<String>,
@@ -629,7 +634,7 @@ fn write_shape_element(
     };
     let _ = write!(
         out,
-        r##"<hp:{el} id="{}" zOrder="0" numberingType="PICTURE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="{}""##,
+        r##"<hp:{el} id="{}" zOrder="{zorder}" numberingType="PICTURE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="{}""##,
         ids.next(),
         ids.next(),
     );
@@ -717,7 +722,7 @@ fn write_gso(
     preserve_linesegs: bool,
     warnings: &mut Vec<String>,
 ) {
-    let Some((attr, voff, hoff, w, h)) = parse_gso_header(&g.data) else {
+    let Some((attr, voff, hoff, w, h, zorder)) = parse_gso_header(&g.data) else {
         warnings.push("DROP: gso 공통 헤더 파싱 실패 — 드롭".to_string());
         return;
     };
@@ -752,6 +757,7 @@ fn write_gso(
             bins,
             (w, h),
             &pos,
+            zorder,
             Some(g),
             preserve_linesegs,
             warnings,
@@ -760,6 +766,7 @@ fn write_gso(
         warnings.push("DROP: gso 도형 해석 실패(ARC/이미지채움 등) — 드롭".to_string());
     } else {
         // 장식 도형: 도형별 요소. 배치 = gso 오프셋 + 박스 내 도형 오프셋.
+        // 한 gso 안 여러 도형은 gso z-order를 공유(annual은 대부분 1도형/gso라 고유).
         for s in &shapes {
             let pos = gso_pos_xml(attr, voff + s.y, hoff + s.x);
             write_shape_element(
@@ -770,6 +777,7 @@ fn write_gso(
                 bins,
                 (s.w.max(1), s.h.max(1)),
                 &pos,
+                zorder,
                 None,
                 preserve_linesegs,
                 warnings,
@@ -803,6 +811,7 @@ fn write_ir_shapes(
             s.y, s.x,
         );
         let text = if i == 0 { Some(g) } else { None };
+        // hwpx-출신 ShapeGeom엔 z-order가 없어 도형 순서로 증가 부여(전부 0보다 개선).
         write_shape_element(
             out,
             doc,
@@ -811,6 +820,7 @@ fn write_ir_shapes(
             bins,
             (s.w, s.h),
             &pos,
+            i as i32,
             text,
             preserve_linesegs,
             warnings,
