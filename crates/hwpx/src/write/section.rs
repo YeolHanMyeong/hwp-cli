@@ -549,14 +549,17 @@ fn write_draw_text(
     g: &GenericControl,
     ids: &mut IdSeq,
     bins: &mut BinCollector,
+    width: i32,
     preserve_linesegs: bool,
     warnings: &mut Vec<String>,
 ) {
     if g.paragraph_lists.is_empty() {
         return;
     }
-    out.push_str(
-        r##"<hp:drawText name="" editable="0"><hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">"##,
+    // lastWidth=박스 폭, vertAlign=CENTER(정품 실측). 안쪽 여백(textMargin)도 정품 필수.
+    let _ = write!(
+        out,
+        r##"<hp:drawText lastWidth="{width}" name="" editable="0"><hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="CENTER" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">"##,
     );
     for list in &g.paragraph_lists {
         for para in &list.paragraphs {
@@ -572,7 +575,9 @@ fn write_draw_text(
             );
         }
     }
-    out.push_str("</hp:subList></hp:drawText>");
+    out.push_str(
+        r##"</hp:subList><hp:textMargin left="283" right="283" top="283" bottom="283"/></hp:drawText>"##,
+    );
 }
 
 /// hwp5 쪽번호 위치 코드 → OWPML pos 속성(reader `build_pgnp` 역매핑).
@@ -599,8 +604,11 @@ fn gso_pos_xml(attr: u32, voff: i32, hoff: i32) -> String {
     let valign = ((attr >> 5) & 0x7) as u8;
     let hrel = ((attr >> 8) & 0x3) as u8;
     let halign = ((attr >> 10) & 0x7) as u8;
+    // 부유 도형(treatAsChar=0)은 flowWithText=0·allowOverlap=1(정품 실측). 본문흐름(=1/0)
+    // 이면 한글이 다수 도형을 배치 못 해 빈 화면. 인라인(treatAsChar=1)은 1/0 유지.
+    let (flow, overlap) = if treat == 1 { (1, 0) } else { (0, 1) };
     format!(
-        r##"<hp:pos treatAsChar="{treat}" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="{}" horzRelTo="{}" vertAlign="{}" horzAlign="{}" vertOffset="{voff}" horzOffset="{hoff}"/>"##,
+        r##"<hp:pos treatAsChar="{treat}" affectLSpacing="0" flowWithText="{flow}" allowOverlap="{overlap}" holdAnchorAndSO="0" vertRelTo="{}" horzRelTo="{}" vertAlign="{}" horzAlign="{}" vertOffset="{voff}" horzOffset="{hoff}"/>"##,
         vert_rel_to_name(vrel),
         horz_rel_to_name(hrel),
         vert_align_name(valign),
@@ -632,9 +640,11 @@ fn write_shape_element(
         ShapeKind::Curve => "curve",
         ShapeKind::Arc => "arc",
     };
+    // textWrap=IN_FRONT_OF_TEXT: 정품(테스트2.hwpx) 부유 도형 실측. TOP_AND_BOTTOM(본문
+    // 흐름 삽입)이면 한글이 다수 도형을 배치 못 해 빈 화면이 된다(실기 확정).
     let _ = write!(
         out,
-        r##"<hp:{el} id="{}" zOrder="{zorder}" numberingType="PICTURE" textWrap="TOP_AND_BOTTOM" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="{}""##,
+        r##"<hp:{el} id="{}" zOrder="{zorder}" numberingType="PICTURE" textWrap="IN_FRONT_OF_TEXT" textFlow="BOTH_SIDES" lock="0" dropcapstyle="None" href="" groupLevel="0" instid="{}""##,
         ids.next(),
         ids.next(),
     );
@@ -658,6 +668,8 @@ fn write_shape_element(
             arrow_name(s.arrow_end),
         );
     }
+    // fillBrush는 채움이 없어도 항상 방출한다(정품 실측 — 흰색 불투명). 생략하면 한글이
+    // 도형을 그리지 않는다.
     if let Some(gr) = &s.fill_gradient {
         // reader parse_gradation의 역: type/angle 속성 + color 자식들.
         let _ = write!(
@@ -671,16 +683,26 @@ fn write_shape_element(
             let _ = write!(out, r##"<hc:color value="{}"/>"##, color_hex(*c));
         }
         out.push_str("</hc:gradation></hc:fillBrush>");
-    } else if s.fill != 0xFFFF_FFFF {
+    } else {
+        let face = if s.fill == 0xFFFF_FFFF {
+            "#FFFFFF".to_string()
+        } else {
+            color_hex(s.fill)
+        };
         let _ = write!(
             out,
-            r##"<hc:fillBrush><hc:winBrush faceColor="{}" hatchColor="#000000" alpha="0"/></hc:fillBrush>"##,
-            color_hex(s.fill),
+            r##"<hc:fillBrush><hc:winBrush faceColor="{face}" hatchColor="#000000" alpha="0"/></hc:fillBrush>"##,
         );
     }
+    // shadow(type=NONE)도 정품 실측 필수 요소.
+    out.push_str(r##"<hp:shadow type="NONE" color="#B2B2B2" offsetX="0" offsetY="0" alpha="0"/>"##);
+    if let Some(g) = text {
+        write_draw_text(out, doc, g, ids, bins, sz.0, preserve_linesegs, warnings);
+    }
+    // 기하 좌표점은 drawText 뒤(정품 순서). Rect/Ellipse는 bbox 4모서리 pt0~3 —
+    // 이 점이 없으면 한글이 도형 외곽을 몰라 렌더하지 않는다(빈 화면 원인).
     match s.kind {
         ShapeKind::Line => {
-            // 정품 형식은 startPt/endPt. 점 없으면 bbox 대각(reader는 sz/pos로 왕복).
             let (p0, p1) = if s.points.len() >= 2 {
                 (s.points[0], s.points[1])
             } else {
@@ -697,10 +719,13 @@ fn write_shape_element(
                 let _ = write!(out, r##"<hc:pt{pi} x="{px}" y="{py}"/>"##);
             }
         }
-        _ => {}
-    }
-    if let Some(g) = text {
-        write_draw_text(out, doc, g, ids, bins, preserve_linesegs, warnings);
+        ShapeKind::Rect | ShapeKind::Ellipse | ShapeKind::Arc => {
+            let (w, h) = (sz.0, sz.1);
+            let _ = write!(
+                out,
+                r##"<hc:pt0 x="0" y="0"/><hc:pt1 x="{w}" y="0"/><hc:pt2 x="{w}" y="{h}"/><hc:pt3 x="0" y="{h}"/>"##,
+            );
+        }
     }
     let _ = write!(
         out,
