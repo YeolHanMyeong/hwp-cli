@@ -2,8 +2,8 @@
 //!
 //! 합성 HWPX(미리보기 썸네일 + `hp:switch` 호환 블록 + `{{name}}`)를 만든 뒤,
 //! 채우기 후에도 비대상 엔트리가 바이트 보존되고 본문 자리표시자만 치환되는지,
-//! 그리고 치환 부수 정합성(줄 배치 캐시 제거·미리보기/hpf 동기화)이
-//! 지켜지는지 검증.
+//! 그리고 치환 부수 정합성(줄 배치 캐시 제거·미리보기/hpf 동기화·zip 메타데이터
+//! 복원)이 지켜지는지 검증.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -200,6 +200,59 @@ fn fill_hpf_동기화_및_이스케이프() {
         prv.contains("A&B<연구소> 운영 보고"),
         "미리보기는 평문: {prv}"
     );
+
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_file(&out);
+}
+
+/// 입력 zip의 특정 엔트리를 Java 변환본 스타일(FAT origin, external attr 0,
+/// 고정 시각)로 바이트 패치한다. 중앙 디렉터리 레코드: 시그니처 PK\x01\x02,
+/// version_made_by @+4, mod time/date @+12/+14, external attr @+38, 이름 @+46.
+fn set_fat_attrs(path: &std::path::Path, name: &str) {
+    let mut bytes = std::fs::read(path).unwrap();
+    let sig = [0x50, 0x4B, 0x01, 0x02];
+    let mut patched = false;
+    for i in 0..bytes.len().saturating_sub(46 + name.len()) {
+        if bytes[i..i + 4] == sig && &bytes[i + 46..i + 46 + name.len()] == name.as_bytes() {
+            bytes[i + 4] = 20; // version 2.0
+            bytes[i + 5] = 0; // 생성 시스템 FAT/DOS
+            bytes[i + 12..i + 14].copy_from_slice(&0u16.to_le_bytes()); // mod time
+            bytes[i + 14..i + 16].copy_from_slice(&0x21u16.to_le_bytes()); // 1980-01-01
+            bytes[i + 38..i + 42].copy_from_slice(&0u32.to_le_bytes()); // external attr
+            patched = true;
+        }
+    }
+    assert!(patched, "fixture 중앙 디렉터리에서 {name} 못 찾음");
+    std::fs::write(path, bytes).unwrap();
+}
+
+#[test]
+fn fill_zip_메타데이터_복원() {
+    let dir = std::env::temp_dir();
+    let src = dir.join("hwpx_patch_src_attrs.hwpx");
+    let out = dir.join("hwpx_patch_out_attrs.hwpx");
+    build_fixture(&src);
+    // 입력을 Java 변환본처럼: 다시 쓰이는 엔트리(section0)를 FAT origin으로.
+    set_fat_attrs(&src, "Contents/section0.xml");
+
+    fill_기관명(&src, &out, "제주한라대학교");
+
+    let src_meta = hwpx::patch::zip_entry_metadata(&src).unwrap();
+    let out_meta = hwpx::patch::zip_entry_metadata(&out).unwrap();
+    let name = "Contents/section0.xml";
+    assert_eq!(
+        out_meta.get(name),
+        src_meta.get(name),
+        "다시 쓴 엔트리의 zip 메타데이터는 원본과 동일해야"
+    );
+    let m = out_meta.get(name).unwrap();
+    assert_eq!(m.version_made_by >> 8, 0, "생성 시스템 FAT 유지");
+    assert_eq!(m.external_attr, 0, "external attr 0 유지");
+
+    // 출력이 여전히 유효한 zip인지 (중앙 디렉터리 패치 후 재열기).
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(&out).unwrap()).unwrap();
+    let section = String::from_utf8(read_entry(&mut zip, "Contents/section0.xml")).unwrap();
+    assert!(section.contains("제주한라대학교"));
 
     let _ = std::fs::remove_file(&src);
     let _ = std::fs::remove_file(&out);

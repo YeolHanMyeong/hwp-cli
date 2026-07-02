@@ -1,8 +1,10 @@
 //! `hwp fill` — 템플릿 채우기.
 //!
 //! 두 경로: (1) **자리표시자 치환**(기본) — `Contents/section*.xml`의 `{{name}}`만
-//! 외과 치환하고 나머지 패키지 엔트리(미리보기·compat·BinData)를 바이트 보존(hwpx
-//! 입력 전용). (2) **데이터 구동 표 채우기** — `--data`에 `tables` 지시가 있으면 IR로
+//! 외과 치환하고 나머지 패키지 엔트리(썸네일·compat·BinData)를 바이트 보존(hwpx
+//! 입력 전용). 치환 문단의 줄 배치 캐시 제거, 미리보기 텍스트(PrvText)·content.hpf
+//! 동기 치환, zip 엔트리 메타데이터 복원까지 수행한다([`hwpx::patch`] 참조).
+//! (2) **데이터 구동 표 채우기** — `--data`에 `tables` 지시가 있으면 IR로
 //! 읽어 표 행을 데이터 수만큼 늘리고(add_rows) 셀을 채운 뒤 다시 쓴다(.hwp/.hwpx 모두).
 
 use std::collections::BTreeMap;

@@ -12,6 +12,10 @@
 //!   않은 문단은 바이트 그대로 두고, 치환이 전혀 없는 섹션은 raw 복사한다.
 //! - `Preview/PrvText.txt`(UTF-8/UTF-16LE 자동 감지)와 `Contents/content.hpf`에
 //!   남은 자리표시자도 함께 치환한다 (탐색기·한글 미리보기에 옛 텍스트 잔류 방지).
+//! - 다시 쓴 엔트리의 zip 중앙 디렉터리 메타데이터(생성 시스템·수정 시각·
+//!   external attr)를 원본 값으로 되돌린다. hwp2hwpx 등 Java 변환본은
+//!   FAT origin(생성 시스템 0)·external attr 0인데, 재작성 시 기본값이 섞이면
+//!   한글이 "손상/변조" 경고를 띄우는 사례가 있다.
 //!
 //! 한계: 자리표시자가 `<hp:t>` 런/문단 경계를 가로지르면(예: `<hp:t>{{기</hp:t>
 //! <hp:t>관명}}</hp:t>`) 문자열 치환이 매칭하지 못한다. 템플릿은 자리표시자를
@@ -89,6 +93,10 @@ pub fn fill_placeholders(
         }
     }
     zip.finish()?;
+
+    // 다시 쓴 엔트리의 zip 메타데이터를 원본과 동일하게 복원 (best-effort:
+    // ZIP64 등 파싱 불가 구조면 그대로 둔다 — 치환 결과 자체는 유효).
+    sync_entry_metadata(input, output)?;
     Ok(counts)
 }
 
@@ -270,4 +278,145 @@ fn xml_escape(s: &str) -> String {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// zip 엔트리 메타데이터 복원
+// ---------------------------------------------------------------------------
+
+/// zip 중앙 디렉터리 엔트리의 메타데이터 (진단·검증용).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZipEntryMeta {
+    /// version made by — 상위 바이트가 생성 시스템(0=FAT/DOS, 3=Unix).
+    pub version_made_by: u16,
+    /// MS-DOS 수정 시각.
+    pub mod_time: u16,
+    /// MS-DOS 수정 날짜.
+    pub mod_date: u16,
+    /// external file attributes — Unix는 상위 16비트에 모드, FAT origin은 0.
+    pub external_attr: u32,
+}
+
+/// zip 파일의 엔트리 이름 → 중앙 디렉터리 메타데이터. ZIP64 등 파싱 불가
+/// 구조면 빈 맵을 반환한다.
+pub fn zip_entry_metadata(path: &Path) -> Result<BTreeMap<String, ZipEntryMeta>> {
+    let data = std::fs::read(path)?;
+    let entries = parse_central_directory(&data).unwrap_or_default();
+    Ok(entries.into_iter().map(|e| (e.name, e.meta)).collect())
+}
+
+struct CdEntry {
+    name: String,
+    /// 중앙 디렉터리 레코드 시작 오프셋.
+    cd_pos: usize,
+    /// 대응 로컬 헤더 오프셋.
+    local_offset: u32,
+    meta: ZipEntryMeta,
+}
+
+/// 출력 zip의 각 엔트리에 대해, 같은 이름이 입력에 있으면 생성 시스템
+/// (version made by)·수정 시각·external attr를 입력 값으로 되돌린다.
+/// 로컬 헤더의 수정 시각도 함께 맞춰 중앙 디렉터리와의 불일치를 막는다.
+///
+/// 근거: hwp2hwpx(Java) 변환본은 FAT origin(생성 시스템 0)·external attr 0으로
+/// 기록되는데, 재작성 엔트리에 Unix 퍼미션/현재 시각이 섞이면 한글 문서 보안
+/// 검사에서 "손상/변조" 경고가 뜨는 사례가 있다 (han-auto에서 실증).
+fn sync_entry_metadata(input: &Path, output: &Path) -> Result<()> {
+    let src = std::fs::read(input)?;
+    let Some(src_entries) = parse_central_directory(&src) else {
+        return Ok(());
+    };
+    let src_map: BTreeMap<&str, &CdEntry> =
+        src_entries.iter().map(|e| (e.name.as_str(), e)).collect();
+
+    let mut dst = std::fs::read(output)?;
+    let Some(dst_entries) = parse_central_directory(&dst) else {
+        return Ok(());
+    };
+
+    const LOCAL_SIG: [u8; 4] = [0x50, 0x4B, 0x03, 0x04];
+    let mut changed = false;
+    for e in &dst_entries {
+        let Some(s) = src_map.get(e.name.as_str()) else {
+            continue;
+        };
+        if e.meta == s.meta {
+            continue;
+        }
+        write_u16(&mut dst, e.cd_pos + 4, s.meta.version_made_by);
+        write_u16(&mut dst, e.cd_pos + 12, s.meta.mod_time);
+        write_u16(&mut dst, e.cd_pos + 14, s.meta.mod_date);
+        write_u32(&mut dst, e.cd_pos + 38, s.meta.external_attr);
+        let lo = e.local_offset as usize;
+        if dst.len() >= lo + 30 && dst[lo..lo + 4] == LOCAL_SIG {
+            write_u16(&mut dst, lo + 10, s.meta.mod_time);
+            write_u16(&mut dst, lo + 12, s.meta.mod_date);
+        }
+        changed = true;
+    }
+    if changed {
+        std::fs::write(output, &dst)?;
+    }
+    Ok(())
+}
+
+/// 중앙 디렉터리를 파싱한다. ZIP64이거나 구조가 어긋나면 `None`
+/// (호출부는 메타데이터 복원을 건너뛴다).
+fn parse_central_directory(data: &[u8]) -> Option<Vec<CdEntry>> {
+    const EOCD_SIG: [u8; 4] = [0x50, 0x4B, 0x05, 0x06];
+    const CD_SIG: [u8; 4] = [0x50, 0x4B, 0x01, 0x02];
+
+    // EOCD는 파일 끝 22바이트 + 최대 65535바이트 주석 안에 있다. 뒤에서부터 탐색.
+    let tail_start = data.len().saturating_sub(22 + 65_535);
+    let last = data.len().checked_sub(22)?;
+    let eocd = (tail_start..=last)
+        .rev()
+        .find(|&i| data[i..i + 4] == EOCD_SIG)?;
+
+    let total = read_u16(data, eocd + 10)? as usize;
+    let cd_offset = read_u32(data, eocd + 16)? as usize;
+    if total == 0xFFFF || cd_offset == 0xFFFF_FFFF_usize {
+        return None; // ZIP64 — hwpx에선 비현실적 크기, 복원 생략
+    }
+
+    let mut entries = Vec::with_capacity(total);
+    let mut pos = cd_offset;
+    for _ in 0..total {
+        if data.get(pos..pos + 4)? != CD_SIG {
+            return None;
+        }
+        let name_len = read_u16(data, pos + 28)? as usize;
+        let extra_len = read_u16(data, pos + 30)? as usize;
+        let comment_len = read_u16(data, pos + 32)? as usize;
+        let name_bytes = data.get(pos + 46..pos + 46 + name_len)?;
+        entries.push(CdEntry {
+            name: String::from_utf8_lossy(name_bytes).into_owned(),
+            cd_pos: pos,
+            local_offset: read_u32(data, pos + 42)?,
+            meta: ZipEntryMeta {
+                version_made_by: read_u16(data, pos + 4)?,
+                mod_time: read_u16(data, pos + 12)?,
+                mod_date: read_u16(data, pos + 14)?,
+                external_attr: read_u32(data, pos + 38)?,
+            },
+        });
+        pos += 46 + name_len + extra_len + comment_len;
+    }
+    Some(entries)
+}
+
+fn read_u16(data: &[u8], pos: usize) -> Option<u16> {
+    Some(u16::from_le_bytes(data.get(pos..pos + 2)?.try_into().ok()?))
+}
+
+fn read_u32(data: &[u8], pos: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(data.get(pos..pos + 4)?.try_into().ok()?))
+}
+
+fn write_u16(data: &mut [u8], pos: usize, v: u16) {
+    data[pos..pos + 2].copy_from_slice(&v.to_le_bytes());
+}
+
+fn write_u32(data: &mut [u8], pos: usize, v: u32) {
+    data[pos..pos + 4].copy_from_slice(&v.to_le_bytes());
 }
