@@ -2,7 +2,8 @@
 //!
 //! 합성 HWPX(미리보기 썸네일 + `hp:switch` 호환 블록 + `{{name}}`)를 만든 뒤,
 //! 채우기 후에도 비대상 엔트리가 바이트 보존되고 본문 자리표시자만 치환되는지,
-//! 그리고 치환 문단의 줄 배치 캐시 제거가 지켜지는지 검증.
+//! 그리고 치환 부수 정합성(줄 배치 캐시 제거·미리보기/hpf 동기화)이
+//! 지켜지는지 검증.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -29,6 +30,15 @@ fn utf16le_bom(text: &str) -> Vec<u8> {
         out.extend_from_slice(&u.to_le_bytes());
     }
     out
+}
+
+fn decode_utf16le_bom(raw: &[u8]) -> String {
+    assert_eq!(&raw[..2], &[0xFF, 0xFE], "UTF-16LE BOM 유지돼야");
+    let units: Vec<u16> = raw[2..]
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    String::from_utf16(&units).unwrap()
 }
 
 fn build_fixture(path: &std::path::Path) {
@@ -141,6 +151,54 @@ fn fill_치환_문단만_lineseg_제거() {
     assert!(
         p2.contains(r#"<hp:lineseg textpos="0" vertpos="100"/>"#),
         "무변경 문단의 lineseg 캐시는 보존돼야: {p2}"
+    );
+
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_file(&out);
+}
+
+#[test]
+fn fill_미리보기_utf16_동기화() {
+    let dir = std::env::temp_dir();
+    let src = dir.join("hwpx_patch_src_prv.hwpx");
+    let out = dir.join("hwpx_patch_out_prv.hwpx");
+    build_fixture(&src);
+
+    fill_기관명(&src, &out, "제주한라대학교");
+
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(&out).unwrap()).unwrap();
+    let prv = decode_utf16le_bom(&read_entry(&mut zip, "Preview/PrvText.txt"));
+    assert!(
+        prv.contains("제주한라대학교 운영 보고"),
+        "미리보기 텍스트 동기화: {prv}"
+    );
+    assert!(!prv.contains("{{기관명}}"), "미리보기 자리표시자 잔류 금지");
+
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_file(&out);
+}
+
+#[test]
+fn fill_hpf_동기화_및_이스케이프() {
+    let dir = std::env::temp_dir();
+    let src = dir.join("hwpx_patch_src_hpf.hwpx");
+    let out = dir.join("hwpx_patch_out_hpf.hwpx");
+    build_fixture(&src);
+
+    // XML 특수문자 값 — hpf/section에는 이스케이프돼 들어가야 한다.
+    fill_기관명(&src, &out, "A&B<연구소>");
+
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(&out).unwrap()).unwrap();
+    let hpf = String::from_utf8(read_entry(&mut zip, "Contents/content.hpf")).unwrap();
+    assert!(
+        hpf.contains("A&amp;B&lt;연구소&gt; 운영 보고"),
+        "hpf 메타데이터 동기화(+이스케이프): {hpf}"
+    );
+    // 미리보기는 평문이므로 이스케이프 없이 원문 그대로.
+    let prv = decode_utf16le_bom(&read_entry(&mut zip, "Preview/PrvText.txt"));
+    assert!(
+        prv.contains("A&B<연구소> 운영 보고"),
+        "미리보기는 평문: {prv}"
     );
 
     let _ = std::fs::remove_file(&src);

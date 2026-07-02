@@ -5,10 +5,13 @@
 //! 이 모듈은 본문 `Contents/section*.xml`의 `{{name}}` 텍스트만 외과적으로 치환하고
 //! 나머지 엔트리는 ZIP raw 복사로 **바이트 보존**한다(mimetype STORED·순서 포함).
 //!
-//! 치환은 문단 단위로 수행하며, 치환된 문단의 `<hp:linesegarray>`(줄 배치 캐시)를
-//! 제거한다. 텍스트 길이가 바뀌었는데 줄 배치가 남아 있으면 macOS 한글에서
-//! 글자가 겹쳐 보이고 "변조" 보안 경고의 원인이 된다. 치환되지 않은 문단은
-//! 바이트 그대로 두고, 치환이 전혀 없는 섹션은 raw 복사한다.
+//! 치환에 수반되는 정합성 처리:
+//! - 치환은 문단 단위로 수행하며, 치환된 문단의 `<hp:linesegarray>`(줄 배치
+//!   캐시)를 제거한다. 텍스트 길이가 바뀌었는데 줄 배치가 남아 있으면 macOS
+//!   한글에서 글자가 겹쳐 보이고 "변조" 보안 경고의 원인이 된다. 치환되지
+//!   않은 문단은 바이트 그대로 두고, 치환이 전혀 없는 섹션은 raw 복사한다.
+//! - `Preview/PrvText.txt`(UTF-8/UTF-16LE 자동 감지)와 `Contents/content.hpf`에
+//!   남은 자리표시자도 함께 치환한다 (탐색기·한글 미리보기에 옛 텍스트 잔류 방지).
 //!
 //! 한계: 자리표시자가 `<hp:t>` 런/문단 경계를 가로지르면(예: `<hp:t>{{기</hp:t>
 //! <hp:t>관명}}</hp:t>`) 문자열 치환이 매칭하지 못한다. 템플릿은 자리표시자를
@@ -23,6 +26,7 @@ use crate::error::Result;
 
 /// `Contents/section*.xml`의 `{{name}}`을 값으로 치환하고, 그 외 엔트리는 원본 그대로
 /// 복사한다. 반환: 이름 → 본문 치환 횟수(요청한 모든 이름 포함, 미발견은 0).
+/// 미리보기·content.hpf 치환은 횟수에 포함하지 않는다.
 pub fn fill_placeholders(
     input: &Path,
     output: &Path,
@@ -57,6 +61,17 @@ pub fn fill_placeholders(
             let mut xml = String::new();
             archive.by_index(i)?.read_to_string(&mut xml)?;
             fill_section_xml(&xml, values, &mut counts).map(String::into_bytes)
+        } else if name == "Preview/PrvText.txt" {
+            let mut raw = Vec::new();
+            archive.by_index(i)?.read_to_end(&mut raw)?;
+            patch_preview_text(&raw, values)
+        } else if name == "Contents/content.hpf" {
+            let mut raw = Vec::new();
+            archive.by_index(i)?.read_to_end(&mut raw)?;
+            std::str::from_utf8(&raw)
+                .ok()
+                .and_then(|xml| replace_placeholders(xml, values, true))
+                .map(String::into_bytes)
         } else {
             None
         };
@@ -194,6 +209,54 @@ fn strip_linesegarray(para: &mut String) {
         };
         para.replace_range(a..end, "");
     }
+}
+
+/// 미리보기 텍스트의 자리표시자를 치환한다. 원본 인코딩(UTF-8 또는
+/// UTF-16LE, BOM 유무 포함)을 그대로 유지한다. 변경 없으면 `None`.
+fn patch_preview_text(raw: &[u8], values: &BTreeMap<String, String>) -> Option<Vec<u8>> {
+    const BOM: [u8; 2] = [0xFF, 0xFE];
+    // hwp2hwpx 등 Java 변환본은 UTF-16LE(BOM), 한글 직접 저장본은 UTF-8이
+    // 일반적이다. BOM 또는 선두 NUL 바이트(ASCII의 상위 바이트)로 판별.
+    let utf16 = raw.starts_with(&BOM) || raw.iter().take(64).any(|&b| b == 0);
+    if utf16 {
+        let has_bom = raw.starts_with(&BOM);
+        let body = if has_bom { &raw[2..] } else { raw };
+        let units: Vec<u16> = body
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let text = String::from_utf16_lossy(&units);
+        let replaced = replace_placeholders(&text, values, false)?;
+        let mut out = Vec::with_capacity(raw.len());
+        if has_bom {
+            out.extend_from_slice(&BOM);
+        }
+        for u in replaced.encode_utf16() {
+            out.extend_from_slice(&u.to_le_bytes());
+        }
+        Some(out)
+    } else {
+        let text = std::str::from_utf8(raw).ok()?;
+        replace_placeholders(text, values, false).map(String::into_bytes)
+    }
+}
+
+/// `{{name}}` → 값 치환. `escape`면 XML 이스케이프 적용. 변경 없으면 `None`.
+fn replace_placeholders(
+    text: &str,
+    values: &BTreeMap<String, String>,
+    escape: bool,
+) -> Option<String> {
+    let mut out: Option<String> = None;
+    for (k, v) in values {
+        let needle = format!("{{{{{k}}}}}");
+        let target = out.as_deref().unwrap_or(text);
+        if target.contains(needle.as_str()) {
+            let value = if escape { xml_escape(v) } else { v.clone() };
+            out = Some(target.replace(needle.as_str(), &value));
+        }
+    }
+    out
 }
 
 fn xml_escape(s: &str) -> String {
