@@ -230,32 +230,39 @@ fn strict_fails_on_dropped_controls() {
     if skip_if_no_fixtures() {
         return;
     }
-    // annual_report는 hwpx 쓰기 시 gso 도형을 드롭 → --strict면 비정상 종료.
-    let out = tmp("hwp_cli_strict.hwpx");
-    let ok = hwp()
+    // annual_report의 hwp→hwpx는 이제 무드롭(도형 전부 지원: rect/line/ellipse/arc/polygon).
+    // 드롭 발생 경로는 역방향(hwpx→hwp) — hwpx-출신 장식 도형은 hwp5 SHAPE_COMPONENT
+    // 정합 역합성을 안 하고 strip으로 드롭한다. --strict면 그 드롭에서 비정상 종료.
+    let mid = tmp("hwp_cli_strict.hwpx");
+    let fwd = hwp()
         .arg("convert")
         .arg(fixture("hwp5/annual_report.hwp"))
         .arg("-o")
-        .arg(&out)
+        .arg(&mid)
         .args(["--to", "hwpx"])
         .status()
         .unwrap();
-    assert!(ok.success(), "--strict 없으면 성공");
+    assert!(fwd.success(), "hwp→hwpx는 무드롭으로 성공");
 
+    let dst = tmp("hwp_cli_strict.hwp");
     let strict = hwp()
         .arg("convert")
-        .arg(fixture("hwp5/annual_report.hwp"))
+        .arg(&mid)
         .arg("-o")
-        .arg(&out)
-        .args(["--to", "hwpx", "--strict"])
+        .arg(&dst)
+        .arg("--strict")
         .output()
         .unwrap();
-    assert!(!strict.status.success(), "--strict면 드롭 시 비정상 종료");
+    assert!(
+        !strict.status.success(),
+        "역방향 장식 도형 드롭 시 --strict면 비정상 종료"
+    );
     assert!(
         String::from_utf8_lossy(&strict.stderr).contains("strict"),
         "strict 사유 출력"
     );
-    let _ = std::fs::remove_file(&out);
+    let _ = std::fs::remove_file(&mid);
+    let _ = std::fs::remove_file(&dst);
 }
 
 #[test]
