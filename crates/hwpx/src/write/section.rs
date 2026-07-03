@@ -642,8 +642,18 @@ fn write_shape_element(
         ids.next(),
         ids.next(),
     );
-    if matches!(s.kind, ShapeKind::Rect) {
-        let _ = write!(out, r##" ratio="{}""##, s.round_ratio);
+    // 도형별 여는태그 추가 속성(정품 실측): Rect=ratio, Ellipse=호속성 3종, Arc=type.
+    match s.kind {
+        ShapeKind::Rect => {
+            let _ = write!(out, r##" ratio="{}""##, s.round_ratio);
+        }
+        ShapeKind::Ellipse => {
+            out.push_str(r##" intervalDirty="0" hasArcPr="0" arcType="NORMAL""##);
+        }
+        ShapeKind::Arc => {
+            out.push_str(r##" type="NORMAL""##);
+        }
+        _ => {}
     }
     out.push('>');
     write_obj_scaffold(out, sz.0, sz.1);
@@ -713,12 +723,39 @@ fn write_shape_element(
                 let _ = write!(out, r##"<hc:pt{pi} x="{px}" y="{py}"/>"##);
             }
         }
-        ShapeKind::Rect | ShapeKind::Ellipse | ShapeKind::Arc => {
+        ShapeKind::Rect => {
+            // 사각형은 bbox 4모서리 pt0~3(정품 실측).
             let (w, h) = (sz.0, sz.1);
             let _ = write!(
                 out,
                 r##"<hc:pt0 x="0" y="0"/><hc:pt1 x="{w}" y="0"/><hc:pt2 x="{w}" y="{h}"/><hc:pt3 x="0" y="{h}"/>"##,
             );
+        }
+        ShapeKind::Ellipse => {
+            // 타원은 중심+축끝점+호각(정품 실측 — pt0~3가 아님). 완전 타원이라 start/end=0.
+            let (w, h) = (sz.0, sz.1);
+            let (cx, cy) = (w / 2, h / 2);
+            let _ = write!(
+                out,
+                r##"<hc:center x="{cx}" y="{cy}"/><hc:ax1 x="{w}" y="{cy}"/><hc:ax2 x="{cx}" y="0"/><hc:start1 x="0" y="0"/><hc:end1 x="0" y="0"/><hc:start2 x="0" y="0"/><hc:end2 x="0" y="0"/>"##,
+            );
+        }
+        ShapeKind::Arc => {
+            // 호는 중심+축끝점 2개(정품 실측). 파싱된 3점(center,ax1,ax2) 사용, 없으면 bbox 근사.
+            if s.points.len() >= 3 {
+                let (c, a1, a2) = (s.points[0], s.points[1], s.points[2]);
+                let _ = write!(
+                    out,
+                    r##"<hc:center x="{}" y="{}"/><hc:ax1 x="{}" y="{}"/><hc:ax2 x="{}" y="{}"/>"##,
+                    c.0, c.1, a1.0, a1.1, a2.0, a2.1,
+                );
+            } else {
+                let (w, h) = (sz.0, sz.1);
+                let _ = write!(
+                    out,
+                    r##"<hc:center x="0" y="0"/><hc:ax1 x="0" y="{h}"/><hc:ax2 x="{w}" y="0"/>"##,
+                );
+            }
         }
     }
     let _ = write!(

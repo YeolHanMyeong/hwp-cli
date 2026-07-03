@@ -16,6 +16,7 @@ const SHAPE_COMPONENT: u16 = 0x4C;
 const SC_LINE: u16 = 0x4E;
 const SC_RECTANGLE: u16 = 0x4F;
 const SC_ELLIPSE: u16 = 0x50;
+const SC_ARC: u16 = 0x51;
 const SC_POLYGON: u16 = 0x52;
 const SC_CURVE: u16 = 0x53;
 const SC_CONTAINER: u16 = 0x56;
@@ -49,14 +50,14 @@ fn component(sc: &OpaqueRecord, out: &mut Vec<ShapeGeom>, depth: u32) {
     };
     for child in &sc.children {
         match child.tag {
-            SC_LINE | SC_RECTANGLE | SC_ELLIPSE | SC_POLYGON | SC_CURVE => {
+            SC_LINE | SC_RECTANGLE | SC_ELLIPSE | SC_ARC | SC_POLYGON | SC_CURVE => {
                 if let Some(shape) = geometry(child.tag, &child.data, &style) {
                     out.push(shape);
                 }
             }
             SHAPE_COMPONENT => component(child, out, depth + 1),
             SC_CONTAINER => walk(&child.children, out, depth + 1),
-            _ => {} // SC_ARC 등 v1 제외
+            _ => {} // 이미지 채움 등 v1 제외
         }
     }
 }
@@ -275,6 +276,13 @@ fn geometry(tag: u16, d: &[u8], s: &Style) -> Option<ShapeGeom> {
             let pts = (0..n).map(|i| p(2 + i * 8)).collect::<Option<Vec<_>>>()?;
             (ShapeKind::Curve, pts, 0)
         }
+        SC_ARC => {
+            // BYTE kind + center + ax1(끝점) + ax2(끝점) (정품 25B). 3점 보존(호 곡선).
+            let c = p(1)?;
+            let a1 = p(9)?;
+            let a2 = p(17)?;
+            (ShapeKind::Arc, vec![c, a1, a2], 0)
+        }
         _ => return None,
     };
 
@@ -288,7 +296,8 @@ fn geometry(tag: u16, d: &[u8], s: &Style) -> Option<ShapeGeom> {
         maxy = maxy.max(y);
     }
     let points: Vec<(i32, i32)> = match kind {
-        ShapeKind::Line | ShapeKind::Polygon | ShapeKind::Curve => tp
+        // Arc는 center/ax1/ax2 3점을 bbox 기준으로 보존(writer가 그대로 방출).
+        ShapeKind::Line | ShapeKind::Polygon | ShapeKind::Curve | ShapeKind::Arc => tp
             .iter()
             .map(|&(x, y)| ((x - minx).round() as i32, (y - miny).round() as i32))
             .collect(),
