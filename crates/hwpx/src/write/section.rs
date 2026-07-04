@@ -530,10 +530,10 @@ fn arrow_name(code: u8) -> &'static str {
 }
 
 /// 개체 공통 자식(offset/orgSz/curSz/flip/rotationInfo/단위행렬) — 정품 line/pic 스캐폴드 복제.
-fn write_obj_scaffold(out: &mut String, w: i32, h: i32) {
+fn write_obj_scaffold(out: &mut String, w: i32, h: i32, cur_w: i32, cur_h: i32) {
     let _ = write!(
         out,
-        r##"<hp:offset x="0" y="0"/><hp:orgSz width="{w}" height="{h}"/><hp:curSz width="{w}" height="{h}"/><hp:flip horizontal="0" vertical="0"/><hp:rotationInfo angle="0" centerX="{}" centerY="{}" rotateimage="1"/><hp:renderingInfo><hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/></hp:renderingInfo>"##,
+        r##"<hp:offset x="0" y="0"/><hp:orgSz width="{w}" height="{h}"/><hp:curSz width="{cur_w}" height="{cur_h}"/><hp:flip horizontal="0" vertical="0"/><hp:rotationInfo angle="0" centerX="{}" centerY="{}" rotateimage="1"/><hp:renderingInfo><hc:transMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:scaMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/><hc:rotMatrix e1="1" e2="0" e3="0" e4="0" e5="1" e6="0"/></hp:renderingInfo>"##,
         w / 2,
         h / 2,
     );
@@ -656,7 +656,12 @@ fn write_shape_element(
         _ => {}
     }
     out.push('>');
-    write_obj_scaffold(out, sz.0, sz.1);
+    // curSz: 타원/호는 정품이 (0,0)(미리사이즈 없음 표식). 사각형 등은 (w,h) 유지.
+    let (cur_w, cur_h) = match s.kind {
+        ShapeKind::Ellipse | ShapeKind::Arc => (0, 0),
+        _ => (sz.0, sz.1),
+    };
+    write_obj_scaffold(out, sz.0, sz.1, cur_w, cur_h);
     if s.border_width <= 0 {
         out.push_str(
             r##"<hp:lineShape color="#000000" width="0" style="NONE" endCap="FLAT" headStyle="NORMAL" tailStyle="NORMAL" headfill="1" tailfill="1" headSz="SMALL_SMALL" tailSz="SMALL_SMALL" outlineStyle="NORMAL" alpha="0"/>"##,
