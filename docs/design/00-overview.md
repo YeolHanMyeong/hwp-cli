@@ -74,6 +74,7 @@
 | 06 | [convert-cli-methodology](06-convert-cli-methodology.md) | 변환 파이프라인, CLI, **정답지 방법론·진단 기법** |
 | 07 | [hangul-compat-rules](07-hangul-compat-rules.md) | ★**실기로 확정한 한글 호환성 규칙 전체 카탈로그** |
 | 08 | [external-research](08-external-research.md) | OWPML 표준·오픈소스·페이지네이션 동작 외부 근거(deep-research) |
+| 09 | [diagnostic-corpus](09-diagnostic-corpus.md) | 기능 격리 진단 코퍼스 + 자체 검증 하네스(현 상태·확장법) |
 
 ---
 
