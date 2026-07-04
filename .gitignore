@@ -20,3 +20,4 @@
 /docs/*.hwp
 /docs/*.png
 /docs/spec.txt
+target/diagnostic-corpus/
