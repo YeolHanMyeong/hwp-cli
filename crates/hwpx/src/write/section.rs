@@ -91,6 +91,26 @@ impl IdSeq {
     }
 }
 
+/// 한 run에 방출할 수 있는 그리기 도형의 최대 수. 한글은 run당 앞쪽 ~21개 도형만
+/// 렌더하고 나머지를 버리므로(실기 확정), 여유를 두고 이 수를 넘으면 run을 분할한다.
+const SHAPE_RUN_LIMIT: usize = 12;
+
+/// 방출된 XML 조각에서 최상위 그리기 도형 요소 수를 센다. `<hp:line `은 뒤에 공백을 둬
+/// `<hp:lineShape`·`<hp:lineseg`·`<hp:lineBreak`와 구분한다(도형 요소는 항상 속성이 따름).
+fn count_shape_tags(s: &str) -> usize {
+    const OPENS: [&str; 8] = [
+        "<hp:rect ",
+        "<hp:ellipse ",
+        "<hp:line ",
+        "<hp:arc ",
+        "<hp:polygon ",
+        "<hp:curve ",
+        "<hp:pic ",
+        "<hp:connectLine ",
+    ];
+    OPENS.iter().map(|t| s.matches(t).count()).sum()
+}
+
 /// 문단 하나를 직렬화한다. `inject_secpr`이면 첫 런에 기본 구역 정의를 넣는다.
 #[allow(clippy::too_many_arguments)]
 fn write_paragraph(
@@ -121,6 +141,10 @@ fn write_paragraph(
     let mut emitted_any_run = false;
     // 열려 있는 필드(FIELD_START)의 id — FIELD_END의 beginIDRef로 연결(필드 비중첩 가정).
     let mut current_field_id: Option<u32> = None;
+    // 현재 run에 방출한 그리기 도형 수 — 한글은 run당 앞쪽 ~21개만 그리고 나머지를 버린다
+    // (annual 6쪽 링 미렌더 실기 확정: 도형 35개/run → 22번째 이후 타원 전부 누락). 한계
+    // 전에 run을 강제 분할해 모든 도형이 렌더되게 한다.
+    let mut run_shapes = 0usize;
 
     macro_rules! open_run {
         ($shape:expr) => {
@@ -133,6 +157,18 @@ fn write_paragraph(
                 run_open = true;
                 emitted_any_run = true;
                 cur_shape = $shape;
+                run_shapes = 0;
+            }
+        };
+    }
+
+    // 도형 방출 전 호출: 현재 run이 도형 한계에 다다르면 같은 char_shape로 run을 새로 연다.
+    macro_rules! shape_break {
+        () => {
+            if run_open && run_shapes >= SHAPE_RUN_LIMIT {
+                out.push_str("</hp:run>");
+                let _ = write!(out, r##"<hp:run charPrIDRef="{}">"##, cur_shape);
+                run_shapes = 0;
             }
         };
     }
@@ -209,7 +245,10 @@ fn write_paragraph(
                     Control::Picture(pic) => {
                         open_run!(cur_shape);
                         flush_text(out, &mut text_buf);
+                        shape_break!();
+                        let before = out.len();
                         write_picture(out, doc, pic, ids, bins, warnings);
+                        run_shapes += count_shape_tags(&out[before..]);
                     }
                     Control::Generic(g) if hwp_convert::field::is_field_ctrl_id(&g.ctrl_id) => {
                         // 필드(누름틀·계산식·하이퍼링크 등) — fieldBegin 방출. 값 텍스트는
@@ -304,14 +343,20 @@ fn write_paragraph(
                         // hwpx-출신 구조화 도형(rect/ellipse/line/…) — ShapeGeom 재직렬화.
                         open_run!(cur_shape);
                         flush_text(out, &mut text_buf);
+                        shape_break!();
+                        let before = out.len();
                         write_ir_shapes(out, doc, g, ids, bins, preserve_linesegs, warnings);
+                        run_shapes += count_shape_tags(&out[before..]);
                     }
                     Control::Generic(g) if g.ctrl_id == *b"gso " => {
                         // hwp5-출신 gso: 글상자(rect+drawText — 텍스트/필드/책갈피 보존)와
                         // 장식 도형(SHAPE_COMPONENT → 도형 요소) 모두 방출.
                         open_run!(cur_shape);
                         flush_text(out, &mut text_buf);
+                        shape_break!();
+                        let before = out.len();
                         write_gso(out, doc, g, ids, bins, preserve_linesegs, warnings);
+                        run_shapes += count_shape_tags(&out[before..]);
                     }
                     Control::Generic(g) => {
                         warnings.push(format!(
