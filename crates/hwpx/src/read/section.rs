@@ -1007,6 +1007,13 @@ fn collect_shape(
                 points.push((px, py));
             }
         }
+        // Arc는 center/ax1/ax2(bbox 기준, 등장 순서)로 곡선 기하를 운반한다 — writer의 역.
+        // 렌더러가 이 3점(중심+켤레 두 축)으로 호를 그린다.
+        b"center" | b"ax1" | b"ax2" if matches!(kind, ShapeKind::Arc) => {
+            if let (Some(px), Some(py)) = (attr_i32(e, "x"), attr_i32(e, "y")) {
+                points.push((px, py));
+            }
+        }
         _ => {}
     };
 

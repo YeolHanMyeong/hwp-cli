@@ -189,6 +189,27 @@ fn ir_shape_path(s: &ShapeGeom) -> Vec<PathCmd> {
                 ]
             }
         }
+        // Arc: center/ax1/ax2(중심+켤레 두 축)로 1/4 타원호를 큐빅 베지에로 그린다.
+        // 베지에는 어파인 불변이라 켤레 축(비수직 포함)에도 정확. points 없으면 타원 폴백.
+        ShapeKind::Arc if s.points.len() >= 3 => {
+            let ab = |(px, py): (i32, i32)| ((s.x + px) as f64, (s.y + py) as f64);
+            let (cx, cy) = ab(s.points[0]);
+            let (a1x, a1y) = ab(s.points[1]);
+            let (a2x, a2y) = ab(s.points[2]);
+            let (a1, a2) = ((a1x - cx, a1y - cy), (a2x - cx, a2y - cy));
+            let pt = |sx: f64, sy: f64| ((cx + sx) as f32 / 100.0, (cy + sy) as f32 / 100.0);
+            let k = KAPPA;
+            let p0 = pt(a1.0, a1.1);
+            let p1 = pt(a2.0, a2.1);
+            vec![
+                PathCmd::MoveTo(p0.0, p0.1),
+                cubic(
+                    pt(a1.0 + k * a2.0, a1.1 + k * a2.1),
+                    pt(a2.0 + k * a1.0, a2.1 + k * a1.1),
+                    p1,
+                ),
+            ]
+        }
         ShapeKind::Ellipse | ShapeKind::Arc => {
             let (cx, cy) = ((x0 + w / 2.0) as f64, (y0 + h / 2.0) as f64);
             ellipse_path(
