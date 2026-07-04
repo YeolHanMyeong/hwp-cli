@@ -287,7 +287,29 @@ fn geometry(tag: u16, d: &[u8], s: &Style) -> Option<ShapeGeom> {
     };
 
     // 행렬 적용 후 bbox.
-    let tp: Vec<(f64, f64)> = raw_pts.iter().map(|&(x, y)| s.m.apply(x, y)).collect();
+    let mut tp: Vec<(f64, f64)> = raw_pts.iter().map(|&(x, y)| s.m.apply(x, y)).collect();
+    // Arc: 행렬(회전+비균등 스케일)이 center/ax1/ax2 두 축을 비수직(전단)으로 만든다.
+    // 한글 OWPML arc는 **수직 두 축**만 받으므로(비수직=pinwheel), 두 축을 그 각의 이등분선
+    // 기준 ±45°(=90° 사이)로 등방화해 원형 1/4호로 근사한다(회전·방향 보존, ~미세 타원율 손실).
+    if matches!(kind, ShapeKind::Arc) && tp.len() == 3 {
+        let c = tp[0];
+        let (v1, v2) = (
+            (tp[1].0 - c.0, tp[1].1 - c.1),
+            (tp[2].0 - c.0, tp[2].1 - c.1),
+        );
+        let r = (v1.0.hypot(v1.1) + v2.0.hypot(v2.1)) / 2.0;
+        let (a1, a2) = (v1.1.atan2(v1.0), v2.1.atan2(v2.0));
+        let mut d = a2 - a1; // v1→v2 sweep, 짧은 쪽으로 정규화
+        while d > std::f64::consts::PI {
+            d -= std::f64::consts::TAU;
+        }
+        while d < -std::f64::consts::PI {
+            d += std::f64::consts::TAU;
+        }
+        let (bis, q) = (a1 + d / 2.0, d.signum() * std::f64::consts::FRAC_PI_4);
+        tp[1] = (c.0 + r * (bis - q).cos(), c.1 + r * (bis - q).sin());
+        tp[2] = (c.0 + r * (bis + q).cos(), c.1 + r * (bis + q).sin());
+    }
     let (mut minx, mut miny, mut maxx, mut maxy) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
     for &(x, y) in &tp {
         minx = minx.min(x);
