@@ -14,7 +14,9 @@ HWP_FONT_DIR=$PWD/fonts python3 tools/diagnostic_corpus.py [출력디렉토리]
 
 **생성 케이스(각 = 한 기능, hwp+hwpx 양쪽):** single_para, multi_para, headings, bullet_list,
 numbered_list, formatting, long_para, table_2x2, table_header_only, table_multiline,
-table_empty_cells, multipage, special_chars, mixed.
+table_empty_cells, multipage, special_chars, mixed, nested_list, blockquote, code_block,
+link(→하이퍼링크), deep_heading, hr_rule, table_wide, table_long. (코퍼스 확장이 링크→하이퍼링크,
+인용문·코드블록 스타일 갭을 발견·수정하게 함 — 진단 주도 개발.)
 
 **fixtures(실제 문서):** hello_world, work_report, annual_report, color_fill, outline,
 bookmark(hwp5), minimal(hwpx).
@@ -33,7 +35,7 @@ bookmark(hwp5), minimal(hwpx).
 
 ## 현재 상태 (2026-07 기준)
 
-**self-verifiable 검사 35케이스 × 10검사 전부 ✅ — 구조/변환/렌더 수준 문제·회귀 없음.**
+**self-verifiable 검사 51케이스 × 10검사 전부 ✅ — 구조/변환/렌더 수준 문제·회귀 없음.**
 
 이 하네스로 **못 잡는** 것 = **한글(한컴오피스) 특정 렌더 동작**. 예: annual 6쪽 자리표시자
 글상자 드롭 + 빈 페이지(한글 미문서화 heavy-content 동작 — 조사 종결·수용, [07](07-hangul-compat-rules.md)).
