@@ -18,6 +18,8 @@ mod shapes {
     pub const BOLD_ITALIC: u16 = 3;
     /// H1~H6 → 4~9
     pub const HEADING_BASE: u16 = 4;
+    /// 하이퍼링크 표시 텍스트(파랑 + 밑줄)
+    pub const HYPERLINK: u16 = 10;
 }
 
 /// 테두리/배경 ID 배치: 1·2 = 무테두리(기본/참조용), 3 = 실선 0.12mm.
@@ -75,6 +77,15 @@ pub fn default_header() -> hwp_model::DocHeader {
         cs(h(120), true, false), // 7 H4
         cs(h(110), true, false), // 8 H5
         cs(h(110), true, false), // 9 H6
+        // 10 하이퍼링크: 파랑(COLORREF 0x00BBGGRR=RGB(0,0,255)) + 밑줄 종류 1.
+        // field.rs::hyperlink_char_shape와 동일 규칙 — 한글이 링크로 인식/표시하려면 필요.
+        CharShape {
+            base_size: body,
+            text_color: 0x00FF_0000,
+            underline_color: 0x00FF_0000,
+            attr: 1 << 2,
+            ..base.clone()
+        },
     ];
 
     // 탭 정의 — 한글 기본 좌/중/우 자동 탭 3개. 정상 표본(hello_world 등
@@ -212,11 +223,14 @@ struct Builder {
     // 현재 문단 상태
     chars: Vec<HwpChar>,
     runs: Vec<(u32, CharShapeId)>,
+    controls: Vec<Control>, // 현재 문단의 확장 컨트롤(하이퍼링크 등)
     wchar_pos: u32,
     style: u16,
     bold: bool,
     italic: bool,
-    heading: Option<u16>, // 1..=6
+    in_link: bool,             // 하이퍼링크 표시 텍스트 구간(파랑+밑줄)
+    link_end: Option<HwpChar>, // 링크 종료 시 방출할 FIELD_END 문자
+    heading: Option<u16>,      // 1..=6
     // 표 수집 상태
     table: Option<TableBuilder>,
     list_depth: usize,
@@ -232,6 +246,9 @@ struct TableBuilder {
 
 impl Builder {
     fn current_shape(&self) -> u16 {
+        if self.in_link {
+            return shapes::HYPERLINK;
+        }
         if let Some(level) = self.heading {
             return shapes::HEADING_BASE + level - 1;
         }
@@ -287,13 +304,16 @@ impl Builder {
         } else {
             2
         };
-        let para = Paragraph {
+        let mut para = Paragraph {
             para_shape: ParaShapeId(para_shape),
             style: StyleId(self.style),
             chars: std::mem::take(&mut self.chars),
             char_shape_runs: runs,
+            controls: std::mem::take(&mut self.controls),
             ..Paragraph::default()
         };
+        // FIELD_START(하이퍼링크 등) ExtCtrl ↔ controls 등장순서 연결.
+        crate::field::relink_ctrl_index(&mut para);
         self.wchar_pos = 0;
         match &mut self.table {
             Some(tb) => tb.current_row.push(para),
@@ -333,6 +353,22 @@ impl Builder {
                 self.push_text(&t);
             }
             Event::Code(t) => self.push_text(&t),
+            // ── 하이퍼링크: [텍스트](url) → %hlk 필드(FIELD_START + 파랑밑줄 텍스트 + FIELD_END) ──
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                let (start, _end, control) = crate::field::hyperlink_field_parts(&dest_url);
+                self.chars.push(start);
+                self.wchar_pos += 8; // FIELD_START ExtCtrl = 8 WCHAR
+                self.controls.push(control);
+                self.in_link = true; // 이후 표시 텍스트는 HYPERLINK 글자모양
+                self.link_end = Some(_end);
+            }
+            Event::End(TagEnd::Link) => {
+                if let Some(end) = self.link_end.take() {
+                    self.chars.push(end);
+                    self.wchar_pos += 8; // FIELD_END InlineCtrl = 8 WCHAR
+                }
+                self.in_link = false;
+            }
             Event::SoftBreak => self.push_text(" "),
             Event::HardBreak => {
                 self.chars.push(HwpChar::CharCtrl(10));

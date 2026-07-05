@@ -33,6 +33,14 @@ CASES = {
     "multipage":         "\n\n".join(f"문단 번호 {i}. " + "내용을 채우는 문장입니다. " * 8 for i in range(60)) + "\n",
     "special_chars":     "특수문자: © ® ™ § ¶ — “ ” ‘ ’ … 数式 α β γ ½ ¼ →←↑↓\n",
     "mixed":             "머리말 문단.\n\n| 표 | 헤더 |\n|---|---|\n| 셀 | 값 |\n\n표 뒤 본문 문단.\n",
+    "nested_list":       "- 상위1\n  - 하위1a\n  - 하위1b\n- 상위2\n",
+    "blockquote":        "> 인용문입니다.\n> 둘째 줄.\n",
+    "code_block":        "```\n코드 블록 라인1\n코드 라인2\n```\n",
+    "link":              "[한컴 링크](https://www.hancom.com) 텍스트입니다.\n",
+    "deep_heading":      "#### 제목4\n\n##### 제목5\n\n###### 제목6\n",
+    "hr_rule":           "위 문단.\n\n---\n\n아래 문단.\n",
+    "table_wide":        "| A | B | C | D | E | F |\n|---|---|---|---|---|---|\n| 1 | 2 | 3 | 4 | 5 | 6 |\n",
+    "table_long":        "| 번호 | 값 |\n|---|---|\n" + "".join(f"| {i} | 항목{i} |\n" for i in range(1, 16)),
 }
 
 FIXTURES = [

@@ -502,6 +502,27 @@ fn field_instance_id(command: &str) -> u32 {
     if h == 0 { 1 } else { h }
 }
 
+/// 인라인 하이퍼링크 조각(markdown 등 스트리밍 삽입용): (FIELD_START 문자, FIELD_END 문자,
+/// %hlk 컨트롤). 호출자는 두 문자 사이에 표시 텍스트를 넣고 파랑+밑줄 글자모양을 입힌 뒤
+/// `relink_ctrl_index`로 ctrl_index를 잇는다. `create_hyperlink`(앵커 치환)와 달리 파싱 중
+/// 위치에 바로 삽입할 때 쓴다.
+pub(crate) fn hyperlink_field_parts(url: &str) -> (HwpChar, HwpChar, Control) {
+    let ctrl_id = *b"%hlk";
+    (
+        HwpChar::ExtCtrl {
+            code: FIELD_START,
+            ctrl_id,
+            payload: rev_payload(&ctrl_id),
+            ctrl_index: None,
+        },
+        HwpChar::InlineCtrl {
+            code: FIELD_END,
+            payload: field_end_payload(&ctrl_id),
+        },
+        make_field_control(ctrl_id, None, Some(&hlk_command(url))),
+    )
+}
+
 /// 하이퍼링크 필드 커맨드: `{URL};1;0;0;` — URL 특수문자를 정품 규칙으로 백슬래시 이스케이프.
 /// v1은 `\ ; :`만 이스케이프(정품 `http\://…` 확인). 복잡한 URL은 근사.
 fn hlk_command(url: &str) -> String {
