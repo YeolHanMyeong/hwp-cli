@@ -92,6 +92,12 @@ body_bottom     = h - (margin_bottom + margin_footer) / 100
 
 섹션에서 처음 나온 `b"head"`/`b"foot"` gso를 모든 페이지에 반복. 각주는 `footnote::collect_notes`로 섹션 전체 번호 매김 후, 페이지별 앵커 노트를 스크래치에 y=0부터 쌓아 총높이 측정 → 블록 하단을 `body_bottom`에 닿게 위로 올리고 구분선(`body_width*0.34` 폭) + `translate_item`으로 합친다.
 
+### 1.8 다단(multi-column) — `cold`/`ColumnDef`
+
+**IR:** `cold` CTRL_HEADER → `ColumnDef{count,kind,direction,same_width,gap,widths,divider}`. hwp5는 페이로드에서 파싱(실측 `08 10 dc 08 …` = attr `0x1008`[bit2-9 단수·bit12 동일폭] + gap 2268), hwpx는 `<hp:colPr>` 속성에서. hwplib COLDEF와 bit단위 일치.
+
+**핵심(실측 정답지):** 한글이 저장한 line_seg는 **`col_start`(horzpos)=0**(단 상대)이고 **`seg_width`(horzsize)=단 폭**이다. 단의 x-위치는 저장되지 않으므로 **밴드 인덱스로 계산**한다. `v_pos` 리셋(줄 배치가 상단으로 되돌아감)은 **단 넘김과 페이지 넘김을 겸한다**: 리셋마다 밴드 인덱스 `col_band`를 증가시키고, `col_band % count == 0`이면 페이지 넘김, 아니면 같은 페이지 내 단 넘김(x만 다음 단으로 이동, 커서만 상단으로). 줄 x = `body_left + (col_band % count)·(col_width+gap) + col_start`. `col_width = (body_width - gap·(count-1))/count`. v1은 일반(normal) 순차 흐름·등폭; 배분(높이 밸런싱)·구분선·합성(md) 다단은 후속. 검증: 정답지 `multicol.hwp/.hwpx`(2단) → 3쪽·좌우 단 나란히(테스트 `다단_2단_렌더`).
+
 ---
 
 ## 2. lineseg 합성 (`lineseg.rs`, `synthesize_linesegs`)

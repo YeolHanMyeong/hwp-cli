@@ -85,6 +85,51 @@ fn hwpx_폴백_렌더() {
 }
 
 #[test]
+fn 다단_2단_렌더() {
+    // multicol.hwp/.hwpx = 한글 2단 본문(정답지). 단 넘김을 페이지 넘김으로 오인하던 버그를
+    // 고쳐 5쪽이 아니라 3쪽(2단×2쪽 + 잔여 1쪽)이 되고, 1쪽에 좌·우 단이 나란히 그려져야 한다.
+    for rel in ["hwp5/multicol.hwp", "hwpx/multicol.hwpx"] {
+        let Some(path) = fixture_or_skip(rel) else {
+            continue;
+        };
+        let doc = if rel.ends_with(".hwp") {
+            hwp5::read_document(&path).unwrap().document
+        } else {
+            hwpx::read_document(&path).unwrap().document
+        };
+        let out = render_document(
+            &doc,
+            &RenderOptions {
+                dpi: 96.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            out.pages.len(),
+            3,
+            "{rel}: 2단이면 3쪽(단 넘김≠페이지 넘김)"
+        );
+        // 1쪽 좌·우 절반 모두에 내용(어두운 픽셀)이 있어야 한다 = 두 단 나란히.
+        let p = &out.pages[0];
+        let (w, hh) = (p.width(), p.height());
+        let dark_in = |x0: u32, x1: u32| {
+            let mut n = 0usize;
+            for y in 0..hh {
+                for x in x0..x1 {
+                    if p.pixel(x, y).unwrap().red() < 128 {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        assert!(dark_in(0, w / 2) > 500, "{rel}: 좌 단 내용 부족");
+        assert!(dark_in(w / 2, w) > 500, "{rel}: 우 단 내용 부족");
+    }
+}
+
+#[test]
 fn 표_렌더() {
     let Some(path) = fixture_or_skip("hwp5/work_report.hwp") else {
         return;

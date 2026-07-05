@@ -129,6 +129,26 @@ pub fn layout_document(
         let mut skipped_controls = 0usize;
         let mut paras_on_page = 0usize;
 
+        // 다단(multi-column): 섹션의 첫 cold 컨트롤 ColumnDef로 단 기하 설정(v1: 섹션당 1구성).
+        // 한글 line_seg는 col_start=0(단 상대)·seg_width=단폭이므로 단 x는 밴드 인덱스로 계산한다.
+        // v_pos 리셋이 단 넘김과 페이지 넘김을 겸하며, colCount번째 밴드마다 페이지가 넘어간다.
+        let col_def = section
+            .paragraphs
+            .iter()
+            .flat_map(|p| &p.controls)
+            .find_map(|c| match c {
+                Control::Generic(g) => g.column_def.as_ref(),
+                _ => None,
+            });
+        let col_count = col_def.map_or(1, |c| (c.count as usize).max(1));
+        let col_gap = col_def.map_or(0.0, |c| c.gap as f32 / 100.0);
+        let col_width = if col_count > 1 {
+            (body_width - col_gap * (col_count - 1) as f32) / col_count as f32
+        } else {
+            body_width
+        };
+        let mut col_band = 0usize; // v_pos 리셋마다 증가하는 단 밴드 인덱스
+
         // 머리말/꼬리말: 구역에서 처음 정의된 것을 모든 페이지에 반복
         let mut header_ctrl = None;
         let mut footer_ctrl = None;
@@ -324,20 +344,28 @@ pub fn layout_document(
 
             let last_content = last_content_seg(para);
             for (i, seg) in para.line_segs.iter().enumerate() {
-                // 페이지 경계: v_pos 리셋 감지
+                // v_pos 리셋: 다단이면 단 넘김(같은 페이지) vs 페이지 넘김을 밴드로 구분.
                 if seg.v_pos < prev_v_pos && !page.items.is_empty() {
-                    furniture.render(doc, store, &mut page, warnings);
-                    pages.push(std::mem::replace(
-                        &mut page,
-                        PageList {
-                            width_pt: w,
-                            height_pt: h,
-                            items: Vec::new(),
-                        },
-                    ));
-                    content_bottom = body_top;
-                    paras_on_page = 0;
-                    bg_broke = true; // 문단이 페이지를 걸침 → 배경 삽입 인덱스 무효, 생략
+                    col_band += 1;
+                    if col_count > 1 && !col_band.is_multiple_of(col_count) {
+                        // 단 넘김: 커서만 페이지 상단으로, 페이지는 유지(다음 단으로 x 이동).
+                        content_bottom = body_top;
+                        bg_broke = true;
+                    } else {
+                        // 페이지 넘김(마지막 단 소진 또는 단일 단).
+                        furniture.render(doc, store, &mut page, warnings);
+                        pages.push(std::mem::replace(
+                            &mut page,
+                            PageList {
+                                width_pt: w,
+                                height_pt: h,
+                                items: Vec::new(),
+                            },
+                        ));
+                        content_bottom = body_top;
+                        paras_on_page = 0;
+                        bg_broke = true;
+                    }
                 }
                 prev_v_pos = seg.v_pos;
 
@@ -387,7 +415,9 @@ pub fn layout_document(
                 let line_advance =
                     (seg.line_height + seg.line_spacing).max(seg.line_height) as f32 / 100.0;
 
-                let x = body_left + seg.col_start as f32 / 100.0 + shift;
+                // 다단: 현재 밴드의 단 x-오프셋(col_start는 단 상대라 0). 단일 단이면 0.
+                let col_x = (col_band % col_count) as f32 * (col_width + col_gap);
+                let x = body_left + col_x + seg.col_start as f32 / 100.0 + shift;
                 if i == 0 {
                     para_top = Some(baseline_y - baseline_gap_pt);
                     if let Some(m) = &marker {

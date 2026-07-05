@@ -9,9 +9,9 @@
 //! - TABLE의 "행 크기" 배열은 행별 셀 개수다.
 
 use hwp_model::{
-    Cell, CharKind, CharShapeId, Control, GenericControl, HwpChar, HwpUnit, LineSeg, PageDef,
-    ParaHeaderInfo, ParaShapeId, Paragraph, ParagraphList, Section, SectionDef, StyleId, Table,
-    char_kind,
+    Cell, CharKind, CharShapeId, ColumnDef, Control, GenericControl, HwpChar, HwpUnit, LineSeg,
+    PageDef, ParaHeaderInfo, ParaShapeId, Paragraph, ParagraphList, Section, SectionDef, StyleId,
+    Table, char_kind,
 };
 
 use crate::codec::ByteReader;
@@ -261,6 +261,7 @@ fn parse_control(node: &RecordNode, warnings: &mut Vec<String>) -> Control {
             raw_children: node.children.iter().map(to_opaque).collect(),
             gso_shapes: Vec::new(),
             equation: None,
+            column_def: None,
         });
     }
     let mut ctrl_id = [node.data[0], node.data[1], node.data[2], node.data[3]];
@@ -481,6 +482,12 @@ fn parse_generic(
     children: &[RecordNode],
     warnings: &mut Vec<String>,
 ) -> GenericControl {
+    // 다단 정의(cold): CTRL_HEADER 페이로드에서 ColumnDef 파싱(렌더러 단 배치용).
+    let column_def = if &ctrl_id == b"cold" {
+        parse_coldef(&data)
+    } else {
+        None
+    };
     let mut g = GenericControl {
         ctrl_id,
         data,
@@ -490,9 +497,30 @@ fn parse_generic(
         raw_children: children.iter().map(to_opaque).collect(),
         gso_shapes: Vec::new(),
         equation: None,
+        column_def,
     };
     collect_paragraph_lists(children, &mut g, warnings);
     g
+}
+
+/// COLDEF(cold) CTRL_HEADER 페이로드 → ColumnDef. 실측(다단정답지.hwp): `08 10`=attr 0x1008
+/// (bit0-1 종류·bit2-9 단수·bit10-11 방향·bit12 동일폭) + `dc 08`=gap 2268(HWPUNIT16) + 8B
+/// 구분선(현재 표본 0). hwplib ControlColumnDefine과 bit단위 일치.
+fn parse_coldef(data: &[u8]) -> Option<ColumnDef> {
+    if data.len() < 4 {
+        return None;
+    }
+    let attr = u16::from_le_bytes([data[0], data[1]]);
+    let gap = i16::from_le_bytes([data[2], data[3]]) as i32;
+    Some(ColumnDef {
+        count: ((attr >> 2) & 0xFF).max(1),
+        kind: (attr & 0x3) as u8,
+        direction: ((attr >> 10) & 0x3) as u8,
+        same_width: (attr >> 12) & 1 != 0,
+        gap,
+        widths: Vec::new(),
+        divider: None,
+    })
 }
 
 /// 문단 리스트를 재귀 수집한다.
