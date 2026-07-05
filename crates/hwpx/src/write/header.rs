@@ -324,9 +324,15 @@ fn write_para_properties(out: &mut String, header: &DocHeader) {
         };
         // IR 여백류는 hwp5 PARA_SHAPE 단위(HWPUNIT의 2배)다. hwpx는 HWPUNIT이므로
         // ÷2 해서 내보낸다(hwpx 읽기의 ×2와 대칭 — hwpx 왕복 보존).
+        // 문단 테두리/배경 참조: 실제 border_fill_id(0이면 기본 2=무테두리).
+        let border_ref = if ps.border_fill_id > 0 {
+            ps.border_fill_id
+        } else {
+            2
+        };
         let _ = write!(
             out,
-            r##"<hh:paraPr id="{i}" tabPrIDRef="{tab_ref}" condense="0" fontLineHeight="0" snapToGrid="1" suppressLineNumbers="0" checked="0" textDir="LTR"><hh:align horizontal="{align}" vertical="BASELINE"/><hh:heading type="NONE" idRef="0" level="0"/><hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="BREAK_WORD" widowOrphan="0" keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="BREAK"/><hh:autoSpacing eAsianEng="0" eAsianNum="0"/><hh:margin><hc:intent value="{}" unit="HWPUNIT"/><hc:left value="{}" unit="HWPUNIT"/><hc:right value="{}" unit="HWPUNIT"/><hc:prev value="{}" unit="HWPUNIT"/><hc:next value="{}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="{ls_type}" value="{ls_value}" unit="HWPUNIT"/><hh:border borderFillIDRef="2" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/></hh:paraPr>"##,
+            r##"<hh:paraPr id="{i}" tabPrIDRef="{tab_ref}" condense="0" fontLineHeight="0" snapToGrid="1" suppressLineNumbers="0" checked="0" textDir="LTR"><hh:align horizontal="{align}" vertical="BASELINE"/><hh:heading type="NONE" idRef="0" level="0"/><hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="BREAK_WORD" widowOrphan="0" keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="BREAK"/><hh:autoSpacing eAsianEng="0" eAsianNum="0"/><hh:margin><hc:intent value="{}" unit="HWPUNIT"/><hc:left value="{}" unit="HWPUNIT"/><hc:right value="{}" unit="HWPUNIT"/><hc:prev value="{}" unit="HWPUNIT"/><hc:next value="{}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="{ls_type}" value="{ls_value}" unit="HWPUNIT"/><hh:border borderFillIDRef="{border_ref}" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/></hh:paraPr>"##,
             ps.indent / 2,
             ps.margin_left / 2,
             ps.margin_right / 2,

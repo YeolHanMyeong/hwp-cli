@@ -250,6 +250,11 @@ pub fn layout_document(
             // 이 문단의 첫 줄 상단 (표 앵커 위치)
             let mut para_top: Option<f32> = None;
 
+            // 문단 배경/테두리(border_fill) 패스용: 문단 시작 시점의 아이템 인덱스(배경
+            // Rect를 텍스트 뒤에 넣으려 삽입 지점으로 사용) + 문단 중 페이지 경계 발생 여부.
+            let bg_start_idx = page.items.len();
+            let mut bg_broke = false;
+
             if para.line_segs.is_empty() {
                 // 폴백: 본문 폭에서 그리디 줄바꿈
                 if para.chars.is_empty() {
@@ -303,6 +308,17 @@ pub fn layout_document(
                     body_width,
                     warnings,
                 );
+                draw_para_background(
+                    doc,
+                    &mut page,
+                    para,
+                    body_left + geom.left,
+                    (body_width - geom.left - geom.right).max(1.0),
+                    bg_start_idx,
+                    para_top,
+                    content_bottom,
+                    bg_broke,
+                );
                 continue;
             }
 
@@ -321,6 +337,7 @@ pub fn layout_document(
                     ));
                     content_bottom = body_top;
                     paras_on_page = 0;
+                    bg_broke = true; // 문단이 페이지를 걸침 → 배경 삽입 인덱스 무효, 생략
                 }
                 prev_v_pos = seg.v_pos;
 
@@ -400,6 +417,17 @@ pub fn layout_document(
                 content_bottom,
                 body_width,
                 warnings,
+            );
+            draw_para_background(
+                doc,
+                &mut page,
+                para,
+                body_left + geom.left,
+                (body_width - geom.left - geom.right).max(1.0),
+                bg_start_idx,
+                para_top,
+                content_bottom,
+                bg_broke,
             );
         }
         if skipped_controls > 0 {
@@ -1527,6 +1555,76 @@ struct ParaGeom {
     spacing_bottom: f32,
 }
 
+/// 문단 배경/테두리(ParaShape.border_fill_id → BorderFill) 그리기 — 셀 배경 패스의 문단판.
+/// 배경 Rect는 `insert_idx`(문단 텍스트 시작 지점)에 삽입해 글자 뒤로 보내고, 테두리 선은 위에
+/// 얹는다. 문단이 페이지를 걸쳤거나(`broke`) 상단 미상이면 생략(v1). `left`/`width`는 이미
+/// 들여쓰기(geom)를 반영한 문단 상자의 좌변/폭.
+#[allow(clippy::too_many_arguments)]
+fn draw_para_background(
+    doc: &Document,
+    page: &mut PageList,
+    para: &Paragraph,
+    left: f32,
+    width: f32,
+    insert_idx: usize,
+    para_top: Option<f32>,
+    bottom: f32,
+    broke: bool,
+) {
+    if broke {
+        return;
+    }
+    let Some(top) = para_top else {
+        return;
+    };
+    if bottom <= top || width <= 0.0 {
+        return;
+    }
+    let Some(ps) = doc.header.para_shapes.get(para.para_shape.0 as usize) else {
+        return;
+    };
+    // border_fill_id는 1-based(0 = 참조 없음).
+    let Some(idx) = (ps.border_fill_id as usize).checked_sub(1) else {
+        return;
+    };
+    let Some(bf) = doc.header.border_fills.get(idx) else {
+        return;
+    };
+    // 배경(텍스트보다 뒤에 오도록 삽입).
+    if let Some(fill) = bf.visible_bg() {
+        let ins = insert_idx.min(page.items.len());
+        page.items.insert(
+            ins,
+            Item::Rect {
+                x: left,
+                y: top,
+                w: width,
+                h: bottom - top,
+                fill,
+            },
+        );
+    }
+    // 테두리(좌/우/위/아래 — 가장자리라 텍스트 위에 얹어도 무해).
+    let edges = [
+        (left, top, left, bottom),
+        (left + width, top, left + width, bottom),
+        (left, top, left + width, top),
+        (left, bottom, left + width, bottom),
+    ];
+    for (side, (x1, y1, x2, y2)) in bf.sides.iter().zip(edges) {
+        if side.is_visible() {
+            page.items.push(Item::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                color: side.color,
+                width: side.width_mm() * 72.0 / 25.4,
+            });
+        }
+    }
+}
+
 fn para_geometry(doc: &Document, para: &Paragraph) -> ParaGeom {
     // IR의 PARA_SHAPE 여백류(margin/indent/spacing)는 2×HWPUNIT — hwp5 저장 단위
     // (hwpx reader 실측 규칙: OWPML left=1500 → hwp5 ml=3000, read/header.rs 참조).
@@ -1551,6 +1649,7 @@ fn items_width(items: &[InlineItem]) -> f32 {
             InlineItem::Tab => {
                 x = (x / TAB_INTERVAL_PT).floor() * TAB_INTERVAL_PT + TAB_INTERVAL_PT
             }
+            InlineItem::LineBreak(_) => x = 0.0, // 새 줄 시작
         }
     }
     x
@@ -1561,7 +1660,7 @@ fn items_max_size(items: &[InlineItem]) -> Option<f32> {
         .iter()
         .filter_map(|i| match i {
             InlineItem::Run(r) => Some(r.size_pt),
-            InlineItem::Tab => None,
+            InlineItem::Tab | InlineItem::LineBreak(_) => None,
         })
         .reduce(f32::max)
 }
@@ -1614,7 +1713,7 @@ fn place_wrapped(
             .iter()
             .filter_map(|i| match i {
                 InlineItem::Run(r) => Some(r.text.as_str()),
-                InlineItem::Tab => None,
+                InlineItem::Tab | InlineItem::LineBreak(_) => None,
             })
             .collect::<String>()
             .chars()
@@ -1662,6 +1761,10 @@ fn place_wrapped(
             }
             InlineItem::Tab => {
                 x = x0 + crate::tab::next_tab(tabs, x - x0, TAB_INTERVAL_PT);
+            }
+            InlineItem::LineBreak(_) => {
+                y += line_advance;
+                x = x0;
             }
         }
     }
@@ -1793,7 +1896,7 @@ mod justify_tests {
             .iter()
             .map(|i| match i {
                 InlineItem::Run(r) => r.glyphs.iter().map(|g| g.x_advance).sum(),
-                InlineItem::Tab => 0.0,
+                InlineItem::Tab | InlineItem::LineBreak(_) => 0.0,
             })
             .sum()
     }

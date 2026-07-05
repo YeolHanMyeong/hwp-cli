@@ -136,6 +136,25 @@ pub fn default_header() -> hwp_model::DocHeader {
         },
         ParaShape {
             spacing_bottom: 600, // 본문 문단 아래 간격
+            ..base_para.clone()
+        },
+        // 3 인용문: 왼쪽 들여쓰기 + 좌측 막대(border_fill 1-based id 4).
+        ParaShape {
+            attr1: 0x180 | (1 << 2),
+            margin_left: 3000,
+            border_fill_id: 4,
+            spacing_top: 300,
+            spacing_bottom: 300,
+            ..base_para.clone()
+        },
+        // 4 코드블록: 좌우 들여쓰기 + 회색 배경(border_fill 1-based id 5).
+        ParaShape {
+            attr1: 0x180 | (1 << 2),
+            margin_left: 2500,
+            margin_right: 2500,
+            border_fill_id: 5,
+            spacing_top: 300,
+            spacing_bottom: 300,
             ..base_para
         },
     ];
@@ -178,6 +197,31 @@ pub fn default_header() -> hwp_model::DocHeader {
                 width: 0,
                 color: 0,
             },
+            ..BorderFill::default()
+        },
+        // 3 (1-based id 4) 인용문: 좌측 회색 막대(1.0mm), 나머지 변 없음.
+        BorderFill {
+            sides: [
+                BorderLine {
+                    line_type: 1,
+                    width: 10,
+                    color: 0x0080_8080,
+                },
+                BorderLine::default(),
+                BorderLine::default(),
+                BorderLine::default(),
+            ],
+            ..BorderFill::default()
+        },
+        // 4 (1-based id 5) 코드블록: 연회색 배경 + 얇은 회색 테두리.
+        BorderFill {
+            sides: [BorderLine {
+                line_type: 1,
+                width: 0,
+                color: 0x00C0_C0C0,
+            }; 4],
+            fill_type: 1,
+            bg_color: Some(0x00F0_F0F0),
             ..BorderFill::default()
         },
     ];
@@ -230,6 +274,8 @@ struct Builder {
     italic: bool,
     in_link: bool,             // 하이퍼링크 표시 텍스트 구간(파랑+밑줄)
     link_end: Option<HwpChar>, // 링크 종료 시 방출할 FIELD_END 문자
+    in_blockquote: u32,        // 인용문 중첩 깊이(>0이면 인용 문단)
+    in_codeblock: bool,        // 코드블록 구간(회색 배경 문단)
     heading: Option<u16>,      // 1..=6
     // 표 수집 상태
     table: Option<TableBuilder>,
@@ -271,6 +317,21 @@ impl Builder {
         }
     }
 
+    /// 코드블록 텍스트: 줄 경계 `\n` → CharCtrl(10)(줄바꿈)으로 보존한다. 후행 개행 1개는
+    /// 코드 상자 끝의 빈 줄을 피하려 제거(fenced 블록은 보통 `\n`으로 끝남).
+    fn push_code_text(&mut self, text: &str) {
+        let text = text.strip_suffix('\n').unwrap_or(text);
+        for (i, line) in text.split('\n').enumerate() {
+            if i > 0 {
+                self.chars.push(HwpChar::CharCtrl(10));
+                self.wchar_pos += 1;
+            }
+            if !line.is_empty() {
+                self.push_text(line);
+            }
+        }
+    }
+
     fn flush_paragraph(&mut self) {
         self.flush_paragraph_inner(false);
     }
@@ -296,8 +357,12 @@ impl Builder {
         if runs.is_empty() {
             runs.push((0, CharShapeId(self.current_shape())));
         }
-        // 제목→1, 표 셀→0(간격 없음), 그 외 본문→2(아래 간격).
-        let para_shape = if self.heading.is_some() {
+        // 코드블록→4(회색 배경), 인용→3(들여쓰기+막대), 제목→1, 표 셀→0(간격 없음), 본문→2.
+        let para_shape = if self.in_codeblock {
+            4
+        } else if self.in_blockquote > 0 {
+            3
+        } else if self.heading.is_some() {
             1
         } else if self.table.is_some() {
             0
@@ -350,7 +415,11 @@ impl Builder {
                     self.push_text("• ");
                     self.pending_bullet = false;
                 }
-                self.push_text(&t);
+                if self.in_codeblock {
+                    self.push_code_text(&t); // 코드블록 텍스트의 \n → 줄바꿈
+                } else {
+                    self.push_text(&t);
+                }
             }
             Event::Code(t) => self.push_text(&t),
             // ── 하이퍼링크: [텍스트](url) → %hlk 필드(FIELD_START + 파랑밑줄 텍스트 + FIELD_END) ──
@@ -373,6 +442,24 @@ impl Builder {
             Event::HardBreak => {
                 self.chars.push(HwpChar::CharCtrl(10));
                 self.wchar_pos += 1;
+            }
+            // ── 인용문(> ) → 들여쓰기+좌측 막대 문단(para_shape 3) ──
+            Event::Start(Tag::BlockQuote(_)) => {
+                self.flush_paragraph();
+                self.in_blockquote += 1;
+            }
+            Event::End(TagEnd::BlockQuote(_)) => {
+                self.flush_paragraph();
+                self.in_blockquote = self.in_blockquote.saturating_sub(1);
+            }
+            // ── 코드블록(```) → 회색 배경 문단(para_shape 4), 줄바꿈 보존 ──
+            Event::Start(Tag::CodeBlock(_)) => {
+                self.flush_paragraph();
+                self.in_codeblock = true;
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                self.flush_paragraph();
+                self.in_codeblock = false;
             }
             Event::Start(Tag::List(_)) => self.list_depth += 1,
             Event::End(TagEnd::List(_)) => self.list_depth -= 1,

@@ -85,6 +85,9 @@ pub enum InlineItem {
     Run(ShapedRun),
     /// 다음 탭 위치까지 진행 (v1: 고정 간격)
     Tab,
+    /// 강제 줄바꿈 (CharCtrl LINE_BREAK=10) — 같은 문단 안에서 줄을 나눈다(코드블록 등).
+    /// 값 = 줄바꿈 다음 줄이 시작하는 WCHAR 위치(lineseg 합성의 text_start용).
+    LineBreak(u32),
 }
 
 /// 유니코드 → HWP 7언어 슬롯 분류 (U3 — 경계 문자는 실측 보정 예정).
@@ -183,6 +186,17 @@ pub fn shape_range_notes(
                     if let Some(run) = note_mark_run(store, doc, para, pos, marks[ci]) {
                         items.push((pieces.len(), InlineItem::Run(run)));
                     }
+                }
+                // 강제 줄바꿈: 같은 문단 안에서 줄을 나눈다(코드블록·shift+enter).
+                HwpChar::CharCtrl(code) if *code == ctrl_char::LINE_BREAK => {
+                    items.push((pieces.len(), InlineItem::LineBreak(pos + 1)));
+                    // 줄바꿈 뒤 텍스트는 새 조각으로(앞 조각에 병합 방지).
+                    pieces.push(Piece {
+                        shape_id: shape_id_at(para, pos + 1),
+                        lang: 0,
+                        text: String::new(),
+                        start: pos + 1,
+                    });
                 }
                 _ => {} // 그 외 컨트롤은 v1 렌더 제외
             }

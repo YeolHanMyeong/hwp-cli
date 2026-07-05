@@ -322,6 +322,13 @@ fn compute_linesegs(
                 acc = (acc / TAB_INTERVAL_PT).floor() * TAB_INTERVAL_PT + TAB_INTERVAL_PT;
                 content = true;
             }
+            // 강제 줄바꿈(CharCtrl 10): 현재 줄을 확정하고 다음 줄을 줄바꿈 뒤 위치에서 시작.
+            InlineItem::LineBreak(next_start) => {
+                place(&mut segs, v_pos, line_start);
+                line_start = *next_start;
+                acc = 0.0;
+                content = false;
+            }
         }
     }
     // 마지막 줄(빈 문단이면 유일한 줄).
