@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use hwp_model::{
-    BinRef, Cell, Control, Document, GenericControl, HwpChar, PageDef, Paragraph, Picture, Section,
-    ShapeKind, Table,
+    BinRef, Cell, Control, Document, Equation, GenericControl, HwpChar, PageDef, Paragraph,
+    Picture, Section, ShapeKind, Table,
 };
 
 use crate::write::templates::esc;
@@ -239,6 +239,20 @@ fn write_paragraph(
                         open_run!(cur_shape);
                         flush_text(out, &mut text_buf);
                         write_header_footer(out, doc, g, ids, bins, preserve_linesegs, warnings);
+                    }
+                    Control::Generic(g) if g.ctrl_id == *b"fn  " || g.ctrl_id == *b"en  " => {
+                        open_run!(cur_shape);
+                        flush_text(out, &mut text_buf);
+                        write_footnote_endnote(out, doc, g, ids, bins, preserve_linesegs, warnings);
+                    }
+                    Control::Generic(g) if g.equation.is_some() => {
+                        // 리더 parse_equation의 역 — 수식은 hp:ctrl이 아닌 run 수준 개체.
+                        open_run!(cur_shape);
+                        flush_text(out, &mut text_buf);
+                        let Some(eq) = &g.equation else {
+                            unreachable!("equation.is_some() 가드");
+                        };
+                        write_equation(out, eq, ids);
                     }
                     Control::Table(table) => {
                         open_run!(cur_shape);
@@ -535,6 +549,57 @@ fn write_header_footer(
         out.push_str("</hp:subList>");
     }
     let _ = write!(out, "</hp:{el}></hp:ctrl>");
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_footnote_endnote(
+    out: &mut String,
+    doc: &Document,
+    g: &GenericControl,
+    ids: &mut IdSeq,
+    bins: &mut BinCollector,
+    preserve_linesegs: bool,
+    warnings: &mut Vec<String>,
+) {
+    let el = if g.ctrl_id == *b"fn  " {
+        "footNote"
+    } else {
+        "endNote"
+    };
+    let _ = write!(out, r##"<hp:ctrl><hp:{el} id="{}">"##, ids.next());
+    for list in &g.paragraph_lists {
+        out.push_str(
+            r##"<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">"##,
+        );
+        for para in &list.paragraphs {
+            write_paragraph(
+                out,
+                doc,
+                para,
+                ids,
+                bins,
+                false,
+                preserve_linesegs,
+                warnings,
+            );
+        }
+        out.push_str("</hp:subList>");
+    }
+    let _ = write!(out, "</hp:{el}></hp:ctrl>");
+}
+
+fn write_equation(out: &mut String, eq: &Equation, ids: &mut IdSeq) {
+    let _ = write!(
+        out,
+        r##"<hp:equation id="{}" version="Equation Version 60" baseLine="85" textColor="#000000" baseUnit="1000" lineMode="0" font="HYhwpEQ"><hp:sz width="{}" height="{}" protect="0"/><hp:pos treatAsChar="{}" affectLSpacing="0" flowWithText="1" allowOverlap="0" holdAnchorAndSO="0" vertRelTo="PARA" horzRelTo="PARA" vertAlign="TOP" horzAlign="LEFT" vertOffset="{}" horzOffset="{}"/><hp:outMargin left="56" right="56" top="56" bottom="56"/><hp:script>{}</hp:script></hp:equation>"##,
+        ids.next(),
+        eq.width,
+        eq.height,
+        u8::from(eq.inline),
+        eq.y,
+        eq.x,
+        esc(&eq.script),
+    );
 }
 
 /// hwp5 gso 공통 개체 헤더(20B+): attr(u32)@0, 세로 오프셋@4, 가로 오프셋@8, 폭@12, 높이@16,
