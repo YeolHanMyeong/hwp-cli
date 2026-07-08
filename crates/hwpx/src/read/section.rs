@@ -1183,6 +1183,39 @@ fn read_element_text(reader: &mut XmlReader<'_>, end: &[u8]) -> Result<String> {
                 })?;
                 out.push_str(&s);
             }
+            Event::CData(t) => {
+                let s = t.xml10_content().map_err(|e| HwpxError::Xml {
+                    entry: "section".to_string(),
+                    message: e.to_string(),
+                })?;
+                out.push_str(&s);
+            }
+            Event::GeneralRef(r) => {
+                if let Some(ch) = r.resolve_char_ref().map_err(|e| HwpxError::Xml {
+                    entry: "section".to_string(),
+                    message: e.to_string(),
+                })? {
+                    out.push(ch);
+                } else {
+                    let name = r.decode().map_err(|e| HwpxError::Xml {
+                        entry: "section".to_string(),
+                        message: e.to_string(),
+                    })?;
+                    match name.as_ref() {
+                        "amp" => out.push('&'),
+                        "lt" => out.push('<'),
+                        "gt" => out.push('>'),
+                        "quot" => out.push('"'),
+                        "apos" => out.push('\''),
+                        _ => {
+                            // 외부 엔티티는 DTD 없이 해석할 수 없으므로 원형을 보존한다.
+                            out.push('&');
+                            out.push_str(&name);
+                            out.push(';');
+                        }
+                    }
+                }
+            }
             Event::End(e) if e.local_name().as_ref() == end => break,
             Event::Eof => break,
             _ => {}
