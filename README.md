@@ -27,7 +27,7 @@
   보장한다(전체 fixture 게이트).
 - **AI 편집** — IR을 JSON으로 내보내 고치고 되쓰는 read→edit→rewrite 왕복. 텍스트 치환, 표 셀 설정,
   누름틀/필드 채우기를 이미지·서식·미해석 레코드를 보존한 채 인메모리로 적용한다.
-- **MCP 서버** — 의존성 없는(serde_json만) stdio MCP 서버로 8개 도구를 노출. 에이전트가 문서를
+- **MCP 서버** — 의존성 없는(serde_json만) stdio MCP 서버로 12개 도구를 노출. 에이전트가 문서를
   읽고·렌더해서 직접 보고·편집·변환한다.
 
 ## 현재 범위와 한계
@@ -184,18 +184,22 @@ hwp mcp --font-dir ./fonts
 서버**다(프로토콜 버전 `2024-11-05`). stdout은 프로토콜 전용이고 로그는 stderr로 나간다.
 Windows/한컴이 필요한 COM 자동화와 달리 크로스플랫폼 오픈 엔진으로 동작한다.
 
-### 노출 도구 (8종)
+### 노출 도구 (12종)
 
 | 도구 | 필수 인자 | 기능 |
 |---|---|---|
 | `hwp_info` | `path` | 포맷/버전/속성/스트림 진단(JSON) |
 | `hwp_read` | `path` (`format` = `plain`\|`markdown`\|`json`) | 본문 추출. `json`이면 전체 IR 구조 |
 | `hwp_list_fields` | `path` | 필드/누름틀 목록(이름·종류·값·명령) |
+| `hwp_list_bookmarks` | `path` | 책갈피(bokm) 목록(이름) |
 | `hwp_render` | `path` (`page`, `dpi`, `font_dir`) | 지정 페이지를 **PNG 이미지로 반환** — 에이전트가 문서를 직접 본다 |
 | `hwp_edit` | `input`, `output` (`replace[]`, `set_cell[]`, `set_field[]`) | 텍스트 치환·표 셀 설정·필드 채우기 후 되쓰기(이미지·서식 보존) |
 | `hwp_convert` | `input`, `output` (`embed_bin`) | 포맷 변환(확장자로 결정) |
 | `hwp_new` | `output` (`markdown` 또는 `json`) | markdown/JSON IR에서 새 문서 생성 |
 | `hwp_diff` | `input`, `ref` (`page`, `dpi`, `font_dir`) | 렌더 결과를 기준 PNG와 비교(잉크 적용률·오프셋·픽셀 차이율) |
+| `hwp_slots` | `path` | `{{name}}` 자리표시자(템플릿 슬롯) 목록을 등장 순서로 |
+| `hwp_fill` | `input`, `output`, `values` | hwpx 템플릿의 `{{name}}` 치환(패키지·미리보기 보존, hwpx 전용) |
+| `hwp_validate` | `path` | 구조 검증(mimetype·필수 엔트리·XML 파싱) — `{valid, errors, warnings}` |
 
 ### 클라이언트 설정 예
 

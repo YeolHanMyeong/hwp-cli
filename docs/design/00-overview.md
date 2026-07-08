@@ -75,6 +75,9 @@
 | 07 | [hangul-compat-rules](07-hangul-compat-rules.md) | ★**실기로 확정한 한글 호환성 규칙 전체 카탈로그** |
 | 08 | [external-research](08-external-research.md) | OWPML 표준·오픈소스·페이지네이션 동작 외부 근거(deep-research) |
 | 09 | [diagnostic-corpus](09-diagnostic-corpus.md) | 기능 격리 진단 코퍼스 + 자체 검증 하네스(현 상태·확장법) |
+| 10 | [hwp5-structure-map](10-hwp5-structure-map.md) | **HWP5 전수 지도** — CFB 스트림 트리, 레코드 카탈로그(태그 전수+구현 상태), 컨트롤 문자·ctrl ID |
+| 11 | [hwpx-structure-map](11-hwpx-structure-map.md) | **HWPX 전수 지도** — OPC 트리, 네임스페이스, 요소 카탈로그, read/write 대칭성 감사 |
+| 12 | [feature-gaps](12-feature-gaps.md) | 기능 격차 카탈로그 + 난이도·의존성 로드맵 (07§F 승계, 10§8·11§5가 근거 데이터) |
 
 ---
 
@@ -98,6 +101,7 @@
 **미해결/조사 중:** annual 5·6쪽 **글상자 드롭 + 페이지 오버플로**. 원인은 구조(도형-문단 배치)가
 아니라 **개체 속성 충실도**(vertRelTo/treatAsChar/z-order/textWrap/offset)일 가능성이 유력
 (외부 리서치 [08](08-external-research.md) 참조). 그 외 U2(양쪽정렬)·U4(자간)·글상자 렌더 정밀도.
+미구현 기능·손실 지점의 전체 카탈로그와 로드맵은 [12-feature-gaps.md](12-feature-gaps.md) 참조.
 
 **★가장 값진 자산:** [07-hangul-compat-rules.md](07-hangul-compat-rules.md) — 정적 분석으로는 잡히지
 않고 오직 정품 대조·실기로만 확정된 30여 개 한글 특정 규칙. 이 시스템을 다시 만든다면 이 카탈로그가
