@@ -98,6 +98,12 @@ body_bottom     = h - (margin_bottom + margin_footer) / 100
 
 **핵심(실측 정답지):** 한글이 저장한 line_seg는 **`col_start`(horzpos)=0**(단 상대)이고 **`seg_width`(horzsize)=단 폭**이다. 단의 x-위치는 저장되지 않으므로 **밴드 인덱스로 계산**한다. `v_pos` 리셋(줄 배치가 상단으로 되돌아감)은 **단 넘김과 페이지 넘김을 겸한다**: 리셋마다 밴드 인덱스 `col_band`를 증가시키고, `col_band % count == 0`이면 페이지 넘김, 아니면 같은 페이지 내 단 넘김(x만 다음 단으로 이동, 커서만 상단으로). 줄 x = `body_left + (col_band % count)·(col_width+gap) + col_start`. `col_width = (body_width - gap·(count-1))/count`. v1은 일반(normal) 순차 흐름·등폭; 배분(높이 밸런싱)·구분선·합성(md) 다단은 후속. 검증: 정답지 `multicol.hwp/.hwpx`(2단) → 3쪽·좌우 단 나란히(테스트 `다단_2단_렌더`).
 
+### 1.9 수식 조판 (`equation.rs`, mini-TeX)
+
+한글 수식은 글립이 아니라 **텍스트 스크립트**(EQN 호환)를 저장한다(hwp5 EQEDIT 레코드 0x58: attr(4)+len(2)+WCHAR[len]; hwpx `<hp:equation>`의 script). `equation.rs`가 스크립트를 토크나이즈→math 트리→box model로 조판해 글리프 런 + 분수선·근호선(`Item::Line`)을 **baseline 상대 좌표**로 방출한다.
+
+**문법(한컴 수식 spec rev1.2):** `over`/`atop`(분수), `sqrt`(근호), `^`/`_`(첨자), `{ }`(그룹), `#`(줄바꿈=행 세로 스택), `&`(열정렬 v1=공백), `~`·`` ` ``(공백), 그리스·연산자·함수어 매핑. AST = `Row/Stack/Sym/Frac/Script/Sqrt/Space`. **스택(다행)**은 각 행의 실제 높이(분수 행은 더 큼)로 세로 배치. **크기 2-pass:** 기준 12pt로 시험 조판→실제 높이를 재 `eq.height`에 맞춰 스케일(다행 수식 과대 방지)→상단 정렬. 검증: 정답지 `equation.hwp/.hwpx`(다행 ΑΒΓ·∑·분수·근호·첨자) → 한글과 구조 일치(테스트 `수식_정답지_렌더`). 후속: 변수 이탤릭/함수 로만 분화, 행렬, 큰연산자 극한.
+
 ---
 
 ## 2. lineseg 합성 (`lineseg.rs`, `synthesize_linesegs`)

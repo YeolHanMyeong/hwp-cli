@@ -881,17 +881,20 @@ fn layout_para_objects(
             // 수식(hp:equation) — 스크립트를 실제 math로 조판(equation.rs).
             Control::Generic(g) if g.equation.is_some() => {
                 let eq = g.equation.as_ref().expect("is_some");
-                let h = (eq.height as f32 / 100.0).max(14.0);
+                let h = (eq.height as f32 / 100.0).max(12.0);
                 let (bx, by, inline) = if eq.inline {
                     (x, object_y, true)
                 } else {
                     (eq.x as f32 / 100.0, eq.y as f32 / 100.0, false)
                 };
-                // 기준 글자 크기: 수식 상자 높이의 60%(8~16pt). 스크립트를 조판해 배치.
-                let size = (h * 0.6).clamp(8.0, 16.0);
+                // 글자 크기 2-pass: 여러 행 수식은 총 높이가 크므로, 기준 12pt로 시험 조판해
+                // 실제 높이를 잰 뒤 상자 높이(eq.height)에 맞춰 스케일한다(단일 행 가정 제거).
+                let probe = crate::equation::typeset(store, doc, &eq.script, 12.0);
+                let ph = (probe.ascent + probe.descent).max(1.0);
+                let size = (12.0 * h / ph).clamp(6.0, 18.0);
                 let ebox = crate::equation::typeset(store, doc, &eq.script, size);
-                // 세로 중앙정렬: 수식 중심을 상자 중심(by+h/2)에 맞춘 baseline.
-                let baseline_y = by + h * 0.5 + (ebox.ascent - ebox.descent) * 0.5;
+                // 상단 정렬: 수식 상단(baseline-ascent)을 상자 상단(by)에 맞춘다.
+                let baseline_y = by + ebox.ascent;
                 crate::equation::render_into(page, ebox, bx + 2.0, baseline_y);
                 if inline {
                     object_y += h;

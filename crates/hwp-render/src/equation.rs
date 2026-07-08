@@ -22,6 +22,7 @@ enum Tok {
     RBrace,
     Sup,        // ^
     Sub,        // _
+    Hash,       // # — 줄바꿈(행 나눔)
     Space(f32), // ~ (1) 또는 ` (0.25) — em 배수
 }
 
@@ -51,6 +52,11 @@ fn tokenize(s: &str) -> Vec<Tok> {
                 flush(&mut word, &mut out);
                 out.push(Tok::Sub);
             }
+            '#' => {
+                flush(&mut word, &mut out);
+                out.push(Tok::Hash);
+            }
+            '&' => flush(&mut word, &mut out), // 열 정렬(matrix) — v1은 공백 취급
             '~' => {
                 flush(&mut word, &mut out);
                 out.push(Tok::Space(1.0));
@@ -71,6 +77,8 @@ fn tokenize(s: &str) -> Vec<Tok> {
 #[derive(Debug, Clone)]
 enum Node {
     Row(Vec<Node>),
+    /// 여러 행을 세로로 쌓음(`#` 줄바꿈).
+    Stack(Vec<Node>),
     /// 기호/텍스트 (roman=참이면 로만체, 거짓이면 변수 이탤릭 — v1은 스타일 미분화, 표시만).
     Sym(String),
     /// 분수: (분자, 분모, bar=분수선 유무).
@@ -143,7 +151,7 @@ impl Parser {
     fn row_until_brace(&mut self) -> Node {
         let mut items = Vec::new();
         while let Some(t) = self.toks.get(self.i) {
-            if *t == Tok::RBrace {
+            if *t == Tok::RBrace || *t == Tok::Hash {
                 break;
             }
             if let Tok::Word(w) = t
@@ -173,7 +181,21 @@ fn parse(script: &str) -> Node {
         toks: tokenize(script),
         i: 0,
     };
-    p.row_until_brace()
+    // `#`로 나뉜 행들을 세로로 쌓는다.
+    let mut rows = Vec::new();
+    loop {
+        rows.push(p.row_until_brace());
+        if p.toks.get(p.i) == Some(&Tok::Hash) {
+            p.i += 1;
+        } else {
+            break;
+        }
+    }
+    if rows.len() == 1 {
+        rows.pop().unwrap()
+    } else {
+        Node::Stack(rows)
+    }
 }
 
 // ── 3. 기호 매핑 ──
@@ -226,6 +248,18 @@ fn sym_text(tok: &str) -> String {
         "chi" => "χ",
         "psi" => "ψ",
         "omega" => "ω",
+        "ALPHA" => "Α",
+        "BETA" => "Β",
+        "EPSILON" => "Ε",
+        "ZETA" => "Ζ",
+        "ETA" => "Η",
+        "IOTA" => "Ι",
+        "KAPPA" => "Κ",
+        "MU" => "Μ",
+        "NU" => "Ν",
+        "RHO" => "Ρ",
+        "TAU" => "Τ",
+        "CHI" => "Χ",
         "GAMMA" => "Γ",
         "DELTA" => "Δ",
         "THETA" => "Θ",
@@ -327,6 +361,25 @@ fn layout(store: &mut FontStore, doc: &Document, node: &Node, size: f32) -> EqBo
                 acc.merge(b);
             }
             acc.width = x;
+            acc
+        }
+        Node::Stack(rows) => {
+            let boxes: Vec<EqBox> = rows.iter().map(|r| layout(store, doc, r, size)).collect();
+            let width = boxes.iter().map(|b| b.width).fold(0.0, f32::max);
+            let gap = size * 0.35; // 행 사이 여백
+            // 각 행의 실제 높이(ascent+descent)로 배치 — 분수 행은 더 높으므로 겹침 방지.
+            let total_h: f32 = boxes.iter().map(|b| b.ascent + b.descent).sum::<f32>()
+                + gap * boxes.len().saturating_sub(1) as f32;
+            let mut acc = EqBox::empty();
+            let mut top = -total_h * 0.5; // 스택 상단(baseline 중심 기준)
+            for b in boxes {
+                let dx = (width - b.width) * 0.5; // 가로 중앙정렬
+                let baseline = top + b.ascent; // 이 행의 baseline
+                let (a, d) = (b.ascent, b.descent);
+                acc.merge(b.shift(dx, baseline));
+                top += a + d + gap;
+            }
+            acc.width = width;
             acc
         }
         Node::Script(base, sup, sub) => {

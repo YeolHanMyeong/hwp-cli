@@ -9,9 +9,9 @@
 //! - TABLE의 "행 크기" 배열은 행별 셀 개수다.
 
 use hwp_model::{
-    Cell, CharKind, CharShapeId, ColumnDef, Control, GenericControl, HwpChar, HwpUnit, LineSeg,
-    PageDef, ParaHeaderInfo, ParaShapeId, Paragraph, ParagraphList, Section, SectionDef, StyleId,
-    Table, char_kind,
+    Cell, CharKind, CharShapeId, ColumnDef, Control, Equation, GenericControl, HwpChar, HwpUnit,
+    LineSeg, PageDef, ParaHeaderInfo, ParaShapeId, Paragraph, ParagraphList, Section, SectionDef,
+    StyleId, Table, char_kind,
 };
 
 use crate::codec::ByteReader;
@@ -488,6 +488,12 @@ fn parse_generic(
     } else {
         None
     };
+    // 수식(eqed): 자식 EQEDIT 레코드의 스크립트 + 공통 속성(크기)로 Equation(렌더 조판용).
+    let equation = if &ctrl_id == b"eqed" {
+        parse_eqed(&data, children)
+    } else {
+        None
+    };
     let mut g = GenericControl {
         ctrl_id,
         data,
@@ -496,7 +502,7 @@ fn parse_generic(
         // 원본 자식 서브트리를 중첩 그대로 보존 → 무손실 재직렬화.
         raw_children: children.iter().map(to_opaque).collect(),
         gso_shapes: Vec::new(),
-        equation: None,
+        equation,
         column_def,
     };
     collect_paragraph_lists(children, &mut g, warnings);
@@ -506,6 +512,46 @@ fn parse_generic(
 /// COLDEF(cold) CTRL_HEADER 페이로드 → ColumnDef. 실측(다단정답지.hwp): `08 10`=attr 0x1008
 /// (bit0-1 종류·bit2-9 단수·bit10-11 방향·bit12 동일폭) + `dc 08`=gap 2268(HWPUNIT16) + 8B
 /// 구분선(현재 표본 0). hwplib ControlColumnDefine과 bit단위 일치.
+/// 수식(eqed) → Equation. 공통 속성(gso, data): attr@0·voff@4·hoff@8·width@12·height@16.
+/// 스크립트는 자식 EQEDIT 레코드(태그 0x58): attr(4) + len(2) + WCHAR[len] script(실측 확인).
+fn parse_eqed(data: &[u8], children: &[RecordNode]) -> Option<Equation> {
+    let script = find_eqedit_script(children)?;
+    let rd = |o: usize| -> i32 {
+        data.get(o..o + 4)
+            .map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .unwrap_or(0)
+    };
+    let attr = rd(0) as u32;
+    Some(Equation {
+        script,
+        width: rd(12).max(0),
+        height: rd(16).max(0),
+        inline: attr & 1 == 1, // bit0 = 글자처럼 취급
+        x: rd(8),              // hoff
+        y: rd(4),              // voff
+    })
+}
+
+/// 서브트리에서 EQEDIT(0x58) 레코드의 수식 스크립트를 찾는다.
+fn find_eqedit_script(children: &[RecordNode]) -> Option<String> {
+    const HWPTAG_EQEDIT: u16 = 0x58;
+    for c in children {
+        if c.tag == HWPTAG_EQEDIT && c.data.len() >= 6 {
+            let len = u16::from_le_bytes([c.data[4], c.data[5]]) as usize;
+            let end = (6 + len * 2).min(c.data.len());
+            let units: Vec<u16> = c.data[6..end]
+                .chunks_exact(2)
+                .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                .collect();
+            return Some(String::from_utf16_lossy(&units));
+        }
+        if let Some(s) = find_eqedit_script(&c.children) {
+            return Some(s);
+        }
+    }
+    None
+}
+
 fn parse_coldef(data: &[u8]) -> Option<ColumnDef> {
     if data.len() < 4 {
         return None;

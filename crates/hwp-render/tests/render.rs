@@ -288,6 +288,35 @@ fn 수식_조판_렌더() {
     );
 }
 
+/// 정답지 수식 문서(equation.hwp/.hwpx): 실제 한글 수식 스크립트(다행 `#`·분수·첨자·근호·
+/// 그리스)를 두 포맷 모두 조판해 그려야 한다. hwp5는 eqed 파싱, hwpx는 hp:equation 캡처.
+/// 스크립트가 같으므로 두 렌더의 잉크량이 비슷해야 한다(조판 일관성).
+#[test]
+fn 수식_정답지_렌더() {
+    let (Some(hp), Some(hx)) = (
+        fixture_or_skip("hwp5/equation.hwp"),
+        fixture_or_skip("hwpx/equation.hwpx"),
+    ) else {
+        return;
+    };
+    let d5 = hwp5::read_document(&hp).unwrap().document;
+    let dx = hwpx::read_document(&hx).unwrap().document;
+    let opt = RenderOptions {
+        dpi: 120.0,
+        ..Default::default()
+    };
+    let (o5, ox) = (
+        render_document(&d5, &opt).unwrap(),
+        render_document(&dx, &opt).unwrap(),
+    );
+    let (p5, px) = (dark_pixels(&o5.pages[0]), dark_pixels(&ox.pages[0]));
+    assert!(p5 > 300, "hwp5 수식이 조판돼야(eqed 파싱): {p5}");
+    assert!(px > 300, "hwpx 수식이 조판돼야: {px}");
+    // 같은 스크립트 → 두 포맷 잉크량이 2배 이내로 비슷해야 한다.
+    let ratio = p5.max(px) as f32 / p5.min(px).max(1) as f32;
+    assert!(ratio < 2.0, "hwp5({p5})/hwpx({px}) 조판 불일치: 비 {ratio:.1}");
+}
+
 /// 연결 다단 글상자: annual_report "At a Glance"(5쪽)는 월 텍스트가 왼쪽→오른쪽 단으로
 /// 흐른다. (1) 글자 베이스라인이 페이지 하단을 넘지 않아야 하고(흐름 드리프트/잘림 회귀
 /// 방지), (2) 오른쪽 단(x≈300pt)에 본문이 배치돼야 한다(다단 흐름). 폰트 무관 — 배치는
