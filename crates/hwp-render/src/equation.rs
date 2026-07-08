@@ -157,11 +157,14 @@ impl Parser {
             if let Tok::Word(w) = t
                 && (w == "over" || w == "atop")
             {
+                // `over`/`atop`은 중위 연산자: 분자=바로 앞 원자, 분모=바로 뒤 원자(HWP 실측).
+                // 전체 행 분할이 아니다 — `a + b over c` = a + (b/c), `{a+b} over c`로 그룹.
                 let bar = w == "over";
                 self.i += 1;
-                let num = Node::Row(std::mem::take(&mut items));
-                let den = self.row_until_brace();
-                return Node::Frac(Box::new(num), Box::new(den), bar);
+                let num = items.pop().unwrap_or(Node::Row(vec![]));
+                let den = self.atom_scripted();
+                items.push(Node::Frac(Box::new(num), Box::new(den), bar));
+                continue;
             }
             match self.atom_scripted() {
                 Node::Row(v) if v.is_empty() => break, // 진행 불가 방어
