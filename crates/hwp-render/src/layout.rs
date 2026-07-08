@@ -609,7 +609,7 @@ fn render_one_note(
     let indent = 16.0_f32.min(width * 0.25);
     let label = format!("{})", note.number);
     let baseline = y + marker_size;
-    if let Some(run) = crate::shape::shape_plain(store, doc, &label, marker_size, 0) {
+    if let Some(run) = crate::shape::shape_plain(store, doc, &label, marker_size, 0, false) {
         page.items.push(Item::Glyphs {
             x,
             y: baseline,
@@ -644,7 +644,7 @@ fn render_list_marker(
     baseline: f32,
     size: f32,
 ) {
-    if let Some(run) = crate::shape::shape_plain(store, doc, marker, size, 0) {
+    if let Some(run) = crate::shape::shape_plain(store, doc, marker, size, 0, false) {
         let w = run.width_pt;
         let x = (text_left - w - size * 0.3).max(0.0);
         push_run(page, x, baseline, run);

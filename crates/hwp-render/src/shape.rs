@@ -461,11 +461,13 @@ pub fn shape_plain(
     text: &str,
     size_pt: f32,
     color: u32,
+    italic: bool,
 ) -> Option<ShapedRun> {
     let cs = CharShape {
         base_size: (size_pt * 100.0) as i32,
         ratios: [100; LANG_COUNT],
         rel_sizes: [100; LANG_COUNT],
+        attr: u32::from(italic), // bit0 = 기울임(수식 변수 이탤릭)
         text_color: color,
         // 0xFFFFFFFF=음영 없음. 기본 0이면 "불투명 검정 배경"으로 해석돼 마커가
         // 검은 박스로 덮인다(각주·수식·목록 마커 공통 — 검은바 트랩).
@@ -620,7 +622,7 @@ mod link_tests {
         let doc = hwp_convert::from_markdown("x"); // default_header(함초롬바탕) 폰트 포함
         let mut store = FontStore::new();
         let text = "abc 123 가나다";
-        if let Some(run) = shape_plain(&mut store, &doc, text, 10.0, 0) {
+        if let Some(run) = shape_plain(&mut store, &doc, text, 10.0, 0, false) {
             assert_eq!(run.text, text, "전체 텍스트 보존(세그먼트 누락 없음)");
             assert!(!run.glyphs.is_empty(), "글리프 생성됨");
         }

@@ -325,12 +325,12 @@ impl EqBox {
     }
 }
 
-/// 한 기호/텍스트를 셰이핑해 상자로.
-fn box_sym(store: &mut FontStore, doc: &Document, text: &str, size: f32) -> EqBox {
+/// 한 기호/텍스트를 셰이핑해 상자로. italic=변수 기울임.
+fn box_sym(store: &mut FontStore, doc: &Document, text: &str, size: f32, italic: bool) -> EqBox {
     if text.is_empty() {
         return EqBox::empty();
     }
-    let Some(run) = shape_plain(store, doc, text, size, 0) else {
+    let Some(run) = shape_plain(store, doc, text, size, 0, italic) else {
         return EqBox::empty();
     };
     let width = run.width_pt;
@@ -352,8 +352,11 @@ fn layout(store: &mut FontStore, doc: &Document, node: &Node, size: f32) -> EqBo
         },
         Node::Sym(w) => {
             let t = sym_text(w);
-            // 함수어는 그대로(로만), 그 외 텍스트도 그대로. 기호 매핑 적용.
-            box_sym(store, doc, &t, size)
+            // 변수(매핑 안 된 단일 라틴 문자)는 이탤릭, 함수어·숫자·그리스·기호는 로만(실측 정합).
+            let italic = t == *w
+                && w.chars().count() == 1
+                && w.chars().next().is_some_and(|c| c.is_ascii_alphabetic());
+            box_sym(store, doc, &t, size, italic)
         }
         Node::Row(items) => {
             let mut acc = EqBox::empty();
@@ -443,7 +446,13 @@ fn layout(store: &mut FontStore, doc: &Document, node: &Node, size: f32) -> EqBo
         }
         Node::Sqrt(inner) => {
             let ib = layout(store, doc, inner, size);
-            let radical = box_sym(store, doc, "√", size * (1.0 + ib.ascent / size * 0.3));
+            let radical = box_sym(
+                store,
+                doc,
+                "√",
+                size * (1.0 + ib.ascent / size * 0.3),
+                false,
+            );
             let mut acc = EqBox::empty();
             let rw = radical.width;
             acc.merge(radical);
