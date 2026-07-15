@@ -237,6 +237,47 @@ fn 하이퍼링크_생성_hwpx_왕복() {
     );
 }
 
+/// 요약정보 8필드가 hwpx 패키지 왕복(write_document → read_document)에서 보존된다.
+///
+/// 정품 content.hpf 형식(creator/subject/keyword/description/lastsaveby meta +
+/// CreatedDate/ModifiedDate ISO-8601)을 방출·재파싱한다. FILETIME은 **초 단위 정밀도**로
+/// 왕복하며, 하위 100ns(FT_PER_SEC 미만)는 ISO 초 절사로 소실되므로 여기선 초 경계 값을
+/// 사용한다. 이 테스트는 fixtures가 필요 없다(합성 문서).
+#[test]
+fn 요약정보_8필드_hwpx_패키지_왕복() {
+    use hwp_model::iso8601_utc_to_filetime as iso2ft;
+
+    let mut doc = hwp_convert::from_markdown("요약정보 검증 본문\n");
+    // 모두 초 경계(FT_PER_SEC 배수)라 왕복 무손실.
+    let created = iso2ft("2025-09-17T04:32:50Z").unwrap();
+    let modified = iso2ft("2025-09-17T04:33:13Z").unwrap();
+    doc.metadata = hwp_model::Metadata {
+        title: Some("실기 검증 요약정보 문서".into()),
+        author: Some("홍길동".into()),
+        subject: Some("글자효과 및 요약정보 검증".into()),
+        keywords: Some("hwp, 실기검증, 요약정보".into()),
+        description: Some("C 시리즈 요약정보 검증용 문서입니다.".into()),
+        last_saved_by: Some("검증 담당자".into()),
+        create_time: Some(created),
+        modify_time: Some(modified),
+    };
+
+    let out = tmp("summary_meta.hwpx");
+    hwpx::write_document(&doc, &out).unwrap();
+
+    let reread = hwpx::read_document(&out).unwrap().document;
+    let m = &reread.metadata;
+    assert_eq!(m.title, doc.metadata.title);
+    assert_eq!(m.author, doc.metadata.author);
+    assert_eq!(m.subject, doc.metadata.subject);
+    assert_eq!(m.keywords, doc.metadata.keywords);
+    assert_eq!(m.description, doc.metadata.description);
+    assert_eq!(m.last_saved_by, doc.metadata.last_saved_by);
+    // FILETIME은 초 정밀도로 보존(하위 100ns는 애초에 없음).
+    assert_eq!(m.create_time, Some(created));
+    assert_eq!(m.modify_time, Some(modified));
+}
+
 /// 문단 끝에 gso 컨트롤(ExtCtrl 코드 11 + Generic)을 부착한다.
 fn attach_gso(para: &mut hwp_model::Paragraph, g: hwp_model::GenericControl) {
     use hwp_model::HwpChar;
@@ -494,6 +535,174 @@ fn 장식_도형_hwp5출신_hwpx_왕복() {
     assert_eq!(s.border_width, 32);
     // 글자처럼취급(gso attr bit0=1)이 anchored로 복원 — 재렌더 시 흐름 위치 배치의 근거.
     assert!(s.anchored, "treatAsChar=1 → anchored");
+}
+
+// ── GE-α1~α7: 글자효과·번호형식 write 대칭(hwpx→IR→hwpx→IR 왕복 보존) ─────────
+//
+// fixture 불필요: 각 속성을 켠 합성 header XML을 parse_header로 읽고, write_header로
+// 되쓴 뒤 다시 parse_header 하여 속성이 살아남는지 단언한다. write가 상수/미방출로
+// 누르던 회귀(글자 그림자·외곽선·양각/음각·첨자·밑줄 모양·번호 형식)를 잡는다.
+
+/// charPr 자식 XML을 감싸 read→write→read 왕복하고 (원본 CharShape, 재읽기 CharShape)를 돌려준다.
+fn 왕복_charpr(inner: &str) -> (hwp_model::CharShape, hwp_model::CharShape) {
+    let xml = format!(
+        r##"<hh:head><hh:charProperties itemCnt="1"><hh:charPr id="0" height="1000" textColor="#000000" shadeColor="#FFFFFF">{inner}</hh:charPr></hh:charProperties></hh:head>"##
+    );
+    let (h1, _) = hwpx::read::header::parse_header(&xml).unwrap();
+    let out = hwpx::write::header::write_header(&h1, 1);
+    let (h2, _) = hwpx::read::header::parse_header(&out).unwrap();
+    (
+        h1.char_shapes[0].clone(),
+        h2.char_shapes[0].clone(),
+    )
+}
+
+/// GE-α1 글자 그림자: type/색/간격이 왕복에서 보존된다(이전엔 상수 NONE).
+#[test]
+fn ge_a1_글자_그림자_왕복() {
+    let (cs1, cs2) = 왕복_charpr(
+        r##"<hh:shadow type="DROP" color="#FF0000" offsetX="7" offsetY="9"/>"##,
+    );
+    assert!(cs1.has_shadow(), "원본 그림자 파싱");
+    assert!(cs2.has_shadow(), "재읽기 그림자 보존");
+    assert_eq!(cs2.shadow_gap, cs1.shadow_gap, "그림자 간격 보존");
+    assert_eq!(cs2.shadow_gap, (7, 9));
+    assert_eq!(cs2.shadow_color, cs1.shadow_color, "그림자 색 보존");
+}
+
+/// GE-α2 외곽선: 유무가 왕복에서 보존된다(이전엔 상수 NONE).
+#[test]
+fn ge_a2_외곽선_왕복() {
+    let (cs1, cs2) = 왕복_charpr(r#"<hh:outline type="SOLID"/>"#);
+    assert!(cs1.has_outline(), "원본 외곽선 파싱");
+    assert!(cs2.has_outline(), "재읽기 외곽선 보존");
+    // 외곽선 없음도 여전히 없음으로 유지.
+    let (_, cs_none) = 왕복_charpr(r#"<hh:outline type="NONE"/>"#);
+    assert!(!cs_none.has_outline(), "NONE은 외곽선 없음 유지");
+}
+
+/// GE-α3 양각: 왕복에서 보존된다(이전엔 미방출).
+#[test]
+fn ge_a3_양각_왕복() {
+    let (cs1, cs2) = 왕복_charpr("<hh:emboss/>");
+    assert!(cs1.is_emboss(), "원본 양각 파싱");
+    assert!(cs2.is_emboss(), "재읽기 양각 보존");
+    assert!(!cs2.is_engrave(), "음각은 켜지지 않음");
+}
+
+/// GE-α3 음각: 왕복에서 보존된다(이전엔 미방출).
+#[test]
+fn ge_a3_음각_왕복() {
+    let (cs1, cs2) = 왕복_charpr("<hh:engrave/>");
+    assert!(cs1.is_engrave(), "원본 음각 파싱");
+    assert!(cs2.is_engrave(), "재읽기 음각 보존");
+    assert!(!cs2.is_emboss(), "양각은 켜지지 않음");
+}
+
+/// GE-α4 위첨자: 왕복에서 보존된다(이전엔 미방출).
+#[test]
+fn ge_a4_위첨자_왕복() {
+    let (cs1, cs2) = 왕복_charpr("<hh:supscript/>");
+    assert!(cs1.is_superscript(), "원본 위첨자 파싱");
+    assert!(cs2.is_superscript(), "재읽기 위첨자 보존");
+    assert!(!cs2.is_subscript(), "아래첨자는 켜지지 않음");
+}
+
+/// GE-α4 아래첨자: 왕복에서 보존된다(이전엔 미방출).
+#[test]
+fn ge_a4_아래첨자_왕복() {
+    let (cs1, cs2) = 왕복_charpr("<hh:subscript/>");
+    assert!(cs1.is_subscript(), "원본 아래첨자 파싱");
+    assert!(cs2.is_subscript(), "재읽기 아래첨자 보존");
+    assert!(!cs2.is_superscript(), "위첨자는 켜지지 않음");
+}
+
+/// GE-α5 밑줄 모양: SOLID가 아닌 모양(DASH)이 왕복에서 보존된다(이전엔 shape="SOLID" 고정).
+#[test]
+fn ge_a5_밑줄_모양_왕복() {
+    let (cs1, cs2) = 왕복_charpr(
+        r##"<hh:underline type="BOTTOM" shape="DASH" color="#000000"/>"##,
+    );
+    assert_ne!(cs1.underline_shape, 0, "원본 밑줄 모양 파싱");
+    assert_eq!(cs2.underline_shape, cs1.underline_shape, "밑줄 모양 보존");
+    assert_eq!(cs2.underline_kind(), 1, "밑줄 종류(아래)도 보존");
+    // 방출된 XML에 shape="DASH"가 실제로 들어간다.
+    let xml = r##"<hh:head><hh:charProperties itemCnt="1"><hh:charPr id="0" height="1000"><hh:underline type="BOTTOM" shape="DASH" color="#000000"/></hh:charPr></hh:charProperties></hh:head>"##;
+    let (h1, _) = hwpx::read::header::parse_header(xml).unwrap();
+    let out = hwpx::write::header::write_header(&h1, 1);
+    assert!(out.contains(r#"shape="DASH""#), "방출 XML에 DASH: {out}");
+}
+
+/// GE-α7 문단번호 형식: 수준별 start/numFormat/템플릿이 왕복에서 보존된다(이전엔 상수 ^{{level}}.).
+#[test]
+fn ge_a7_번호_형식_왕복() {
+    let xml = r#"<hh:head><hh:numberings itemCnt="1"><hh:numbering id="1" start="0"><hh:paraHead start="3" level="1" numFormat="ROMAN_CAPITAL">제^1조</hh:paraHead><hh:paraHead start="1" level="2" numFormat="HANGUL_SYLLABLE">(^2)</hh:paraHead></hh:numbering></hh:numberings></hh:head>"#;
+    let (h1, _) = hwpx::read::header::parse_header(xml).unwrap();
+    let out = hwpx::write::header::write_header(&h1, 1);
+    let (h2, _) = hwpx::read::header::parse_header(&out).unwrap();
+
+    let lv1 = &h1.numbering_levels[0][0];
+    let lv2 = &h1.numbering_levels[0][1];
+    assert_eq!(lv1.start, 3);
+    assert_eq!(lv1.fmt, hwp_model::NumFmt::RomanUpper);
+    assert_eq!(lv1.template, "제^1조");
+    assert_eq!(lv2.fmt, hwp_model::NumFmt::HangulSyllable);
+    assert_eq!(lv2.template, "(^2)");
+
+    // 재읽기에서 동일 값 보존.
+    let r1 = &h2.numbering_levels[0][0];
+    let r2 = &h2.numbering_levels[0][1];
+    assert_eq!(r1.start, lv1.start, "시작 번호 보존");
+    assert_eq!(r1.fmt, lv1.fmt, "번호 형식 보존");
+    assert_eq!(r1.template, lv1.template, "번호 템플릿 보존");
+    assert_eq!(r2.fmt, lv2.fmt);
+    assert_eq!(r2.template, lv2.template);
+}
+
+/// GE-α8: 문단 paraPr에 걸린 heading(목록 링크)이 write→re-read 왕복에서 보존된다.
+/// 이전엔 write가 heading을 상수 NONE으로 고정해, 한글에서 번호 정의는 남지만 문단에
+/// 번호가 표시되지 않았다(C6_번호형식). read가 인코딩한 head_type/level/numbering_id를
+/// write가 역방출하는지 단정한다.
+#[test]
+fn ge_a8_문단머리_heading_왕복() {
+    let xml = r#"<hh:head><hh:numberings itemCnt="1"><hh:numbering id="2" start="0"><hh:paraHead start="1" level="1" numFormat="DIGIT">^1.</hh:paraHead></hh:numbering></hh:numberings><hh:paraProperties itemCnt="1"><hh:paraPr id="0" tabPrIDRef="0"><hh:align horizontal="JUSTIFY" vertical="BASELINE"/><hh:heading type="NUMBER" idRef="2" level="3"/></hh:paraPr></hh:paraProperties></hh:head>"#;
+    let (h1, _) = hwpx::read::header::parse_header(xml).unwrap();
+
+    // read 인코딩 확인: head_type=2(번호), level=3, numbering_id=2.
+    let ps1 = &h1.para_shapes[0];
+    assert_eq!(ps1.head_type(), 2, "번호형 머리");
+    assert_eq!(ps1.head_level(), 3, "수준 3");
+    assert_eq!(ps1.numbering_id, 2, "번호정의 링크");
+
+    // write → re-read.
+    let out = hwpx::write::header::write_header(&h1, 1);
+    assert!(
+        out.contains(r#"<hh:heading type="NUMBER" idRef="2" level="3"/>"#),
+        "write가 heading을 역방출해야 함: {out}"
+    );
+    let (h2, _) = hwpx::read::header::parse_header(&out).unwrap();
+
+    // 재읽기에서 heading 링크 보존.
+    let ps2 = &h2.para_shapes[0];
+    assert_eq!(ps2.head_type(), 2, "재읽기 번호형 머리 보존");
+    assert_eq!(ps2.head_level(), 3, "재읽기 수준 보존");
+    assert_eq!(ps2.numbering_id, 2, "재읽기 번호정의 링크 보존");
+
+    // 번호 정의도 함께 보존.
+    assert_eq!(h2.numbering_levels[0][0].fmt, hwp_model::NumFmt::Digit);
+}
+
+/// GE-α8 보강: heading이 없는(기본) paraPr은 write에서 여전히 NONE으로 나가
+/// 기본 출력 바이트가 변하지 않는다.
+#[test]
+fn ge_a8_기본문단_heading_none_유지() {
+    let xml = r#"<hh:head><hh:paraProperties itemCnt="1"><hh:paraPr id="0" tabPrIDRef="0"><hh:align horizontal="JUSTIFY" vertical="BASELINE"/><hh:heading type="NONE" idRef="0" level="0"/></hh:paraPr></hh:paraProperties></hh:head>"#;
+    let (h1, _) = hwpx::read::header::parse_header(xml).unwrap();
+    let out = hwpx::write::header::write_header(&h1, 1);
+    assert!(
+        out.contains(r#"<hh:heading type="NONE" idRef="0" level="0"/>"#),
+        "기본 paraPr은 NONE 유지: {out}"
+    );
 }
 
 /// 쪽 컨트롤(쪽번호/감추기/새번호/자동번호)이 hwpx 왕복에서 hwp5 페이로드를 바이트

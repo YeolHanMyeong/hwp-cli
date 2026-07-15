@@ -84,9 +84,18 @@ pub fn read_document(path: &Path) -> Result<ReadResult> {
     })
 }
 
-/// content.hpf OPF 메타데이터에서 제목/지은이/주제/키워드를 추출한다(최선 노력).
-/// `opf:title`/`dc:creator`/`dc:subject` 텍스트 + `opf:meta[name=keywords]` content 속성.
-/// (앱 표시용 `<opf:meta name="creator">hwp-cli</opf:meta>`는 local-name이 `meta`라 무시됨.)
+/// content.hpf OPF 메타데이터에서 요약정보를 추출한다(최선 노력).
+///
+/// 정품 표본 형식을 우선 읽는다:
+/// - `<opf:title>`, `<opf:language>`(무시)
+/// - `<opf:meta name="creator|subject|description|lastsaveby|keyword" content="text">값</opf:meta>`
+///   (요소 텍스트가 값. `keyword`는 단수형)
+/// - `<opf:meta name="CreatedDate|ModifiedDate" content="text">ISO8601</opf:meta>`
+///   → [`iso8601_utc_to_filetime`]로 raw FILETIME u64 역산(초 정밀; 하위 100ns 소실).
+/// - `<opf:meta name="date">`(한국어 KST 파생값)는 무시한다 — create_time에서 재파생.
+///
+/// 하위호환으로 구형 형식도 계속 읽는다: `<dc:creator>`/`<dc:subject>` 요소 텍스트,
+/// `<opf:meta name="keywords" content="값"/>`(복수형 + content 속성).
 pub fn parse_content_meta(xml: &str) -> hwp_model::Metadata {
     use quick_xml::events::Event;
     let mut meta = hwp_model::Metadata::default();
@@ -95,14 +104,20 @@ pub fn parse_content_meta(xml: &str) -> hwp_model::Metadata {
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => match e.local_name().as_ref() {
+                // 구형: dc:title/dc:creator/dc:subject 요소 텍스트.
                 b"title" => capture = Some("title"),
                 b"creator" => capture = Some("author"),
                 b"subject" => capture = Some("subject"),
-                b"meta" => keywords_from_meta(&e, &mut meta),
+                b"meta" => {
+                    keywords_from_meta(&e, &mut meta);
+                    // 값을 요소 텍스트로 담는 meta는 다음 Text 이벤트에서 채운다.
+                    capture = meta_capture(&e);
+                }
                 _ => capture = None,
             },
             Ok(Event::Empty(e)) => {
                 if e.local_name().as_ref() == b"meta" {
+                    // 빈 요소(값 없음)라도 구형 keywords content 속성은 읽는다.
                     keywords_from_meta(&e, &mut meta);
                 }
             }
@@ -114,6 +129,15 @@ pub fn parse_content_meta(xml: &str) -> hwp_model::Metadata {
                             "title" => meta.title = Some(s),
                             "author" => meta.author = Some(s),
                             "subject" => meta.subject = Some(s),
+                            "keywords" => meta.keywords = Some(s),
+                            "description" => meta.description = Some(s),
+                            "last_saved_by" => meta.last_saved_by = Some(s),
+                            "create_time" => {
+                                meta.create_time = hwp_model::iso8601_utc_to_filetime(&s)
+                            }
+                            "modify_time" => {
+                                meta.modify_time = hwp_model::iso8601_utc_to_filetime(&s)
+                            }
                             _ => {}
                         }
                     }
@@ -127,6 +151,21 @@ pub fn parse_content_meta(xml: &str) -> hwp_model::Metadata {
     meta
 }
 
+/// `<opf:meta name="...">`의 name 속성 → 캡처 대상 필드 태그(요소 텍스트를 값으로 담는 것).
+fn meta_capture(e: &quick_xml::events::BytesStart<'_>) -> Option<&'static str> {
+    match xml::attr(e, "name").as_deref() {
+        Some("creator") => Some("author"),
+        Some("subject") => Some("subject"),
+        Some("keyword") => Some("keywords"), // 정품: 단수형 요소 텍스트
+        Some("description") => Some("description"),
+        Some("lastsaveby") => Some("last_saved_by"),
+        Some("CreatedDate") => Some("create_time"),
+        Some("ModifiedDate") => Some("modify_time"),
+        _ => None,
+    }
+}
+
+/// 구형 형식 하위호환: `<opf:meta name="keywords" content="값"/>`(복수형 + content 속성).
 fn keywords_from_meta(e: &quick_xml::events::BytesStart<'_>, meta: &mut hwp_model::Metadata) {
     if xml::attr(e, "name").as_deref() == Some("keywords")
         && let Some(v) = xml::attr(e, "content").filter(|v| !v.is_empty())

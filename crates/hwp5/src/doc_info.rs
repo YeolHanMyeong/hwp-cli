@@ -250,6 +250,8 @@ fn parse_char_shape(data: &[u8]) -> Result<CharShape> {
         shadow_gap,
         text_color,
         underline_color,
+        // HWP5는 밑줄 모양을 별도 IR 필드로 두지 않는다(hwpx 왕복 전용) → 미지정(0).
+        underline_shape: 0,
         shade_color,
         shadow_color,
         border_fill_id,

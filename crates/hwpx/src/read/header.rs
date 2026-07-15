@@ -213,6 +213,9 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
                             if let Some(c) = attr(e, "color") {
                                 cs.underline_color = parse_color(&c);
                             }
+                            // 밑줄 모양(SOLID/DASH/DOT…)을 테두리선 종류 코드로 보존.
+                            // 미지정(0)이면 write가 기본 SOLID로 방출한다.
+                            cs.underline_shape = attr(e, "shape").map_or(0, |s| line_type_code(&s));
                         }
                     }
                     b"strikeout" => {

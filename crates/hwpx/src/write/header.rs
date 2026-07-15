@@ -241,9 +241,14 @@ fn write_char_properties(out: &mut String, header: &DocHeader) {
             3 => "TOP",
             _ => "NONE",
         };
+        // 밑줄 모양: 0(미지정)이면 기존 관례대로 SOLID, 아니면 보존된 종류 코드.
+        let ul_shape = match cs.underline_shape {
+            0 => "SOLID",
+            c => line_type_name(c),
+        };
         let _ = write!(
             out,
-            r##"<hh:underline type="{ul_type}" shape="SOLID" color="{}"/>"##,
+            r##"<hh:underline type="{ul_type}" shape="{ul_shape}" color="{}"/>"##,
             if cs.underline_color == 0xFFFF_FFFF {
                 "#000000".to_string()
             } else {
@@ -255,7 +260,38 @@ fn write_char_properties(out: &mut String, header: &DocHeader) {
             r##"<hh:strikeout shape="{}" color="#000000"/>"##,
             if cs.has_strike() { "SOLID" } else { "NONE" }
         );
-        out.push_str(r##"<hh:outline type="NONE"/><hh:shadow type="NONE" color="#C0C0C0" offsetX="10" offsetY="10"/></hh:charPr>"##);
+        // 외곽선: 유무만 보존(read가 종류를 버림) — 있으면 SOLID, 없으면 NONE.
+        let _ = write!(
+            out,
+            r##"<hh:outline type="{}"/>"##,
+            if cs.has_outline() { "SOLID" } else { "NONE" }
+        );
+        // 그림자: 있으면 종류 DROP + 보존한 색/간격, 없으면 기존 상수(빈 문서 기본).
+        if cs.has_shadow() {
+            let _ = write!(
+                out,
+                r##"<hh:shadow type="DROP" color="{}" offsetX="{}" offsetY="{}"/>"##,
+                color_attr(cs.shadow_color),
+                cs.shadow_gap.0,
+                cs.shadow_gap.1,
+            );
+        } else {
+            out.push_str(r##"<hh:shadow type="NONE" color="#C0C0C0" offsetX="10" offsetY="10"/>"##);
+        }
+        // 양각/음각/위첨자/아래첨자: OWPML 스키마 순서상 shadow 뒤. 켜진 것만 방출.
+        if cs.is_emboss() {
+            out.push_str("<hh:emboss/>");
+        }
+        if cs.is_engrave() {
+            out.push_str("<hh:engrave/>");
+        }
+        if cs.is_superscript() {
+            out.push_str("<hh:supscript/>");
+        }
+        if cs.is_subscript() {
+            out.push_str("<hh:subscript/>");
+        }
+        out.push_str("</hh:charPr>");
     }
     out.push_str("</hh:charProperties>");
 }
@@ -272,15 +308,45 @@ fn write_tab_properties(out: &mut String, header: &DocHeader) {
     out.push_str("</hh:tabProperties>");
 }
 
+/// NumFmt → OWPML numFormat 문자열(읽기 num_fmt의 역).
+fn num_format_name(fmt: hwp_model::NumFmt) -> &'static str {
+    use hwp_model::NumFmt;
+    match fmt {
+        NumFmt::Digit => "DIGIT",
+        NumFmt::HangulSyllable => "HANGUL_SYLLABLE",
+        NumFmt::HangulJamo => "HANGUL_JAMO",
+        NumFmt::CircledDigit => "CIRCLED_DIGIT",
+        NumFmt::LatinUpper => "LATIN_CAPITAL",
+        NumFmt::LatinLower => "LATIN_SMALL",
+        NumFmt::RomanUpper => "ROMAN_CAPITAL",
+        NumFmt::RomanLower => "ROMAN_SMALL",
+    }
+}
+
 fn write_numberings(out: &mut String, header: &DocHeader) {
-    let count = header.numberings.len().max(1);
+    // hwpx 읽기는 수준 형식을 numbering_levels에 담는다(numberings는 hwp5 raw 전용).
+    // 둘 중 큰 개수를 방출해 hwpx→hwpx 왕복에서 번호 정의 수를 잃지 않는다.
+    let count = header
+        .numbering_levels
+        .len()
+        .max(header.numberings.len())
+        .max(1);
     let _ = write!(out, r##"<hh:numberings itemCnt="{count}">"##);
     for i in 0..count {
         let _ = write!(out, r##"<hh:numbering id="{}" start="0">"##, i + 1);
-        for level in 1..=7 {
+        let levels = header.numbering_levels.get(i);
+        for level in 1..=7usize {
+            // 보존된 수준 형식이 있으면 그 시작/형식/템플릿을, 없으면 기존 상수 기본.
+            let nl = levels.and_then(|v| v.get(level - 1));
+            let start = nl.map_or(1, |n| n.start);
+            let numfmt = nl.map_or("DIGIT", |n| num_format_name(n.fmt));
+            let template = match nl {
+                Some(n) if !n.template.is_empty() => esc(&n.template),
+                _ => format!("^{level}."),
+            };
             let _ = write!(
                 out,
-                r##"<hh:paraHead start="1" level="{level}" align="LEFT" useInstWidth="1" autoIndent="1" widthAdjust="0" textOffsetType="PERCENT" textOffset="50" numFormat="DIGIT" charPrIDRef="4294967295" checkable="0">^{level}.</hh:paraHead>"##
+                r##"<hh:paraHead start="{start}" level="{level}" align="LEFT" useInstWidth="1" autoIndent="1" widthAdjust="0" textOffsetType="PERCENT" textOffset="50" numFormat="{numfmt}" charPrIDRef="4294967295" checkable="0">{template}</hh:paraHead>"##
             );
         }
         out.push_str("</hh:numbering>");
@@ -330,9 +396,26 @@ fn write_para_properties(out: &mut String, header: &DocHeader) {
         } else {
             2
         };
+        // 문단 머리(목록) 링크 방출: read가 인코딩한 IR을 그대로 역방출한다.
+        // head_type() 비트(1=개요/2=번호/3=글머리표)가 서 있고 numbering_id>0일
+        // 때만 실제 heading을 낸다. 그 외에는 기본값(NONE/0/0) — 기존 출력 바이트 불변.
+        let heading = if ps.head_type() != 0 && ps.numbering_id > 0 {
+            let hty = match ps.head_type() {
+                1 => "OUTLINE",
+                2 => "NUMBER",
+                _ => "BULLET",
+            };
+            format!(
+                r##"<hh:heading type="{hty}" idRef="{}" level="{}"/>"##,
+                ps.numbering_id,
+                ps.head_level(),
+            )
+        } else {
+            r##"<hh:heading type="NONE" idRef="0" level="0"/>"##.to_string()
+        };
         let _ = write!(
             out,
-            r##"<hh:paraPr id="{i}" tabPrIDRef="{tab_ref}" condense="0" fontLineHeight="0" snapToGrid="1" suppressLineNumbers="0" checked="0" textDir="LTR"><hh:align horizontal="{align}" vertical="BASELINE"/><hh:heading type="NONE" idRef="0" level="0"/><hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="BREAK_WORD" widowOrphan="0" keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="BREAK"/><hh:autoSpacing eAsianEng="0" eAsianNum="0"/><hh:margin><hc:intent value="{}" unit="HWPUNIT"/><hc:left value="{}" unit="HWPUNIT"/><hc:right value="{}" unit="HWPUNIT"/><hc:prev value="{}" unit="HWPUNIT"/><hc:next value="{}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="{ls_type}" value="{ls_value}" unit="HWPUNIT"/><hh:border borderFillIDRef="{border_ref}" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/></hh:paraPr>"##,
+            r##"<hh:paraPr id="{i}" tabPrIDRef="{tab_ref}" condense="0" fontLineHeight="0" snapToGrid="1" suppressLineNumbers="0" checked="0" textDir="LTR"><hh:align horizontal="{align}" vertical="BASELINE"/>{heading}<hh:breakSetting breakLatinWord="KEEP_WORD" breakNonLatinWord="BREAK_WORD" widowOrphan="0" keepWithNext="0" keepLines="0" pageBreakBefore="0" lineWrap="BREAK"/><hh:autoSpacing eAsianEng="0" eAsianNum="0"/><hh:margin><hc:intent value="{}" unit="HWPUNIT"/><hc:left value="{}" unit="HWPUNIT"/><hc:right value="{}" unit="HWPUNIT"/><hc:prev value="{}" unit="HWPUNIT"/><hc:next value="{}" unit="HWPUNIT"/></hh:margin><hh:lineSpacing type="{ls_type}" value="{ls_value}" unit="HWPUNIT"/><hh:border borderFillIDRef="{border_ref}" offsetLeft="0" offsetRight="0" offsetTop="0" offsetBottom="0" connect="0" ignoreMargin="0"/></hh:paraPr>"##,
             ps.indent / 2,
             ps.margin_left / 2,
             ps.margin_right / 2,

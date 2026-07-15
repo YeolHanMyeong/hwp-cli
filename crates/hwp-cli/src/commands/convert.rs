@@ -42,7 +42,17 @@ pub fn run(
     match target {
         ConvertFormat::Md => {
             let doc = load_document(input)?;
-            std::fs::write(output, hwp_convert::to_markdown(&doc))?;
+            // 이미지가 있으면 "<출력스템>.media/"에 추출해 상대참조한다(이미지 없으면
+            // 디렉터리를 만들지 않음 — to_markdown_with가 첫 이미지에서 지연 생성).
+            let media_dir = output.with_extension("media");
+            let md = hwp_convert::to_markdown_with(
+                &doc,
+                &hwp_convert::MarkdownOptions {
+                    media_dir: Some(&media_dir),
+                    ..Default::default()
+                },
+            )?;
+            std::fs::write(output, md)?;
         }
         ConvertFormat::Html => {
             let doc = load_document(input)?;

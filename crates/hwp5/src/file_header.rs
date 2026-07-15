@@ -129,6 +129,20 @@ impl FileHeader {
         w.into_bytes()
     }
 
+    /// 지원 버전(HWP 5.x)인지 판별한다. major가 5여야만 5.0.x.x·5.1.x.x 등 전부 허용.
+    pub fn is_supported_version(&self) -> bool {
+        self.version.major == 5
+    }
+
+    /// 미지원 버전(major != 5)이면 [`Hwp5Error::UnsupportedVersion`]을 낸다.
+    /// 시그니처만으로는 걸러지지 않는 (가상의) 6.x 등 상위 버전을 본문 접근 전에 거부한다.
+    pub fn check_version(&self) -> Result<()> {
+        if !self.is_supported_version() {
+            return Err(Hwp5Error::UnsupportedVersion(self.version.to_string()));
+        }
+        Ok(())
+    }
+
     pub fn is_compressed(&self) -> bool {
         self.attributes & attr::COMPRESSED != 0
     }
@@ -191,6 +205,34 @@ mod tests {
         assert!(h.is_compressed());
         assert!(!h.is_distribution());
         assert_eq!(h.serialize(), data);
+    }
+
+    #[test]
+    fn major_5는_지원_버전_통과() {
+        // 5.0.3.0 (표본) — 통과.
+        let h = FileHeader::parse(&표본_헤더()).unwrap();
+        assert!(h.is_supported_version());
+        assert!(h.check_version().is_ok());
+
+        // 5.1.0.1 등 다른 5.x 마이너/빌드도 전부 허용.
+        let mut data = 표본_헤더();
+        data[32..36].copy_from_slice(&0x05010001u32.to_le_bytes()); // 5.1.0.1
+        let h = FileHeader::parse(&data).unwrap();
+        assert!(h.is_supported_version());
+        assert!(h.check_version().is_ok());
+    }
+
+    #[test]
+    fn major_6은_미지원_버전_에러() {
+        // 가상의 6.0.0.0 — 시그니처는 유효하지만 버전 게이트에서 거부돼야 한다.
+        let mut data = 표본_헤더();
+        data[32..36].copy_from_slice(&0x06000000u32.to_le_bytes()); // 6.0.0.0
+        let h = FileHeader::parse(&data).unwrap();
+        assert!(!h.is_supported_version());
+        assert!(matches!(
+            h.check_version(),
+            Err(Hwp5Error::UnsupportedVersion(v)) if v == "6.0.0.0"
+        ));
     }
 
     #[test]

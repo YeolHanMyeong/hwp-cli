@@ -20,14 +20,14 @@ pub use bookmark::{
 };
 pub use edit::{add_rows, apply_meta, replace_text, set_cell, table_dims};
 pub use field::{
-    FieldInfo, PlaceholderInfo, create_field, create_hyperlink, list_fields, scan_placeholders,
-    set_field,
+    FieldInfo, PlaceholderInfo, create_field, create_hyperlink, hyperlink_url, list_fields,
+    scan_placeholders, set_field,
 };
 pub use format::{CharFormat, set_char_format, set_para_align};
 pub use from_markdown::{default_header, from_markdown};
 pub use html::{to_html, to_html_fragment};
-pub use image::{ImageSize, insert_image};
-pub use markdown::to_markdown;
+pub use image::{ImageSize, image_kind, insert_image};
+pub use markdown::{MarkdownOptions, to_markdown, to_markdown_with};
 pub use odt::to_odt;
 pub use structure::{add_table_row, delete_paragraph, delete_table_row, insert_paragraph};
 

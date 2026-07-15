@@ -97,8 +97,9 @@ impl Hwp5Container {
         }
     }
 
-    /// 배포용/암호화 문서면 본문 접근 전에 명확한 에러를 낸다.
+    /// 미지원 버전/배포용/암호화 문서면 본문 접근 전에 명확한 에러를 낸다.
     pub fn check_body_readable(&self) -> Result<()> {
+        self.header.check_version()?;
         if self.header.is_encrypted() {
             return Err(Hwp5Error::Encrypted);
         }

@@ -101,6 +101,55 @@ fn tmp(name: &str) -> PathBuf {
 }
 
 #[test]
+fn cat_with_header_footer_hidden_flags() {
+    // 합성 문서로 cat 텍스트 추출 옵션 플래그가 파싱되고 본문을 출력하는지(스모크).
+    let md = tmp("hwp_cli_cat_flags.md");
+    std::fs::write(&md, "본문 텍스트입니다\n").unwrap();
+    let src = tmp("hwp_cli_cat_flags.hwpx");
+    assert!(
+        hwp()
+            .args(["new", "--from"])
+            .arg(&md)
+            .arg("-o")
+            .arg(&src)
+            .status()
+            .unwrap()
+            .success()
+    );
+    // plain + 두 플래그.
+    let out = hwp()
+        .arg("cat")
+        .arg(&src)
+        .args(["--with-header-footer", "--with-hidden"])
+        .output()
+        .expect("hwp cat");
+    assert!(
+        out.status.success(),
+        "cat 플래그 실행 성공 (stderr: {})",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("본문 텍스트입니다"),
+        "본문 출력"
+    );
+    // markdown 경로에도 플래그가 유효해야 한다.
+    let md_out = hwp()
+        .arg("cat")
+        .arg(&src)
+        .args(["--format", "markdown", "--with-hidden"])
+        .output()
+        .expect("hwp cat md");
+    assert!(md_out.status.success(), "cat markdown 플래그 실행");
+    assert!(
+        String::from_utf8_lossy(&md_out.stdout).contains("본문 텍스트입니다"),
+        "markdown 본문 출력"
+    );
+    for f in [&md, &src] {
+        let _ = std::fs::remove_file(f);
+    }
+}
+
+#[test]
 fn convert_html_has_title_from_metadata() {
     let md = tmp("hwp_cli_html.md");
     std::fs::write(&md, "# 본문 제목\n\n내용\n").unwrap();

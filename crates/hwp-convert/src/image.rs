@@ -71,6 +71,18 @@ pub fn image_pixel_size(data: &[u8]) -> Option<(u32, u32)> {
     None
 }
 
+/// 매직 바이트로 이미지 (확장자, MIME)를 판별한다(md/html 이미지 복원용).
+/// 알 수 없으면 `("bin", "application/octet-stream")` — 스펙상 미지 포맷은 `.bin`.
+pub fn image_kind(data: &[u8]) -> (&'static str, &'static str) {
+    match data {
+        [0x89, b'P', b'N', b'G', ..] => ("png", "image/png"),
+        [0xFF, 0xD8, ..] => ("jpg", "image/jpeg"),
+        [b'G', b'I', b'F', ..] => ("gif", "image/gif"),
+        [b'B', b'M', ..] => ("bmp", "image/bmp"),
+        _ => ("bin", "application/octet-stream"),
+    }
+}
+
 /// 문서 첫 구역의 본문 폭(HWPUNIT). PageDef 없으면 A4 근사 기본값.
 fn content_width(doc: &Document) -> i32 {
     doc.sections

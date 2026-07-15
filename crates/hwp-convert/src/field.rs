@@ -159,6 +159,40 @@ fn field_value(chars: &[HwpChar], start: usize) -> String {
     s
 }
 
+/// %hlk 하이퍼링크 컨트롤이면 대상 URL을 복원해 돌려준다(md/html 링크 방출용).
+/// 표시 텍스트는 FIELD_START~FIELD_END 사이 문자열이고, URL은 커맨드
+/// (`{URL};1;0;0;`)에 담긴다 — 첫 비이스케이프 `;` 전까지가 URL이며
+/// [`hlk_command`]의 백슬래시 이스케이프를 되돌린다.
+pub fn hyperlink_url(ctrl: &Control) -> Option<String> {
+    let Control::Generic(g) = ctrl else {
+        return None;
+    };
+    if &g.ctrl_id != b"%hlk" {
+        return None;
+    }
+    let cmd = parse_command(&g.data)?;
+    Some(unescape_hlk_url(&cmd))
+}
+
+/// [`hlk_command`]의 역: 첫 비이스케이프 `;`(필드 구분자) 전까지를 URL로 보고
+/// `\\`·`\;`·`\:` 등 백슬래시 이스케이프를 되돌린다.
+fn unescape_hlk_url(cmd: &str) -> String {
+    let mut out = String::with_capacity(cmd.len());
+    let mut it = cmd.chars();
+    while let Some(c) = it.next() {
+        match c {
+            '\\' => {
+                if let Some(n) = it.next() {
+                    out.push(n);
+                }
+            }
+            ';' => break,
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// 필드 컨트롤에서 (이름, 명령)을 읽는다.
 pub fn field_meta(ctrl: &Control) -> (Option<String>, Option<String>) {
     let Control::Generic(g) = ctrl else {
@@ -968,6 +1002,16 @@ mod tests {
             fields[0].command.as_deref(),
             Some("https\\://example.com/path;1;0;0;")
         );
+    }
+
+    #[test]
+    fn hyperlink_url_커맨드에서_복원() {
+        // %hlk 컨트롤의 커맨드(`{URL};1;0;0;`)에서 URL을 이스케이프 해제해 복원한다.
+        let ctrl = make_field_control(*b"%hlk", None, Some(&hlk_command("http://x.io/a")));
+        assert_eq!(hyperlink_url(&ctrl).as_deref(), Some("http://x.io/a"));
+        // %clk 등 비하이퍼링크는 None.
+        let clk = make_field_control(*b"%clk", Some("이름"), None);
+        assert_eq!(hyperlink_url(&clk), None);
     }
 
     #[test]

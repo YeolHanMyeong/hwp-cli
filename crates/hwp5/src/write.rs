@@ -970,10 +970,14 @@ const DEFAULT_NUMBERING_DATA: [u8; 226] = [
     0x00, 0x00,
 ];
 
-/// `\x05HwpSummaryInformation` (OLE 속성 집합) 작성. 메타데이터(제목/주제/지은이/키워드)를
-/// 채우되, 비어 있으면 빈 문자열로 표본 구조를 유지한다.
+/// `\x05HwpSummaryInformation` (OLE 속성 집합) 작성. 메타데이터(제목/주제/지은이/키워드/
+/// 설명/마지막 저장자/작성·수정 일시)를 채우되, 없으면 기존과 동일한 기본값(빈 문자열/
+/// FILETIME 0)으로 표본 구조를 유지한다 — 스트림 바이트 배치는 재설계하지 않는다.
 /// 헤더 상수는 한글 저장 표본 실측값 — FMTID 9FA2B660-1061-11D4-B4C6-006097C09D8C.
-/// PID: 0x02=제목 0x03=주제 0x04=지은이 0x05=키워드 (MS-OLEPS PIDSI). `summary.rs`의 파서와 대칭.
+/// PID: 0x02=제목 0x03=주제 0x04=지은이 0x14=날짜 문자열(작성일시 KST, VT_LPWSTR)
+/// 0x05=키워드 0x06=설명 0x08=마지막저장자 0x0C=작성일시 0x0D=수정일시(VT_FILETIME)
+/// (MS-OLEPS PIDSI). `summary.rs`의 파서와 대칭(단 0x14는 create_time에서 파생하므로
+/// 읽기는 무시하고 쓰기 때 재생성한다).
 pub(crate) fn hwp_summary_information(meta: &Metadata) -> Vec<u8> {
     const HWP_FMTID: [u8; 16] = [
         0x60, 0xB6, 0xA2, 0x9F, 0x61, 0x10, 0xD4, 0x11, 0xB4, 0xC6, 0x00, 0x60, 0x97, 0xC0, 0x9D,
@@ -983,25 +987,40 @@ pub(crate) fn hwp_summary_information(meta: &Metadata) -> Vec<u8> {
     let subject = meta.subject.as_deref().unwrap_or("");
     let author = meta.author.as_deref().unwrap_or("");
     let keywords = meta.keywords.as_deref().unwrap_or("");
+    let description = meta.description.as_deref().unwrap_or("");
+    let last_saved_by = meta.last_saved_by.as_deref().unwrap_or("");
+    // FILETIME은 raw u64 그대로. None이면 0 → 기존 기본값과 바이트 동일(게이트 불변).
+    let create_time = meta.create_time.unwrap_or(0);
+    let modify_time = meta.modify_time.unwrap_or(0);
+    // PID 0x14 = 한국어 KST 날짜 문자열. 정품 표본 40종 전수 관찰 결과 이 문자열은
+    // **작성일시(0x0C, create_time)**의 KST 표현이다(수정일시가 아님 — 모든 표본에서
+    // 0x14의 연도가 create_time과 일치, modify_time과는 불일치). 한글 문서정보의
+    // '날짜'가 이 문자열에서 온다. create_time이 없으면 modify_time으로 대체하고,
+    // 둘 다 없으면 빈 문자열(기존 구조/바이트 유지 — 게이트 불변).
+    let date_str = meta
+        .create_time
+        .or(meta.modify_time)
+        .and_then(hwp_model::filetime_to_korean_kst)
+        .unwrap_or_default();
     // 표본(한글 빈 문서)과 동일한 PID 순서/타입 — 메타데이터만 채움
     enum Val<'a> {
         Str(&'a str),
-        FileTime,
+        FileTime(u64),
         I4,
         Dictionary,
     }
     let props: [(u32, Val); 14] = [
-        (0x02, Val::Str(title)),     // 제목
-        (0x03, Val::Str(subject)),   // 주제
-        (0x04, Val::Str(author)),    // 지은이
-        (0x14, Val::Str("")),        // 날짜 문자열
-        (0x05, Val::Str(keywords)),  // 키워드
-        (0x06, Val::Str("")),        // 설명
-        (0x08, Val::Str("")),        // 마지막 저장자
-        (0x09, Val::Str("hwp-cli")), // 프로그램
-        (0x0C, Val::FileTime),
-        (0x0D, Val::FileTime),
-        (0x0B, Val::FileTime),
+        (0x02, Val::Str(title)),          // 제목
+        (0x03, Val::Str(subject)),        // 주제
+        (0x04, Val::Str(author)),         // 지은이
+        (0x14, Val::Str(&date_str)),      // 날짜 문자열(작성일시 KST)
+        (0x05, Val::Str(keywords)),       // 키워드
+        (0x06, Val::Str(description)),    // 설명
+        (0x08, Val::Str(last_saved_by)),  // 마지막 저장자
+        (0x09, Val::Str("hwp-cli")),      // 프로그램
+        (0x0C, Val::FileTime(create_time)),
+        (0x0D, Val::FileTime(modify_time)),
+        (0x0B, Val::FileTime(0)),
         (0x0E, Val::I4),
         (0x15, Val::I4),
         // PID 0 = PID_DICTIONARY (MS-OLEPS 2.17): VT_NULL이 아니라 사전 구조여야 한다.
@@ -1028,10 +1047,11 @@ pub(crate) fn hwp_summary_information(meta: &Metadata) -> Vec<u8> {
                     values.write_u8(0);
                 }
             }
-            Val::FileTime => {
+            Val::FileTime(ft) => {
                 values.write_u32(64); // VT_FILETIME
-                values.write_u32(0);
-                values.write_u32(0);
+                // dwLowDateTime, dwHighDateTime 순서(리틀엔디언). 0이면 기존 기본값과 동일.
+                values.write_u32((*ft & 0xFFFF_FFFF) as u32);
+                values.write_u32((*ft >> 32) as u32);
             }
             Val::I4 => {
                 values.write_u32(3); // VT_I4

@@ -247,14 +247,14 @@ HWPX는 OPC(Open Packaging Conventions) ZIP 아카이브다. 아래는 한글이
 | `offset` | charPr | 언어별 | `CharShape.offsets` | 의미파싱 | :178 |
 | `bold` | charPr | — | attr bit1 | 의미파싱 | :194 |
 | `italic` | charPr | — | attr bit0 | 의미파싱 | :199 |
-| `underline` | charPr | type, color | attr bits2‑3, underline_color | 의미파싱 | :204 |
+| `underline` | charPr | type, shape, color | attr bits2‑3, underline_shape, underline_color | 의미파싱 | :204 |
 | `strikeout` | charPr | shape | attr bit18, strike | 부분파싱(NONE·3D는 비취소선) | :218 |
-| `supscript` | charPr | — | attr bit15 | 의미파싱(단 write 미방출→§5) | :234 |
-| `subscript` | charPr | — | attr bit16 | 의미파싱(단 write 미방출) | :239 |
-| `shadow` | charPr | type, color, offsetX, offsetY | attr bit11, shadow_color/gap | 의미파싱(단 write 상수 NONE) | :245 |
-| `outline` | charPr | type | attr bit8 | 부분파싱(유무만; write 상수 NONE) | :259 |
-| `emboss` | charPr | — | attr bit13 | 의미파싱(단 write 미방출) | :266 |
-| `engrave` | charPr | — | attr bit14 | 의미파싱(단 write 미방출) | :271 |
+| `supscript` | charPr | — | attr bit15 | 의미파싱(write 대칭 — 2026-07-15) | :234 |
+| `subscript` | charPr | — | attr bit16 | 의미파싱(write 대칭) | :239 |
+| `shadow` | charPr | type, color, offsetX, offsetY | attr bit11, shadow_color/gap | 의미파싱(write 대칭) | :245 |
+| `outline` | charPr | type | attr bit8 | 부분파싱(유무만 — write 대칭 SOLID/NONE) | :259 |
+| `emboss` | charPr | — | attr bit13 | 의미파싱(write 대칭) | :266 |
+| `engrave` | charPr | — | attr bit14 | 의미파싱(write 대칭) | :271 |
 | `paraPr` | paraProperties | snapToGrid, condense, fontLineHeight, tabPrIDRef | `ParaShape.attr1/tab_def_id` | 의미파싱 | :276 |
 | `align` | paraPr | horizontal | attr1 bits2‑4 | 의미파싱 | :301 (`alignment_code` :87) |
 | `heading` | paraPr | type, level, idRef | attr1 bits23‑27, numbering_id | 의미파싱 | :309 |
@@ -331,15 +331,16 @@ grep 실측). 개별 나열 대신 계열로 묶는다. read가 만들지 못하
 | 루트·구조 | `hh:head`, `hh:beginNum`, `hh:refList`, `hh:compatibleDocument`, `hh:layoutCompatibility`, `hh:docOption`, `hh:linkinfo` | `write_header` :44 |
 | 글꼴 | `hh:fontfaces`, `hh:fontface`, `hh:font`, `hh:typeInfo` | `write_fontfaces` :76 |
 | 테두리채움 | `hh:borderFills`, `hh:borderFill`, `hh:slash`, `hh:backSlash`, `hh:leftBorder`/`rightBorder`/`topBorder`/`bottomBorder`, `hh:diagonal`, `hc:fillBrush`, `hc:winBrush` | `write_border_fills` :130 |
-| 문자모양 | `hh:charProperties`, `hh:charPr`, `hh:fontRef`, `hh:ratio`, `hh:spacing`, `hh:relSz`, `hh:offset`, `hh:italic`, `hh:bold`, `hh:underline`, `hh:strikeout`, `hh:outline`(상수), `hh:shadow`(상수) | `write_char_properties` :184 |
+| 문자모양 | `hh:charProperties`, `hh:charPr`, `hh:fontRef`, `hh:ratio`, `hh:spacing`, `hh:relSz`, `hh:offset`, `hh:italic`, `hh:bold`, `hh:underline`, `hh:strikeout`, `hh:outline`, `hh:shadow`, `hh:emboss`, `hh:engrave`, `hh:supscript`, `hh:subscript` (2026-07-15부터 전부 IR 기반) | `write_char_properties` :184 |
 | 탭 | `hh:tabProperties`, `hh:tabPr` | `write_tab_properties` :263 |
 | 번호(상수) | `hh:numberings`, `hh:numbering`, `hh:paraHead` | `write_numberings` :275 |
 | 문단모양 | `hh:paraProperties`, `hh:paraPr`, `hh:align`, `hh:heading`, `hh:breakSetting`, `hh:autoSpacing`, `hh:margin`, `hc:intent`/`left`/`right`/`prev`/`next`, `hh:lineSpacing`, `hh:border` | `write_para_properties` :291 |
 | 스타일 | `hh:styles`, `hh:style` | `write_styles` :346 |
 
-**감사 포인트:** `write_numberings`·`write_default_sec_pr`의 상당 요소는 IR과 무관한 **고정 상수
-템플릿**이다(번호 형식 `^1.` 고정, 각주/미주/페이지테두리 상수). 즉 이 요소들은 "유효한 문서"를
-위한 채움이지 왕복 보존이 아니다.
+**감사 포인트:** `write_default_sec_pr`의 상당 요소는 IR과 무관한 **고정 상수 템플릿**이다
+(각주/미주/페이지테두리 상수). 즉 이 요소들은 "유효한 문서"를 위한 채움이지 왕복 보존이 아니다.
+`write_numberings`는 2026-07-15부터 `numbering_levels`가 있으면 IR 기반으로 방출하고, 없을
+때(hwp5 경로)만 기존 `^{level}.` 상수로 채운다.
 
 ---
 
@@ -370,16 +371,17 @@ IR엔 값이 있으나(hwp5로는 나감) hwpx write가 상수/근사로 눌러 
 
 | 요소/속성 | read 해석 | write | 왕복 영향(hwpx→hwpx) | 근거 |
 |---|---|---|---|---|
-| charPr `shadow` | attr bit11 + color/offset | **상수 `type="NONE"`** | 글자 그림자 손실 | 읽기 `header.rs:245` ↔ 쓰기 `header.rs:258` |
-| charPr `outline` | attr bit8 | **상수 `type="NONE"`** | 글자 외곽선 손실 | `:259` ↔ `:258` |
-| charPr `emboss`/`engrave` | attr bit13/14 | **미방출** | 양각·음각 손실 | `:266,:271` ↔ (없음) |
-| charPr `supscript`/`subscript` | attr bit15/16 | **미방출** | 위·아래 첨자 손실 | `:234,:239` ↔ (없음) |
-| `hh:underline shape` | type/color 해석 | shape=`SOLID` 고정 | 밑줄 모양 근사 | `:204` ↔ `:246` |
+| charPr `shadow` | attr bit11 + color/offset | ✅ IR 기반(`DROP`+color/offset) | **해소(2026-07-15)** | 읽기 `header.rs:245` ↔ `write_char_properties` |
+| charPr `outline` | attr bit8 | ✅ 유무 기반 `SOLID`/`NONE` | **해소(2026-07-15)** | `:259` ↔ 동상 |
+| charPr `emboss`/`engrave` | attr bit13/14 | ✅ 켜진 것만 방출 | **해소(2026-07-15)** | `:266,:271` ↔ 동상 |
+| charPr `supscript`/`subscript` | attr bit15/16 | ✅ 켜진 것만 방출 | **해소(2026-07-15)** | `:234,:239` ↔ 동상 |
+| `hh:underline shape` | type/**shape**/color 해석(IR `underline_shape` 신설) | ✅ `underline_shape` 기반(0=SOLID) | **해소(2026-07-15)** | `:204` ↔ 동상 |
 | colPr `colSz`/`colLine`(단별폭·구분선) | 미수집(등폭 가정) | 값 방출하나 단별폭 없음 | 불균등 단·구분선 손실 | `parse_col_pr :377` ↔ `write_col_ctrl :473` |
 | `hc:gradation angle`·중심·step | angle만(라디안 근사) | angle round + centerX/Y/step 상수 | 그러데이션 중심·단계 근사 | `parse_gradation :1217` ↔ `:764` |
 | `hp:pagePr landscape` | attr bit0 | default_sec_pr에서 재방출 | 보존(단 secPr 다른 상수와 함께) | `:340` ↔ `:453` |
-| numbering `paraHead` 형식 | template/start/numFormat 수집 | **상수 `^{level}.`** 방출 | 번호 형식 손실 | `:333` ↔ `write/header.rs:283` |
+| numbering `paraHead` 형식 | template/start/numFormat 수집 | ✅ `numbering_levels` 기반(없으면 기존 상수) | **해소(2026-07-15)** — 다중 번호정의 itemCnt 뭉개짐도 함께 수정 | `:333` ↔ `write_numberings` |
 | tab `tabPr`(위치·채움) | tabPrIDRef만 | tabPr 빈 상수 | 사용자 탭 정의 손실 | `:291` ↔ `write_tab_properties :263` |
+| paraPr `heading`(문단↔번호 연결) | attr1 bits23‑27 + numbering_id | ✅ OUTLINE/NUMBER/BULLET 역방출 | **해소(2026-07-15 2차)** — [12](12-feature-gaps.md) GE-α8 | `:309` ↔ `write_para_properties` |
 
 ### (c) 양쪽 없음(미구현) — read·write 모두 의미 처리 없음
 

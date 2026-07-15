@@ -35,6 +35,19 @@ pub struct Metadata {
     pub subject: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keywords: Option<String>,
+    /// 설명(comments). hwp5 요약정보 PIDSI 6, hwpx OPF `meta[name=description]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// 마지막 저장자. hwp5 요약정보 PIDSI 8, hwpx OPF `meta[name=lastsaveby]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_saved_by: Option<String>,
+    /// 작성 일시. hwp5 요약정보 PIDSI 12(VT_FILETIME)의 **raw u64** 그대로 보존한다
+    /// (1601-01-01 UTC 기준 100ns 단위). 무손실 우선 — 시간대 변환·문자열화 금지.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub create_time: Option<u64>,
+    /// 수정(마지막 저장) 일시. hwp5 요약정보 PIDSI 13(VT_FILETIME)의 **raw u64** 그대로 보존.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modify_time: Option<u64>,
 }
 
 impl Metadata {
@@ -44,6 +57,10 @@ impl Metadata {
             && self.author.is_none()
             && self.subject.is_none()
             && self.keywords.is_none()
+            && self.description.is_none()
+            && self.last_saved_by.is_none()
+            && self.create_time.is_none()
+            && self.modify_time.is_none()
     }
 }
 

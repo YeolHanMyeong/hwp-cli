@@ -44,11 +44,32 @@ pub fn load_document(path: &Path) -> anyhow::Result<Document> {
 }
 
 /// 본문 텍스트 추출.
-pub fn run(path: &Path, format: TextFormat) -> anyhow::Result<()> {
+///
+/// `with_header_footer`/`with_hidden`은 머리말·꼬리말/숨은 설명 포함 여부(기본 제외).
+/// plain·markdown 경로에 일관되게 적용된다(html/json은 옵션 미대상).
+pub fn run(
+    path: &Path,
+    format: TextFormat,
+    with_header_footer: bool,
+    with_hidden: bool,
+) -> anyhow::Result<()> {
     let doc = load_document(path)?;
+    let opts = hwp_model::TextOptions {
+        include_header_footer: with_header_footer,
+        include_hidden: with_hidden,
+    };
     match format {
-        TextFormat::Plain => print!("{}", doc.plain_text()),
-        TextFormat::Markdown => print!("{}", hwp_convert::to_markdown(&doc)),
+        TextFormat::Plain => print!("{}", doc.plain_text_with(&opts)),
+        TextFormat::Markdown => print!(
+            "{}",
+            hwp_convert::to_markdown_with(
+                &doc,
+                &hwp_convert::MarkdownOptions {
+                    text: opts,
+                    ..Default::default()
+                },
+            )?
+        ),
         TextFormat::Html => print!("{}", hwp_convert::to_html(&doc)),
         TextFormat::Json => println!("{}", hwp_convert::to_json(&doc, true, false)?),
     }

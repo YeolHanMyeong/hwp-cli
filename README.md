@@ -116,7 +116,7 @@ hwp cat report.hwp --format json         # 전체 IR(JSON)
 # 변환 (출력 확장자로 포맷 추론)
 hwp convert report.hwp   -o report.hwpx  # hwp → hwpx (표·이미지·머리말 보존)
 hwp convert report.hwpx  -o report.hwp   # hwpx → hwp 바이너리
-hwp convert report.hwp   -o report.md    # hwp → markdown
+hwp convert report.hwp   -o report.md    # hwp → markdown (이미지는 report.media/에 추출, 링크는 [텍스트](URL))
 hwp convert report.hwp   -o doc.json --embed-bin   # 이미지까지 임베드한 자급식 JSON
 
 # 렌더링 (번들 함초롬 글꼴 자동 로드 — --font-dir 생략 시 HWP_FONT_DIR 또는 ./fonts)
@@ -165,7 +165,7 @@ hwp mcp --font-dir ./fonts
 | 명령 | 인자 / 플래그 | 설명 |
 |---|---|---|
 | `info <file>` | `--json` | 포맷/버전/속성/스트림 진단 |
-| `cat <file>` | `--format plain\|markdown\|json` (기본 `plain`), `--preview` | 본문 추출. `--preview`는 본문 파싱 없이 PrvText만 출력 |
+| `cat <file>` | `--format plain\|markdown\|json` (기본 `plain`), `--preview`, `--with-header-footer`, `--with-hidden` | 본문 추출. `--preview`는 본문 파싱 없이 PrvText만 출력. `--with-*`는 머리말/꼬리말·숨은 설명 포함(기본 제외) |
 | `convert <input> -o <output>` | `--to hwp\|hwpx\|md\|json`(생략 시 확장자 추론), `--strict`(예약 — 현재 미동작), `--preserve-layout`, `--embed-bin` | 포맷 변환. 출력이 `.pdf`이면 렌더 경로로 위임(시스템 글꼴 사용 — 정밀 글꼴은 `render --font-dir` 권장). `--preserve-layout`는 무수정 왕복 전용 줄 배치 보존. `--embed-bin`은 JSON에 이미지 base64 임베드. `--strict`는 향후 보존 불가 데이터 발견 시 실패 처리 예정(현재는 동작하지 않음) |
 | `render <input> -o <output>` | `--pages "1"\|"1-3"\|"all"`(기본 `all`), `--dpi <f64>`(기본 96, 래스터 전용), `--format png\|svg\|pdf`(생략 시 확장자 추론), `--font-dir <dir>`(반복) | 페이지를 PNG/SVG(페이지별 파일)·PDF(단일 멀티페이지)로 렌더. 번호 목록은 형식 템플릿(`^1.`→"1.", `(^5)`→"(5)", `제^1조`→"제1조")을 적용 |
 | `new -o <output>` | `--from <md\|json>`(생략 시 빈 문서) | markdown/JSON IR에서 새 문서 생성 |

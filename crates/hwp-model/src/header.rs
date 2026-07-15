@@ -92,6 +92,10 @@ pub struct CharShape {
     /// COLORREF (0x00BBGGRR)
     pub text_color: u32,
     pub underline_color: u32,
+    /// 밑줄 모양 코드(테두리선 종류계: 0=미지정→SOLID, 1=SOLID, 2=DASH …).
+    /// hwpx `<hh:underline shape>` 왕복 보존용(hwp5는 미사용 → 0).
+    #[serde(default)]
+    pub underline_shape: u8,
     pub shade_color: u32,
     pub shadow_color: u32,
     /// 글자 테두리/배경 참조 (1-기반, 0 = 미지정)

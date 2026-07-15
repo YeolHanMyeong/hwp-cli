@@ -35,6 +35,12 @@ enum Cmd {
         /// 본문 파싱 없이 PrvText 미리보기만 출력
         #[arg(long)]
         preview: bool,
+        /// 머리말/꼬리말 텍스트도 추출에 포함 (기본: 제외)
+        #[arg(long = "with-header-footer")]
+        with_header_footer: bool,
+        /// 숨은 설명 텍스트도 추출에 포함 (기본: 제외)
+        #[arg(long = "with-hidden")]
+        with_hidden: bool,
     },
 
     /// 포맷 변환 (M2부터 단계적 구현)
@@ -275,7 +281,13 @@ fn main() -> anyhow::Result<()> {
             preview: true,
             ..
         } => commands::cat::preview(&file),
-        Cmd::Cat { file, format, .. } => commands::cat::run(&file, format),
+        Cmd::Cat {
+            file,
+            format,
+            with_header_footer,
+            with_hidden,
+            ..
+        } => commands::cat::run(&file, format, with_header_footer, with_hidden),
         Cmd::Convert {
             input,
             output,

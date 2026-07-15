@@ -3,6 +3,8 @@
 //! `markdown.rs`의 매핑을 1:1로 미러링하되 HTML 시맨틱 태그를 쓴다:
 //! - "개요 N" 스타일 문단 → `<h1>`..`<h6>`
 //! - 문자 모양 → `<strong>`/`<em>`/`<u>`/`<s>` (markdown은 굵게·기울임만, HTML은 밑줄·취소선도 보존)
+//! - 하이퍼링크(%hlk 필드) → `<a href="URL">표시텍스트</a>` (URL은 속성 이스케이프)
+//! - 이미지(Picture) → `<img src="data:<mime>;base64,…">` (자기완결 임베드)
 //! - 표 → `<table>`/`<tr>`/`<th>`/`<td>`
 //! - 줄나눔(10) → `<br>`, 탭 → 공백
 //!
@@ -115,6 +117,8 @@ fn render_inline(doc: &Document, para: &Paragraph, out: &mut String) -> String {
     let mut body = String::new();
     let mut wchar_pos = 0u32;
     let mut style = Style::default();
+    // 하이퍼링크 필드 열림 상태. FIELD_START에서 `<a>`를 열고 FIELD_END에서 닫는다.
+    let mut link_open = false;
 
     for ch in &para.chars {
         if let HwpChar::Text(_) = ch {
@@ -139,7 +143,13 @@ fn render_inline(doc: &Document, para: &Paragraph, out: &mut String) -> String {
                 _ => {}
             },
             HwpChar::InlineCtrl { code, .. } => {
-                if *code == ctrl_char::TAB {
+                if *code == ctrl_char::FIELD_END {
+                    if link_open {
+                        close_marks(&mut body, &mut style);
+                        body.push_str("</a>");
+                        link_open = false;
+                    }
+                } else if *code == ctrl_char::TAB {
                     body.push(' ');
                 }
             }
@@ -149,11 +159,25 @@ fn render_inline(doc: &Document, para: &Paragraph, out: &mut String) -> String {
                 if let Some(idx) = ctrl_index
                     && let Some(control) = para.controls.get(*idx as usize)
                 {
-                    render_control(doc, control, *code, &mut body, out);
+                    if *code == ctrl_char::FIELD_START
+                        && let Some(url) = crate::field::hyperlink_url(control)
+                    {
+                        close_marks(&mut body, &mut style);
+                        body.push_str("<a href=\"");
+                        body.push_str(&escape(&url));
+                        body.push_str("\">");
+                        link_open = true;
+                    } else {
+                        render_control(doc, control, *code, &mut body, out);
+                    }
                 }
             }
         }
         wchar_pos += ch.wchar_width();
+    }
+    if link_open {
+        close_marks(&mut body, &mut style);
+        body.push_str("</a>");
     }
     close_marks(&mut body, &mut style);
     body
@@ -168,7 +192,18 @@ fn render_control(
 ) {
     match control {
         Control::SectionDef(_) => {}
-        Control::Picture(_) => body.push_str("<img alt=\"image\">"),
+        Control::Picture(pic) => match doc.resolve_bin(&pic.bin_ref) {
+            // 자기완결: 이미지 바이트를 data URI로 임베드한다. alt는 "image" 유지.
+            Some(data) => {
+                let (_, mime) = crate::image::image_kind(data);
+                body.push_str("<img alt=\"image\" src=\"data:");
+                body.push_str(mime);
+                body.push_str(";base64,");
+                body.push_str(&crate::base64::encode(data));
+                body.push_str("\">");
+            }
+            None => body.push_str("<img alt=\"image\">"),
+        },
         Control::Table(table) => {
             let cols = table.cols.max(1) as usize;
             let mut grid: Vec<Vec<String>> = Vec::new();
@@ -346,6 +381,39 @@ mod tests {
         let doc = from_markdown("a < b & c > d\n");
         let html = to_html(&doc);
         assert!(html.contains("a &lt; b &amp; c &gt; d"));
+    }
+
+    #[test]
+    fn 하이퍼링크_앵커_렌더() {
+        let doc = from_markdown("자세히는 [여기](https://example.com/a?b=1&c=2)를 보라\n");
+        let html = to_html(&doc);
+        // href는 속성 이스케이프(&amp;), 표시 텍스트는 <a>…</a>로 감싼다.
+        assert!(
+            html.contains("<a href=\"https://example.com/a?b=1&amp;c=2\">"),
+            "href 이스케이프: {html}"
+        );
+        assert!(html.contains("여기") && html.contains("</a>"), "링크 닫힘: {html}");
+    }
+
+    #[test]
+    fn 이미지_data_uri_임베드() {
+        let mut doc = from_markdown("사진: 여기");
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend([0, 0, 0, 13]);
+        png.extend(b"IHDR");
+        png.extend(96u32.to_be_bytes());
+        png.extend(96u32.to_be_bytes());
+        png.extend([0u8; 8]);
+        let p = std::env::temp_dir().join("html_img_embed.png");
+        std::fs::write(&p, &png).unwrap();
+        crate::image::insert_image(&mut doc, "사진:", &p, crate::image::ImageSize::Natural)
+            .unwrap();
+        let html = to_html(&doc);
+        let expect = format!(
+            "<img alt=\"image\" src=\"data:image/png;base64,{}\">",
+            crate::base64::encode(&png)
+        );
+        assert!(html.contains(&expect), "data URI 임베드: {html}");
     }
 
     #[test]

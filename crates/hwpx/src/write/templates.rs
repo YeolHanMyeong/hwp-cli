@@ -55,31 +55,48 @@ pub fn content_hpf(
             r##"<opf:item id="{id}" href="{href}" media-type="{mime}" isEmbeded="1"/>"##
         );
     }
+    // 정품 표본(content.hpf)의 metadata 형식·순서를 그대로 재현한다:
+    //   title / language(ko) / creator / subject / description / lastsaveby /
+    //   CreatedDate / ModifiedDate / date / keyword
+    // - title은 <opf:title>...</opf:title>(빈 값이면 <opf:title/>)
+    // - 나머지는 모두 <opf:meta name="..." content="text">값</opf:meta> 형식이며,
+    //   값이 없으면 정품처럼 빈 요소(<opf:meta name="..." content="text"/>)로 방출.
     let title_el = match meta.title.as_deref().filter(|t| !t.is_empty()) {
         Some(t) => format!("<opf:title>{}</opf:title>", esc(t)),
         None => "<opf:title/>".to_string(),
     };
-    let creator_el = meta
+    // creator: author 값. author가 None이면 앱 이름 "hwp-cli"를 유지(정품은 항상 값 보유,
+    // 중복 creator 방출은 제거).
+    let creator_val = meta
         .author
         .as_deref()
         .filter(|a| !a.is_empty())
-        .map(|a| format!("<dc:creator>{}</dc:creator>", esc(a)))
-        .unwrap_or_default();
-    let subject_el = meta
-        .subject
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .map(|s| format!("<dc:subject>{}</dc:subject>", esc(s)))
-        .unwrap_or_default();
-    let keywords_el = meta
-        .keywords
-        .as_deref()
-        .filter(|k| !k.is_empty())
-        .map(|k| format!("<opf:meta name=\"keywords\" content=\"{}\"/>", esc(k)))
-        .unwrap_or_default();
+        .unwrap_or("hwp-cli");
+    let creator_el = meta_text_el("creator", Some(creator_val));
+    let subject_el = meta_text_el("subject", meta.subject.as_deref());
+    let description_el = meta_text_el("description", meta.description.as_deref());
+    let lastsaveby_el = meta_text_el("lastsaveby", meta.last_saved_by.as_deref());
+    // 날짜: create_time/modify_time(FILETIME raw u64)에서 파생.
+    // CreatedDate/ModifiedDate는 ISO-8601 UTC, date는 한국어 KST(create 기준).
+    let created_iso = meta.create_time.and_then(hwp_model::filetime_to_iso8601_utc);
+    let modified_iso = meta.modify_time.and_then(hwp_model::filetime_to_iso8601_utc);
+    let date_kst = meta.create_time.and_then(hwp_model::filetime_to_korean_kst);
+    let created_el = meta_text_el("CreatedDate", created_iso.as_deref());
+    let modified_el = meta_text_el("ModifiedDate", modified_iso.as_deref());
+    let date_el = meta_text_el("date", date_kst.as_deref());
+    let keyword_el = meta_text_el("keyword", meta.keywords.as_deref());
     format!(
-        r##"<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><opf:package {FULL_XMLNS} version="" unique-identifier="" id=""><opf:metadata>{title_el}<opf:language>ko</opf:language>{creator_el}{subject_el}{keywords_el}<opf:meta name="creator" content="text">hwp-cli</opf:meta></opf:metadata><opf:manifest>{manifest}</opf:manifest><opf:spine>{spine}</opf:spine></opf:package>"##
+        r##"<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><opf:package {FULL_XMLNS} version="" unique-identifier="" id=""><opf:metadata>{title_el}<opf:language>ko</opf:language>{creator_el}{subject_el}{description_el}{lastsaveby_el}{created_el}{modified_el}{date_el}{keyword_el}</opf:metadata><opf:manifest>{manifest}</opf:manifest><opf:spine>{spine}</opf:spine></opf:package>"##
     )
+}
+
+/// 정품 `<opf:meta name="{name}" content="text">값</opf:meta>` 형식 한 요소.
+/// 값이 비어 있으면 빈 요소(`.../>`)로 방출한다(정품 표본이 빈 요소를 유지).
+fn meta_text_el(name: &str, value: Option<&str>) -> String {
+    match value.filter(|v| !v.is_empty()) {
+        Some(v) => format!("<opf:meta name=\"{name}\" content=\"text\">{}</opf:meta>", esc(v)),
+        None => format!("<opf:meta name=\"{name}\" content=\"text\"/>"),
+    }
 }
 
 /// XML 텍스트/속성 이스케이프.
@@ -108,4 +125,98 @@ pub fn color_attr(c: u32) -> String {
         (c >> 8) & 0xFF,
         (c >> 16) & 0xFF
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::read::parse_content_meta;
+
+    /// content.hpf에 요약정보 8필드를 정품 형식으로 방출하고 다시 읽어 보존되는지
+    /// 왕복 검증. FILETIME은 초 단위 정밀도로 방출/파싱되며, 하위 100ns는 ISO 초
+    /// 절사로 소실되므로 여기선 초 경계 값(FT_PER_SEC 배수)을 사용한다.
+    #[test]
+    fn content_hpf_요약정보_8필드_왕복() {
+        // 2025-09-17T04:32:50Z / 2025-09-17T04:33:13Z (모두 초 경계).
+        let created = hwp_model::iso8601_utc_to_filetime("2025-09-17T04:32:50Z").unwrap();
+        let modified = hwp_model::iso8601_utc_to_filetime("2025-09-17T04:33:13Z").unwrap();
+        let meta = hwp_model::Metadata {
+            title: Some("제목".into()),
+            author: Some("지은이".into()),
+            subject: Some("주제".into()),
+            keywords: Some("키워드".into()),
+            description: Some("설명 텍스트".into()),
+            last_saved_by: Some("최종 저장자".into()),
+            create_time: Some(created),
+            modify_time: Some(modified),
+        };
+        let xml = content_hpf(1, &[], &meta);
+        // 정품 형식(요소 텍스트) 방출 확인.
+        assert!(xml.contains(r##"<opf:meta name="creator" content="text">지은이</opf:meta>"##));
+        assert!(xml.contains(r##"<opf:meta name="subject" content="text">주제</opf:meta>"##));
+        assert!(xml.contains(r##"<opf:meta name="keyword" content="text">키워드</opf:meta>"##));
+        assert!(xml.contains(r##"name="description" content="text">설명 텍스트</opf:meta>"##));
+        assert!(xml.contains(r##"name="lastsaveby" content="text">최종 저장자</opf:meta>"##));
+        assert!(xml.contains(
+            r##"<opf:meta name="CreatedDate" content="text">2025-09-17T04:32:50Z</opf:meta>"##
+        ));
+        assert!(xml.contains(
+            r##"<opf:meta name="ModifiedDate" content="text">2025-09-17T04:33:13Z</opf:meta>"##
+        ));
+        // date는 KST(create 기준).
+        assert!(xml.contains(
+            r##"name="date" content="text">2025년 9월 17일 수요일 오후 1:32:50</opf:meta>"##
+        ));
+        // 구형 형식(dc:*, keywords 복수형)은 더 이상 방출하지 않는다.
+        assert!(!xml.contains("<dc:creator>"));
+        assert!(!xml.contains("<dc:subject>"));
+        assert!(!xml.contains(r##"name="keywords""##));
+
+        let parsed = parse_content_meta(&xml);
+        assert_eq!(parsed.title.as_deref(), Some("제목"));
+        assert_eq!(parsed.author.as_deref(), Some("지은이"));
+        assert_eq!(parsed.subject.as_deref(), Some("주제"));
+        assert_eq!(parsed.keywords.as_deref(), Some("키워드"));
+        assert_eq!(parsed.description.as_deref(), Some("설명 텍스트"));
+        assert_eq!(parsed.last_saved_by.as_deref(), Some("최종 저장자"));
+        assert_eq!(parsed.create_time, Some(created));
+        assert_eq!(parsed.modify_time, Some(modified));
+    }
+
+    /// 확장 필드가 None이면 정품처럼 빈 요소로 방출한다(요소는 유지, 값만 비움).
+    /// creator는 author None일 때 앱 이름 "hwp-cli"를 유지한다.
+    #[test]
+    fn content_hpf_none_필드_빈요소() {
+        let xml = content_hpf(1, &[], &hwp_model::Metadata::default());
+        // 빈 요소로 존재.
+        assert!(xml.contains(r##"<opf:meta name="subject" content="text"/>"##));
+        assert!(xml.contains(r##"<opf:meta name="description" content="text"/>"##));
+        assert!(xml.contains(r##"<opf:meta name="lastsaveby" content="text"/>"##));
+        assert!(xml.contains(r##"<opf:meta name="keyword" content="text"/>"##));
+        assert!(xml.contains(r##"<opf:meta name="CreatedDate" content="text"/>"##));
+        assert!(xml.contains(r##"<opf:meta name="ModifiedDate" content="text"/>"##));
+        assert!(xml.contains(r##"<opf:meta name="date" content="text"/>"##));
+        // creator는 hwp-cli.
+        assert!(xml.contains(r##"<opf:meta name="creator" content="text">hwp-cli</opf:meta>"##));
+        assert!(xml.contains("<opf:title/>"));
+        // 빈 요소는 값 없이 파싱되므로 대부분 None(creator만 hwp-cli).
+        let parsed = parse_content_meta(&xml);
+        assert_eq!(parsed.subject, None);
+        assert_eq!(parsed.description, None);
+        assert_eq!(parsed.keywords, None);
+        assert_eq!(parsed.create_time, None);
+        assert_eq!(parsed.author.as_deref(), Some("hwp-cli"));
+    }
+
+    /// 구형 형식(dc:subject, name="keywords" 복수형+content 속성)도 하위호환 파싱.
+    #[test]
+    fn parse_구형_형식_하위호환() {
+        let xml = r##"<opf:package><opf:metadata><opf:title>T</opf:title><dc:creator>A</dc:creator><dc:subject>S</dc:subject><opf:meta name="keywords" content="K"/><opf:meta name="description" content="text">D</opf:meta></opf:metadata></opf:package>"##;
+        let parsed = parse_content_meta(xml);
+        assert_eq!(parsed.title.as_deref(), Some("T"));
+        assert_eq!(parsed.author.as_deref(), Some("A"));
+        assert_eq!(parsed.subject.as_deref(), Some("S"));
+        assert_eq!(parsed.keywords.as_deref(), Some("K"));
+        assert_eq!(parsed.description.as_deref(), Some("D"));
+    }
 }

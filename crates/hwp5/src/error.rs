@@ -37,6 +37,9 @@ pub enum Hwp5Error {
     #[error("레코드 구조가 손상되었습니다: {0}")]
     MalformedRecord(String),
 
+    #[error("지원하지 않는 HWP 버전입니다: {0} (HWP 5.x만 지원)")]
+    UnsupportedVersion(String),
+
     #[error("암호화된 문서는 지원하지 않습니다")]
     Encrypted,
 

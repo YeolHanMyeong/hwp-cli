@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# 한글 실기 검증 세트 생성기 (⑬~㉓ 쓰기 경로).
+# 한글 실기 검증 세트 생성기 (⑬~㉓ 쓰기 경로 + 글자효과·요약정보).
 #
-# ~/Downloads/hwp-실기검증/(또는 $1)에 검증 파일 11종을 생성한다. 각 파일은 우리
-# 리더로 자체 재검증(재읽기 무경고)한 뒤에만 통과 표시된다 — 깨진 파일을 넘기지 않기 위함.
-# 실제 한글 수용 여부는 사용자가 한컴오피스에서 열어 확인(docs/실기검증-체크리스트.md).
+# ~/Downloads/hwp-실기검증/(또는 $1)에 검증 파일을 생성한다: A(실무 파이프라인)·
+# B(책갈피/하이퍼링크)·C(글자효과·요약정보, JSON IR 경유). 각 파일은 우리 리더로
+# 자체 재검증(재읽기 무경고 + C는 효과 보존 단언)한 뒤에만 통과 표시된다 — 깨진
+# 파일을 넘기지 않기 위함. 실제 한글 수용 여부는 사용자가 한컴오피스에서 열어
+# 확인(docs/실기검증-체크리스트.md).
 #
 # 사용: tools/gen_verification_set.sh [대상디렉터리]
 set -uo pipefail
@@ -86,6 +88,23 @@ if [[ -s "$WORK/base.hwp" ]]; then
   check "$DEST/B5_복합.hwp" "B5_복합.hwp (책갈피+하이퍼링크)"
 else
   REPORT+=("❌ base.hwp 생성 실패 — B 시리즈 생략")
+fi
+
+# ── C. 글자효과·요약정보 (JSON IR 경유 — tools/gen_effects_cases.py) ──
+# CLI에 효과 플래그가 없어 IR을 python(stdlib)으로 수술해 만든다. 헬퍼가 파일당
+# ✅/❌ 한 줄을 찍고(효과 보존 단언 포함), 여기서 REPORT/pass/fail에 합친다.
+if command -v python3 >/dev/null 2>&1; then
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    REPORT+=("$line")
+    case "$line" in
+      ✅*) ((pass++)) ;;
+      ❌*) ((fail++)) ;;
+      *)   ;;
+    esac
+  done < <(python3 "$REPO/tools/gen_effects_cases.py" --hwp "$HWP" --dest "$DEST" --work "$WORK")
+else
+  REPORT+=("⏭  C 시리즈 — python3 없음")
 fi
 
 # 체크리스트 사본.
