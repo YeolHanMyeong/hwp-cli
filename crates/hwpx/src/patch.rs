@@ -128,7 +128,11 @@ fn process_package(
 
 /// (from→to) 쌍을 순서대로 치환한다. `escape`면 XML 텍스트 규칙으로 이스케이프 후 치환.
 /// 반환: (결과 문자열, 총 치환 건수).
-fn replace_seq(mut text: String, replacements: &[(String, String)], escape: bool) -> (String, usize) {
+fn replace_seq(
+    mut text: String,
+    replacements: &[(String, String)],
+    escape: bool,
+) -> (String, usize) {
     let mut total = 0;
     for (from, to) in replacements {
         if from.is_empty() {
@@ -162,10 +166,7 @@ fn replace_in_prvtext(data: Vec<u8>, replacements: &[(String, String)]) -> (Vec<
         .collect();
     let text = String::from_utf16_lossy(&units);
     let (text, n) = replace_seq(text, replacements, false);
-    let encoded: Vec<u8> = text
-        .encode_utf16()
-        .flat_map(|u| u.to_le_bytes())
-        .collect();
+    let encoded: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
     (encoded, n)
 }
 

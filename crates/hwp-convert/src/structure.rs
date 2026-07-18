@@ -8,7 +8,9 @@
 //! 표 행/열 연산은 `crate::edit`(재귀 표 로케이터 계열 — set-cell과 인덱스 일치)으로
 //! 단일화됐다. 여기서는 문단 수준 편집만 둔다.
 
-use hwp_model::{CharShapeId, Control, Document, HwpChar, ParaShapeId, Paragraph, StyleId, ctrl_char};
+use hwp_model::{
+    CharShapeId, Control, Document, HwpChar, ParaShapeId, Paragraph, StyleId, ctrl_char,
+};
 
 use crate::edit::find_match;
 

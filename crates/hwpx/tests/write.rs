@@ -833,7 +833,13 @@ fn 왕복_스타일_사다리() {
     assert!(reread.header.para_shapes.len() >= 9);
     assert_eq!(reread.header.para_shapes[6].margin_left, 8000, "❍ 들여쓰기");
     // 리터럴 방식 — head_type 비트는 전부 0, 네이티브 불릿 정의 없음.
-    assert!(reread.header.para_shapes.iter().all(|ps| ps.head_type() == 0));
+    assert!(
+        reread
+            .header
+            .para_shapes
+            .iter()
+            .all(|ps| ps.head_type() == 0)
+    );
     assert!(reread.header.bullet_chars.is_empty(), "불릿 정의 0건");
     // 번호 정의는 writer가 빈 경우 기본 1개를 방출한다(기존 동작) — 사용자 정의는 없어야.
     assert!(

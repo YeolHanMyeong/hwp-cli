@@ -205,8 +205,14 @@ fn replace_texts_xml_이스케이프() {
 
     let mut zip = zip::ZipArchive::new(std::fs::File::open(&out).unwrap()).unwrap();
     let section = String::from_utf8(read_entry(&mut zip, "Contents/section0.xml")).unwrap();
-    assert!(section.contains("A&amp;B 제휴"), "이스케이프 치환: {section}");
-    assert!(!section.contains("A&B"), "날 ampersand 방출 금지: {section}");
+    assert!(
+        section.contains("A&amp;B 제휴"),
+        "이스케이프 치환: {section}"
+    );
+    assert!(
+        !section.contains("A&B"),
+        "날 ampersand 방출 금지: {section}"
+    );
 
     let _ = std::fs::remove_file(&src);
     let _ = std::fs::remove_file(&out);

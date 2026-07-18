@@ -248,7 +248,10 @@ fn add_col_in_table(table: &mut hwp_model::Table) -> Result<(), String> {
         return Err("열 수가 u16 범위를 넘습니다".to_string());
     }
     // 가드: 완전 단순 그리드(전 셀 1×1 + 모든 행이 전 열을 채움)만 허용한다.
-    let simple = table.cells.iter().all(|c| c.col_span == 1 && c.row_span == 1)
+    let simple = table
+        .cells
+        .iter()
+        .all(|c| c.col_span == 1 && c.row_span == 1)
         && (0..table.rows).all(|r| is_clean_row(table, r));
     if !simple {
         return Err("병합 셀이 있는 표에는 열 추가를 지원하지 않습니다".to_string());
@@ -264,16 +267,14 @@ fn add_col_in_table(table: &mut hwp_model::Table) -> Result<(), String> {
     // 행별로 폭 재분배 + 새 셀 추가. 행 우선 순서 유지를 위해 cells를 재구성한다.
     let mut new_cells = Vec::with_capacity(table.cells.len() + table.rows as usize);
     for r in 0..table.rows {
-        let mut row_cells: Vec<hwp_model::Cell> = table
-            .cells
-            .iter()
-            .filter(|c| c.row == r)
-            .cloned()
-            .collect();
+        let mut row_cells: Vec<hwp_model::Cell> =
+            table.cells.iter().filter(|c| c.row == r).cloned().collect();
         row_cells.sort_by_key(|c| c.col);
         let row_total: i64 = row_cells.iter().map(|c| i64::from(c.width.0)).sum();
         if row_total <= 0 {
-            return Err(format!("행 {r}의 총폭이 0이라 열 폭을 재분배할 수 없습니다"));
+            return Err(format!(
+                "행 {r}의 총폭이 0이라 열 폭을 재분배할 수 없습니다"
+            ));
         }
         let new_w = (row_total / (i64::from(cols) + 1)).max(1);
         let scaled_target = row_total - new_w;
@@ -893,7 +894,12 @@ mod tests {
         }
         // 새 열 폭 = 행총폭/(기존열수+1).
         assert_eq!(
-            t.cells.iter().find(|c| c.row == 0 && c.col == 3).unwrap().width.0,
+            t.cells
+                .iter()
+                .find(|c| c.row == 0 && c.col == 3)
+                .unwrap()
+                .width
+                .0,
             201 / 4
         );
         // 모든 폭은 양수.
@@ -956,7 +962,11 @@ mod tests {
         };
         {
             let t = first_table_mut(&mut doc);
-            let cell = t.cells.iter_mut().find(|c| c.row == 1 && c.col == 0).unwrap();
+            let cell = t
+                .cells
+                .iter_mut()
+                .find(|c| c.row == 1 && c.col == 0)
+                .unwrap();
             cell.paragraphs[0].controls.push(Control::Table(inner));
         }
         // 인덱스 1 = 중첩 표(깊이 우선). set-cell과 같은 번호로 행 추가가 걸려야 한다.
