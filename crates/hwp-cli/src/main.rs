@@ -169,10 +169,13 @@ enum Cmd {
         /// 문단 삭제 "텍스트" — 텍스트가 있는 문단 삭제 (반복 가능)
         #[arg(long = "delete-para")]
         delete_para: Vec<String>,
-        /// 표 행 추가 "표" — N번째 표 끝에 빈 행 (반복 가능, 0-기반)
+        /// 표 행 추가 "표" — N번째 표 끝에 빈 행 (반복 가능, 0-기반; 병합 셀이 있는 표는 거부)
         #[arg(long = "add-row")]
         add_row: Vec<String>,
-        /// 표 행 삭제 "표:행" — N번째 표의 R행 (반복 가능, 0-기반)
+        /// 표 열 추가 "표" — N번째 표 끝에 새 열. 전체 폭은 유지(기존 열 균등 축소, 반복 가능, 0-기반; 병합 셀이 있는 표는 거부)
+        #[arg(long = "add-col")]
+        add_col: Vec<String>,
+        /// 표 행 삭제 "표:행" — N번째 표의 R행 (반복 가능, 0-기반; 병합 행은 거부)
         #[arg(long = "delete-row")]
         delete_row: Vec<String>,
         /// 쓰기 후 재읽기로 검증
@@ -369,6 +372,7 @@ fn main() -> anyhow::Result<()> {
             insert_para_before,
             delete_para,
             add_row,
+            add_col,
             delete_row,
             verify,
         } => commands::edit::run(
@@ -388,6 +392,7 @@ fn main() -> anyhow::Result<()> {
             &insert_para_before,
             &delete_para,
             &add_row,
+            &add_col,
             &delete_row,
             verify,
         ),

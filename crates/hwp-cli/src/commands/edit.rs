@@ -29,6 +29,7 @@ pub fn run(
     insert_paras_before: &[String],
     delete_paras: &[String],
     add_rows: &[String],
+    add_cols: &[String],
     delete_rows: &[String],
     verify: bool,
 ) -> anyhow::Result<()> {
@@ -49,6 +50,7 @@ pub fn run(
         && insert_paras_before.is_empty()
         && delete_paras.is_empty()
         && add_rows.is_empty()
+        && add_cols.is_empty()
         && delete_rows.is_empty()
         && output
             .extension()
@@ -88,6 +90,7 @@ pub fn run(
         || !insert_paras_before.is_empty()
         || !delete_paras.is_empty()
         || !add_rows.is_empty()
+        || !add_cols.is_empty()
         || !delete_rows.is_empty()
         || !insert_images.is_empty();
 
@@ -257,8 +260,18 @@ pub fn run(
             .trim()
             .parse()
             .with_context(|| format!("--add-row 형식은 표 인덱스(예: \"0\") 입니다: {spec:?}"))?;
-        hwp_convert::add_table_row(&mut doc, ti).map_err(|e| anyhow::anyhow!(e))?;
+        hwp_convert::add_rows(&mut doc, ti, None, 1).map_err(|e| anyhow::anyhow!(e))?;
         eprintln!("표 행 추가: 표{ti}");
+        edits += 1;
+    }
+
+    for spec in add_cols {
+        let ti: usize = spec
+            .trim()
+            .parse()
+            .with_context(|| format!("--add-col 형식은 표 인덱스(예: \"0\") 입니다: {spec:?}"))?;
+        hwp_convert::add_col(&mut doc, ti).map_err(|e| anyhow::anyhow!(e))?;
+        eprintln!("표 열 추가: 표{ti} (전체 폭 유지)");
         edits += 1;
     }
 
@@ -275,7 +288,7 @@ pub fn run(
 
     if edits == 0 {
         eprintln!(
-            "경고: 적용된 편집이 없습니다 (--replace/--set-cell/--set-field/--set-meta/--create-field/--create-bookmark/--create-hyperlink/--insert-image/--set-format/--set-align/--insert-para/--delete-para/--add-row/--delete-row 확인)"
+            "경고: 적용된 편집이 없습니다 (--replace/--set-cell/--set-field/--set-meta/--create-field/--create-bookmark/--create-hyperlink/--insert-image/--set-format/--set-align/--insert-para/--delete-para/--add-row/--add-col/--delete-row 확인)"
         );
     }
 

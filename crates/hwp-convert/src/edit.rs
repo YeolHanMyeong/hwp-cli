@@ -199,6 +199,123 @@ pub fn table_dims(doc: &mut Document, table_index: usize) -> Option<(u16, u16)> 
     with_nth_table(doc, table_index, |t| (t.rows, t.cols))
 }
 
+/// `table_index`번째 표(0-기반)의 `row`행을 삭제한다(이후 행 재번호, row_cell_counts
+/// 갱신). 병합 셀이 있거나 세로 병합에 덮인 행은 그리드가 깨지므로 거부한다.
+pub fn delete_table_row(doc: &mut Document, table_index: usize, row: u16) -> Result<(), String> {
+    with_nth_table(doc, table_index, |t| delete_row_in_table(t, row))
+        .unwrap_or_else(|| Err(format!("표 #{table_index}를 찾을 수 없습니다")))
+}
+
+fn delete_row_in_table(table: &mut hwp_model::Table, row: u16) -> Result<(), String> {
+    if row >= table.rows {
+        return Err(format!("행 {row}이 없습니다 (행 {}개)", table.rows));
+    }
+    if table.rows <= 1 {
+        return Err("마지막 행은 삭제할 수 없습니다".to_string());
+    }
+    if !is_clean_row(table, row) {
+        return Err(format!(
+            "행 {row}에 병합 셀이 있거나 세로 병합에 덮여 있어 삭제를 지원하지 않습니다"
+        ));
+    }
+    table.cells.retain(|c| c.row != row);
+    for c in &mut table.cells {
+        if c.row > row {
+            c.row -= 1;
+        }
+    }
+    table.rows -= 1;
+    if (row as usize) < table.row_cell_counts.len() {
+        table.row_cell_counts.remove(row as usize);
+    }
+    Ok(())
+}
+
+/// `table_index`번째 표(0-기반) 끝에 열을 하나 추가한다 — **전체 표 폭은 유지**한다.
+/// 새 열은 균등 몫(`행총폭/(열수+1)`)을 갖고 기존 열은 비율로 축소된다(행별 정수 잔차는
+/// 그 행 마지막 기존 셀에 가산해 행 총폭이 정확히 보존). 병합 셀이 있는 표는 거부한다.
+pub fn add_col(doc: &mut Document, table_index: usize) -> Result<(), String> {
+    with_nth_table(doc, table_index, add_col_in_table)
+        .unwrap_or_else(|| Err(format!("표 #{table_index}를 찾을 수 없습니다")))
+}
+
+fn add_col_in_table(table: &mut hwp_model::Table) -> Result<(), String> {
+    let cols = table.cols;
+    if cols == 0 || table.rows == 0 {
+        return Err("빈 표에는 열을 추가할 수 없습니다".to_string());
+    }
+    if cols == u16::MAX {
+        return Err("열 수가 u16 범위를 넘습니다".to_string());
+    }
+    // 가드: 완전 단순 그리드(전 셀 1×1 + 모든 행이 전 열을 채움)만 허용한다.
+    let simple = table.cells.iter().all(|c| c.col_span == 1 && c.row_span == 1)
+        && (0..table.rows).all(|r| is_clean_row(table, r));
+    if !simple {
+        return Err("병합 셀이 있는 표에는 열 추가를 지원하지 않습니다".to_string());
+    }
+    // 복제 문단 instance_id 충돌 방지(add_rows와 같은 규칙 — 표 내 최댓값 위로).
+    let mut next_inst = table
+        .cells
+        .iter()
+        .flat_map(|c| &c.paragraphs)
+        .map(|p| p.header.instance_id)
+        .max()
+        .unwrap_or(0);
+    // 행별로 폭 재분배 + 새 셀 추가. 행 우선 순서 유지를 위해 cells를 재구성한다.
+    let mut new_cells = Vec::with_capacity(table.cells.len() + table.rows as usize);
+    for r in 0..table.rows {
+        let mut row_cells: Vec<hwp_model::Cell> = table
+            .cells
+            .iter()
+            .filter(|c| c.row == r)
+            .cloned()
+            .collect();
+        row_cells.sort_by_key(|c| c.col);
+        let row_total: i64 = row_cells.iter().map(|c| i64::from(c.width.0)).sum();
+        if row_total <= 0 {
+            return Err(format!("행 {r}의 총폭이 0이라 열 폭을 재분배할 수 없습니다"));
+        }
+        let new_w = (row_total / (i64::from(cols) + 1)).max(1);
+        let scaled_target = row_total - new_w;
+        // 기존 셀은 비율 축소, 정수 잔차는 마지막 기존 셀에 가산(행 총폭 정확 보존).
+        let last_idx = row_cells.len() - 1;
+        let mut acc: i64 = 0;
+        for (i, c) in row_cells.iter_mut().enumerate() {
+            let w = i64::from(c.width.0);
+            let nw = if i == last_idx {
+                scaled_target - acc
+            } else {
+                w * scaled_target / row_total
+            };
+            c.width = hwp_model::HwpUnit(nw as i32);
+            acc += nw;
+        }
+        // 새 셀: 행 마지막 셀을 복제(높이·여백·테두리 상속), 내용은 빈 문단.
+        let mut nc = row_cells[last_idx].clone();
+        nc.col = cols;
+        nc.width = hwp_model::HwpUnit(new_w as i32);
+        let mut para = blank_para_like(
+            table
+                .cells
+                .iter()
+                .filter(|c| c.row == r)
+                .max_by_key(|c| c.col)
+                .and_then(|c| c.paragraphs.first()),
+        );
+        next_inst = next_inst.wrapping_add(1);
+        para.header.instance_id = next_inst;
+        nc.paragraphs = vec![para];
+        new_cells.extend(row_cells);
+        new_cells.push(nc);
+    }
+    table.cells = new_cells;
+    table.cols += 1;
+    for cnt in &mut table.row_cell_counts {
+        *cnt += 1;
+    }
+    Ok(())
+}
+
 /// `"키=값"` 메타데이터 지정을 문서에 적용한다. 키: `title`|`author`|`subject`|`keywords`.
 /// 값이 비면 해당 필드를 `None`으로 지운다. 알 수 없는 키/형식은 `Err`.
 pub fn apply_meta(doc: &mut Document, spec: &str) -> Result<(), String> {
@@ -386,18 +503,12 @@ fn add_rows_in_table(
     if tpl_cells.is_empty() {
         return Err(format!("템플릿 행 {tpl}에 셀이 없습니다"));
     }
-    if tpl_cells.iter().any(|c| c.col_span != 1 || c.row_span != 1) {
+    // 템플릿 행은 전 열을 1×1로 채우는 깨끗한 행이어야 한다 — 병합 셀이 있거나
+    // 세로 병합에 덮인 부분 행이면 복제 시 그리드가 타일링되지 않아 누락 열이 생긴다.
+    if !is_clean_row(table, tpl) {
         return Err(format!(
-            "템플릿 행 {tpl}에 병합 셀이 있어 복제 불가 — 병합 없는 행을 지정하세요"
-        ));
-    }
-    if tpl_cells.len() as u16 != table.cols
-        || table.row_cell_counts.get(tpl as usize).copied() != Some(table.cols)
-    {
-        return Err(format!(
-            "템플릿 행 {tpl}이 전체 열({})을 채우지 않음(셀 {}개) — 세로 병합에 덮인 행은 복제 불가, 전 열을 채우는 행을 지정하세요",
-            table.cols,
-            tpl_cells.len()
+            "템플릿 행 {tpl}에 병합 셀이 있거나 전체 열({})을 채우지 않아 복제 불가 — 병합 없는 행을 지정하세요",
+            table.cols
         ));
     }
     // 복제 문단 instance_id 충돌 방지: hwp5 출신 편집 경로는 writer가 id를 재부여하지
@@ -433,17 +544,21 @@ fn add_rows_in_table(
     Ok(())
 }
 
+/// 행 r이 전 열을 1×1 셀로 채우는 '깨끗한' 행인지 — 병합 셀이 없고(row/col_span==1)
+/// 세로 병합에 덮이지도 않음(row_cell_counts==cols). 행 복제·삭제·열 추가 가드 공용.
+fn is_clean_row(table: &hwp_model::Table, r: u16) -> bool {
+    table.row_cell_counts.get(r as usize).copied() == Some(table.cols)
+        && table
+            .cells
+            .iter()
+            .filter(|c| c.row == r)
+            .all(|c| c.col_span == 1 && c.row_span == 1)
+}
+
 /// 복제 기본 템플릿: 마지막의 '깨끗한' 행 — 전 열을 채우고(row_cell_counts==cols)
 /// 병합 셀이 없는 행. 세로 병합에 덮인 행은 셀 수가 cols보다 적어 자동 제외된다.
 fn clean_template_row(table: &hwp_model::Table) -> Option<u16> {
-    (0..table.rows).rev().find(|&r| {
-        table.row_cell_counts.get(r as usize).copied() == Some(table.cols)
-            && table
-                .cells
-                .iter()
-                .filter(|c| c.row == r)
-                .all(|c| c.col_span == 1 && c.row_span == 1)
-    })
+    (0..table.rows).rev().find(|&r| is_clean_row(table, r))
 }
 
 pub(crate) fn utf16_len(s: &str) -> u32 {
@@ -706,6 +821,159 @@ mod tests {
         // 행 1은 부분 행 → 거부.
         let err = add_rows(&mut doc, 0, Some(1), 1).unwrap_err();
         assert!(err.contains("열"), "전 열 미충족 안내: {err}");
+    }
+
+    /// 셀 폭을 원하는 대로 갖는 표를 만든다(행별 width 지정, 단순 그리드).
+    fn width_table(widths: &[&[i32]]) -> Document {
+        let mut doc = from_markdown("| 가 | 나 |\n|----|----|\n| 1 | 2 |\n");
+        let t = first_table_mut(&mut doc);
+        let base = t.cells[0].clone();
+        t.rows = widths.len() as u16;
+        t.cols = widths[0].len() as u16;
+        t.cells.clear();
+        t.row_cell_counts.clear();
+        for (r, row) in widths.iter().enumerate() {
+            t.row_cell_counts.push(row.len() as u16);
+            for (c, w) in row.iter().enumerate() {
+                let mut cell = base.clone();
+                cell.row = r as u16;
+                cell.col = c as u16;
+                cell.width = hwp_model::HwpUnit(*w);
+                t.cells.push(cell);
+            }
+        }
+        doc
+    }
+
+    #[test]
+    fn 열_추가_구조_불변식() {
+        // 2x2 표 → 열 추가 → cols=3, 셀 6개, row_cell_counts [3,3], 행 우선 순서.
+        let mut doc = from_markdown("| 가 | 나 |\n|----|----|\n| 1 | 2 |\n");
+        let cells0 = first_table(&doc).cells.len();
+        add_col(&mut doc, 0).unwrap();
+        let t = first_table(&doc);
+        assert_eq!(t.cols, 3);
+        assert_eq!(t.cells.len(), cells0 + t.rows as usize);
+        assert_eq!(t.row_cell_counts, vec![3, 3]);
+        let rows_in_order: Vec<u16> = t.cells.iter().map(|c| c.row).collect();
+        let mut sorted = rows_in_order.clone();
+        sorted.sort_unstable();
+        assert_eq!(rows_in_order, sorted, "행 우선 순서 유지");
+        // 새 열(마지막 열) 셀은 빈 문단 1개.
+        for c in t.cells.iter().filter(|c| c.col == 2) {
+            assert_eq!(c.paragraphs.len(), 1);
+            assert!(c.paragraphs[0].chars.is_empty());
+        }
+    }
+
+    #[test]
+    fn 열_추가_폭_합_정확보존() {
+        // 행 총폭이 열 추가 전후로 정확히 일치해야 한다(균등 몫 + 잔차 마지막 셀).
+        let mut doc = width_table(&[&[100, 50, 51], &[200, 200, 202]]);
+        let before: Vec<i64> = (0..2)
+            .map(|r| {
+                first_table(&doc)
+                    .cells
+                    .iter()
+                    .filter(|c| c.row == r)
+                    .map(|c| i64::from(c.width.0))
+                    .sum()
+            })
+            .collect();
+        add_col(&mut doc, 0).unwrap();
+        let t = first_table(&doc);
+        for (r, expect) in before.iter().enumerate() {
+            let sum: i64 = t
+                .cells
+                .iter()
+                .filter(|c| c.row as usize == r)
+                .map(|c| i64::from(c.width.0))
+                .sum();
+            assert_eq!(&sum, expect, "행 {r} 총폭 보존");
+        }
+        // 새 열 폭 = 행총폭/(기존열수+1).
+        assert_eq!(
+            t.cells.iter().find(|c| c.row == 0 && c.col == 3).unwrap().width.0,
+            201 / 4
+        );
+        // 모든 폭은 양수.
+        assert!(t.cells.iter().all(|c| c.width.0 > 0));
+    }
+
+    #[test]
+    fn 열_추가_병합표_거부() {
+        let mut doc = from_markdown("| 가 | 나 |\n|----|----|\n| 1 | 2 |\n");
+        first_table_mut(&mut doc).cells[0].col_span = 2;
+        let err = add_col(&mut doc, 0).unwrap_err();
+        assert!(err.contains("병합"), "병합 거부 안내: {err}");
+        // 표는 무변경.
+        assert_eq!(first_table(&doc).cols, 2);
+    }
+
+    #[test]
+    fn 행_삭제_병합행_거부() {
+        let mut doc = from_markdown("| 가 | 나 |\n|----|----|\n| 1 | 2 |\n");
+        {
+            let t = first_table_mut(&mut doc);
+            t.rows = 3;
+            t.row_cell_counts = vec![2, 2, 1];
+            // (2,0)을 덮는 세로 병합: (1,0) rowspan=2, 행 2는 셀 1개(덮인 행).
+            if let Some(c10) = t.cells.iter_mut().find(|c| c.row == 1 && c.col == 0) {
+                c10.row_span = 2;
+            }
+            let mut c2 = t.cells[1].clone();
+            c2.row = 2;
+            c2.col = 1;
+            t.cells.push(c2);
+        }
+        // 덮인 행(2) 삭제 거부.
+        let err = delete_table_row(&mut doc, 0, 2).unwrap_err();
+        assert!(err.contains("병합"), "병합 행 거부 안내: {err}");
+        // 깨끗한 행(0)은 삭제 가능… 단 (1,0) rowspan이 행1에서 시작 → 행1도 거부.
+        let err1 = delete_table_row(&mut doc, 0, 1).unwrap_err();
+        assert!(err1.contains("병합"));
+        delete_table_row(&mut doc, 0, 0).unwrap();
+        assert_eq!(first_table(&doc).rows, 2);
+    }
+
+    #[test]
+    fn 표_연산_재귀_인덱싱() {
+        // 중첩 표가 있으면 set-cell과 같은 깊이 우선 인덱스로 행/열 연산이 걸린다.
+        let mut doc = from_markdown("| 가 | 나 |\n|----|----|\n| 1 | 2 |\n");
+        // 바깥 표의 (1,0) 셀 안에 1x1 중첩 표 삽입.
+        let inner = {
+            let t = first_table(&doc);
+            let mut inner = t.clone();
+            inner.rows = 1;
+            inner.cols = 1;
+            inner.cells.truncate(1);
+            let mut c = inner.cells[0].clone();
+            c.row = 0;
+            c.col = 0;
+            inner.cells = vec![c];
+            inner.row_cell_counts = vec![1];
+            inner
+        };
+        {
+            let t = first_table_mut(&mut doc);
+            let cell = t.cells.iter_mut().find(|c| c.row == 1 && c.col == 0).unwrap();
+            cell.paragraphs[0].controls.push(Control::Table(inner));
+        }
+        // 인덱스 1 = 중첩 표(깊이 우선). set-cell과 같은 번호로 행 추가가 걸려야 한다.
+        add_rows(&mut doc, 1, None, 1).unwrap();
+        let outer = first_table(&doc);
+        let inner_t = outer
+            .cells
+            .iter()
+            .find(|c| c.row == 1 && c.col == 0)
+            .and_then(|c| {
+                c.paragraphs[0].controls.iter().find_map(|ct| match ct {
+                    Control::Table(t) => Some(t),
+                    _ => None,
+                })
+            })
+            .expect("중첩 표");
+        assert_eq!(inner_t.rows, 2, "중첩 표에 행 추가됨(재귀 인덱싱)");
     }
 
     fn first_table_mut(doc: &mut Document) -> &mut hwp_model::Table {

@@ -1,14 +1,14 @@
-//! 구조 편집 — 문단 삽입/삭제, 표 행 추가/삭제.
+//! 구조 편집 — 문단 삽입/삭제.
 //!
 //! 새 문단/셀은 `set_cell`과 동일한 최소 IR(문단끝 0x0d는 writer가 idempotent하게
 //! 보장, line_segs 비움)로 만들고, 앵커/템플릿의 글자·문단 모양을 상속한다.
 //! 구조 편집본은 **합성 경로**(convert/new와 동일, 한글 수용 검증됨)로 써야 삽입
 //! 문단/행에 모든 불변식(0x0d·마지막문단 비트·카운트)이 적용된다.
+//!
+//! 표 행/열 연산은 `crate::edit`(재귀 표 로케이터 계열 — set-cell과 인덱스 일치)으로
+//! 단일화됐다. 여기서는 문단 수준 편집만 둔다.
 
-use hwp_model::{
-    Cell, CharShapeId, Control, Document, HwpChar, ParaShapeId, Paragraph, StyleId, Table,
-    ctrl_char,
-};
+use hwp_model::{CharShapeId, Control, Document, HwpChar, ParaShapeId, Paragraph, StyleId, ctrl_char};
 
 use crate::edit::find_match;
 
@@ -96,77 +96,6 @@ pub fn delete_paragraph(doc: &mut Document, matching: &str) -> usize {
     count
 }
 
-/// 문서 등장 순서 N번째 최상위 표(셀 안 중첩표 제외, v1).
-fn nth_table(doc: &mut Document, index: usize) -> Result<&mut Table, String> {
-    let mut seen = 0;
-    for section in &mut doc.sections {
-        for para in &mut section.paragraphs {
-            for ctrl in &mut para.controls {
-                if let Control::Table(t) = ctrl {
-                    if seen == index {
-                        return Ok(t);
-                    }
-                    seen += 1;
-                }
-            }
-        }
-    }
-    Err(format!("표 #{index}를 찾을 수 없습니다 (표 {seen}개)"))
-}
-
-/// N번째 표 끝에 행을 추가한다(마지막 행 셀 구조를 복제, 내용은 비움).
-pub fn add_table_row(doc: &mut Document, table_index: usize) -> Result<(), String> {
-    let table = nth_table(doc, table_index)?;
-    if table.rows == 0 {
-        return Err("빈 표에는 행을 추가할 수 없습니다".to_string());
-    }
-    let last = table.rows - 1;
-    let row_cells: Vec<Cell> = table
-        .cells
-        .iter()
-        .filter(|c| c.row == last)
-        .cloned()
-        .collect();
-    if row_cells.is_empty() {
-        return Err("마지막 행에 셀이 없습니다".to_string());
-    }
-    let cnt = row_cells.len() as u16;
-    for mut c in row_cells {
-        c.row = table.rows;
-        let (ps, sty, cs) = c
-            .paragraphs
-            .first()
-            .map_or((ParaShapeId(0), StyleId(0), CharShapeId(0)), para_template);
-        c.paragraphs = vec![make_paragraph("", ps, sty, cs)];
-        table.cells.push(c);
-    }
-    table.rows += 1;
-    table.row_cell_counts.push(cnt);
-    Ok(())
-}
-
-/// N번째 표의 R행을 삭제한다(이후 행 재번호, row_cell_counts 갱신).
-pub fn delete_table_row(doc: &mut Document, table_index: usize, row: u16) -> Result<(), String> {
-    let table = nth_table(doc, table_index)?;
-    if row >= table.rows {
-        return Err(format!("행 {row}이 없습니다 (행 {}개)", table.rows));
-    }
-    if table.rows <= 1 {
-        return Err("마지막 행은 삭제할 수 없습니다".to_string());
-    }
-    table.cells.retain(|c| c.row != row);
-    for c in &mut table.cells {
-        if c.row > row {
-            c.row -= 1;
-        }
-    }
-    table.rows -= 1;
-    if (row as usize) < table.row_cell_counts.len() {
-        table.row_cell_counts.remove(row as usize);
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,27 +130,5 @@ mod tests {
         delete_paragraph(&mut doc, "유일");
         let after: usize = doc.sections.iter().map(|s| s.paragraphs.len()).sum();
         assert_eq!(before, after, "최소 1문단 유지");
-    }
-
-    #[test]
-    fn 표_행_추가_삭제() {
-        let mut doc = from_markdown("| 가 | 나 |\n|----|----|\n| 1 | 2 |\n");
-        let rows0 = nth_table(&mut doc, 0).unwrap().rows;
-        let cells0 = nth_table(&mut doc, 0).unwrap().cells.len();
-        add_table_row(&mut doc, 0).unwrap();
-        {
-            let t = nth_table(&mut doc, 0).unwrap();
-            assert_eq!(t.rows, rows0 + 1);
-            assert_eq!(t.cells.len(), cells0 + t.cols as usize);
-            assert_eq!(t.row_cell_counts.len(), t.rows as usize);
-            // 새 행 셀은 row==rows0.
-            assert!(t.cells.iter().any(|c| c.row == rows0));
-        }
-        // 삭제(추가한 마지막 행).
-        delete_table_row(&mut doc, 0, rows0).unwrap();
-        let t = nth_table(&mut doc, 0).unwrap();
-        assert_eq!(t.rows, rows0);
-        assert!(t.cells.iter().all(|c| c.row < rows0));
-        assert_eq!(t.row_cell_counts.len(), t.rows as usize);
     }
 }

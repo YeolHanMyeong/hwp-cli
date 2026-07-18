@@ -500,8 +500,16 @@ fn tool_edit(args: &Value) -> Result<Vec<Value>, String> {
         for r in arr {
             let table = r.get("table").and_then(Value::as_u64).unwrap_or(0) as usize;
             structural = true;
-            hwp_convert::add_table_row(&mut doc, table)?;
+            hwp_convert::add_rows(&mut doc, table, None, 1)?;
             summary.push(format!("표{table} 행 추가"));
+        }
+    }
+    if let Some(arr) = args.get("add_col").and_then(Value::as_array) {
+        for r in arr {
+            let table = r.get("table").and_then(Value::as_u64).unwrap_or(0) as usize;
+            structural = true;
+            hwp_convert::add_col(&mut doc, table)?;
+            summary.push(format!("표{table} 열 추가"));
         }
     }
     if let Some(arr) = args.get("delete_row").and_then(Value::as_array) {
@@ -515,7 +523,7 @@ fn tool_edit(args: &Value) -> Result<Vec<Value>, String> {
     }
     if summary.is_empty() {
         return Err(
-            "적용할 편집이 없습니다 (replace/set_cell/set_field/create_field/create_bookmark/create_hyperlink/set_format/set_align/insert_para/delete_para/add_row/delete_row 확인)"
+            "적용할 편집이 없습니다 (replace/set_cell/set_field/create_field/create_bookmark/create_hyperlink/set_format/set_align/insert_para/delete_para/add_row/add_col/delete_row 확인)"
                 .to_string(),
         );
     }
@@ -692,10 +700,13 @@ fn tool_defs() -> Vec<Value> {
                     "required": ["matching"]}, "description": "매칭 텍스트가 든 문단 삭제(최소 1문단 유지)"},
                 "add_row": {"type": "array", "items": {"type": "object", "properties": {
                     "table": {"type": "integer"}},
-                    "required": ["table"]}, "description": "N번째 표 끝에 빈 행 추가(0-기반)"},
+                    "required": ["table"]}, "description": "N번째 표 끝에 빈 행 추가(0-기반, 병합 표는 거부)"},
+                "add_col": {"type": "array", "items": {"type": "object", "properties": {
+                    "table": {"type": "integer"}},
+                    "required": ["table"]}, "description": "N번째 표 끝에 열 추가(0-기반, 전체 폭 유지, 병합 표는 거부)"},
                 "delete_row": {"type": "array", "items": {"type": "object", "properties": {
                     "table": {"type": "integer"}, "row": {"type": "integer"}},
-                    "required": ["table", "row"]}, "description": "N번째 표의 R행 삭제(0-기반)"}
+                    "required": ["table", "row"]}, "description": "N번째 표의 R행 삭제(0-기반, 병합 행은 거부)"}
             }, "required": ["input", "output"]}
         }),
         json!({
