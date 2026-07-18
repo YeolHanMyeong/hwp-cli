@@ -89,6 +89,14 @@
   **C9**(표 공통속성 44B→46B), **C10**(쪽나눔 자리 holdAnchor 오기록 제거). 나머지 11건은
   주석·설계문서·스펙md 오류로 정정(TODO.md §1.4). 실기 4라운드 끝에 **D1·D2·D3 전부 통과** —
   도장 날인·사용자 탭 실기 확정. 전체 테스트 268 통과.
+- **2026-07-18 (PR #8 — 외부 기여, 대조 감사 완료)**: 고충실도 markdown 내보내기 —
+  **GH-3·GH-4·GH-5·GH-6·GH-8 md 경로 해소**(각주 `[^N]` 마커, 병합셀 HTML 폴백, 셀 내 블록,
+  리스트 `- `/`N. `, 수식 `$..$`·글자효과 스팬) + `--media-dir`·convert 텍스트 옵션 확장.
+  부수 수리: **OUTLINE heading idRef +1 밀림 실기 버그 수정**(정품 idRef=0), 번호/글머리 정의
+  id 비연속·중복 관용화, **`hh:bullets` write 신설**(이전엔 글머리표 정의가 hwpx 쓰기에서 조용히
+  소실 — 미등재 갭이었음), 리스트 로직 hwp-render→hwp-model 이동(허브-스포크 정리).
+  대조 감사 확인: exporter 전용이라 **GI(들여오기)는 무변경 → md 왕복 비대칭 심화**(GI-1·GI-2
+  우선순위 상승), html/odt 경로 잔존, GH-5 중첩 표 전용 테스트 부재.
 
 ---
 
@@ -333,7 +341,7 @@ IR→텍스트 포맷 출력에서 잃는 것들. `hwp-convert/src/{markdown,htm
 | GH-2 | **이미지 드롭(md/html)** | `markdown.rs`(`MarkdownOptions.media_dir`)·`html.rs`·`image.rs`(`image_kind` 헬퍼) | ✅ **해소(2026-07-15)** — html=data URI 임베드, convert .md=`<스템>.media/` 사이드카 추출(cat stdout은 기존 유지) | 내보내기 | S |
 | GH-3 | **각주/미주가 마커 없이 본문 인라인 흡수(md/html/odt 공통)** — `[^n]`·`<text:note>` 미사용 | `markdown.rs`, `html.rs:204-223`, `odt.rs:181-199` | ✅ **md 해소(2026-07-18)** — 본문 `[^N]`/`[^eN]` 마커 + 문서 끝 정의(GFM 풋노트). html/odt는 기존 근사 유지 | 내보내기 | S |
 | GH-4 | **병합 셀 평탄화** — col_span/row_span을 어떤 출력도 반영 안 함(colspan/rowspan·columns-spanned 미방출) | `markdown.rs`, `html.rs:172-203`, `odt.rs:203-243` | ✅ **md 해소(2026-07-18)** — 병합 셀 있으면 HTML `<table>`(colspan/rowspan) 폴백 → 단, GFM 표 유지는 무병합 표만. html/odt는 기존 근사 유지 | 내보내기 | S |
-| GH-5 | **셀 내 블록(중첩표·이미지) 드롭** — 셀은 인라인 텍스트만 취하고 블록 버퍼 폐기 | `odt.rs:215`(blk 폐기), `markdown.rs`, `html.rs:181-189` | ✅ **md 해소(2026-07-18)** — 중첩 표·블록 수식 감지 시 HTML 표 폴백, 셀 fragment를 등장 순서대로 보존하고 이미지도 안전하게 참조. html/odt는 기존 | 내보내기 | M |
+| GH-5 | **셀 내 블록(중첩표·이미지) 드롭** — 셀은 인라인 텍스트만 취하고 블록 버퍼 폐기 | `odt.rs:215`(blk 폐기), `markdown.rs`, `html.rs:181-189` | ✅ **md 해소(2026-07-18)** — 중첩 표·블록 수식 감지 시 HTML 표 폴백, 셀 fragment를 등장 순서대로 보존하고 이미지도 안전하게 참조. html/odt는 기존. ⚠대조 감사 노트: 코드 분기(`Control::Table => true`)는 확인됐으나 "셀 안 실제 중첩 표" 전용 단위 테스트는 부재(수식·이미지로 간접 검증만) | 내보내기 | M |
 | GH-6 | **리스트 평문화(md)** — 헤딩만 인식, 글머리표/번호 문단을 `- `/`1. ` 구문으로 복원 안 함 | `markdown.rs` + `hwp-model/src/list.rs`(render에서 이동, SSOT) | ✅ **해소(2026-07-18)** — `- `/`N. ` 목록 + 부모 마커 폭 기준 들여쓰기, 정의별 번호 카운터와 구역별 재시작, 번호 형식 합성(숫자 외는 리터럴 마커) | 내보내기 | S |
 | GH-7 | **ODT 페이지 레이아웃 미재현** — 여백·다단·머리말 위치 생략(모듈 주석에 명시) | `odt.rs:3-5` | 근사(생략) | 내보내기 | M |
 | GH-8 | **수식·글자효과 드롭(md)** — eqed 스크립트 미방출, 밑줄/취소선/위·아래첨자 평문화 | `markdown.rs` | ✅ **해소(2026-07-18)** — 수식 인라인 `$..$`/블록 `$$..$$`(HWP 스크립트 원문), `<u>`·`~~`·`<sup>`·`<sub>` 스팬 | 내보내기 | S |
@@ -342,8 +350,8 @@ IR→텍스트 포맷 출력에서 잃는 것들. `hwp-convert/src/{markdown,htm
 
 | ID | 현상 | 근거 코드 | 현 동작 | 영향 경로 | 난이도 |
 |---|---|---|---|---|---|
-| GI-1 | **GFM 확장 미파싱** — 취소선(`~~`)·각주·작업목록 파서 옵션 미활성(표만 켬) | `hwp-convert/src/from_markdown.rs:234-236` | 미지원(평문) | 들여오기 | S |
-| GI-2 | **순서·중첩 리스트가 단일 "• " 문단으로** — `list_depth` 추적만 하고 미사용, ordered 구분 없음 | `from_markdown.rs:465-471` | 근사(불릿 고정) | 들여오기 | S |
+| GI-1 | **GFM 확장 미파싱** — 취소선(`~~`)·각주·작업목록 파서 옵션 미활성(표만 켬). ★PR #8로 **왕복 비대칭 심화**: 내보내기는 이제 `[^N]` 각주·`~~` 등을 방출하는데 들여오기가 못 읽어 md 왕복에서 평문화됨 | `hwp-convert/src/from_markdown.rs`(`ENABLE_TABLES`만) | 미지원(평문) | 들여오기 | S↑(우선순위 상승) |
+| GI-2 | **순서·중첩 리스트가 단일 "• " 문단으로** — `list_depth` 추적만 하고 미사용, ordered 구분 없음. ★PR #8로 왕복 비대칭 심화(내보내기는 `- `/`N. `+들여쓰기 방출) | `from_markdown.rs` | 근사(불릿 고정) | 들여오기 | S↑ |
 | GI-3 | **markdown 이미지 `![alt](url)` 드롭** — `Tag::Image` 핸들러 없음 | `from_markdown.rs:390-511`(Image arm 부재) | 드롭 | 들여오기 | S |
 | GI-4 | **인라인 코드 서식 소실** — `Event::Code`를 평문 삽입(모노스페이스 글자모양 없음) | `from_markdown.rs:425` | 근사 | 들여오기 | S |
 | GI-5 | **from_json 이미지 바이트 조건부** — `--embed-bin` 없으면 bin `data`가 skip이라 유실 | `hwp-convert/src/lib.rs:39,68-96` | 부분(조건부) | 들여오기 | S |
@@ -383,7 +391,7 @@ IR→텍스트 포맷 출력에서 잃는 것들. `hwp-convert/src/{markdown,htm
 
 | ID | 현상 | 근거 코드 | 난이도 |
 |---|---|---|---|
-| GL-1 | **TextOptions(머리말/숨은설명 토글)가 CLI 미노출** → ✅ **해소(2026-07-15)** — `cat --with-header-footer`·`--with-hidden` 플래그 추가(plain·markdown 적용) | `hwp-model/src/text.rs` ↔ `main.rs`·`commands/cat.rs` | S |
+| GL-1 | **TextOptions(머리말/숨은설명 토글)가 CLI 미노출** → ✅ **해소(2026-07-15)** — `cat --with-header-footer`·`--with-hidden` 플래그 추가(plain·markdown 적용). PR #8(2026-07-18)이 `convert -o *.md`까지 확장 | `hwp-model/src/text.rs` ↔ `main.rs`·`commands/{cat,convert}.rs` | S |
 | GL-2 | **각주/미주 분리·제외 불가** — 항상 본문에 포함(강제), 각주만 뽑기/빼기 없음 | `text.rs:62-66`(`_ => true`) | S |
 | GL-3 | **표 제외·페이지/구역 범위 추출 없음** — 전량 추출만 | `text.rs:20-40` | S |
 

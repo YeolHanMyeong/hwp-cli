@@ -333,7 +333,7 @@ grep 실측). 개별 나열 대신 계열로 묶는다. read가 만들지 못하
 | 테두리채움 | `hh:borderFills`, `hh:borderFill`, `hh:slash`, `hh:backSlash`, `hh:leftBorder`/`rightBorder`/`topBorder`/`bottomBorder`, `hh:diagonal`, `hc:fillBrush`, `hc:winBrush` | `write_border_fills` :130 |
 | 문자모양 | `hh:charProperties`, `hh:charPr`, `hh:fontRef`, `hh:ratio`, `hh:spacing`, `hh:relSz`, `hh:offset`, `hh:italic`, `hh:bold`, `hh:underline`, `hh:strikeout`, `hh:outline`, `hh:shadow`, `hh:emboss`, `hh:engrave`, `hh:supscript`, `hh:subscript` (2026-07-15부터 전부 IR 기반) | `write_char_properties` :184 |
 | 탭 | `hh:tabProperties`, `hh:tabPr` | `write_tab_properties` :263 |
-| 번호(상수) | `hh:numberings`, `hh:numbering`, `hh:paraHead` | `write_numberings` :275 |
+| 번호·글머리 | `hh:numberings`, `hh:numbering`, `hh:paraHead`, `hh:bullets`, `hh:bullet`(PR #8 신설 — 이전엔 글머리 정의가 쓰기에서 소실) | `write_numberings`, `write_bullets` |
 | 문단모양 | `hh:paraProperties`, `hh:paraPr`, `hh:align`, `hh:heading`, `hh:breakSetting`, `hh:autoSpacing`, `hh:margin`, `hc:intent`/`left`/`right`/`prev`/`next`, `hh:lineSpacing`, `hh:border` | `write_para_properties` :291 |
 | 스타일 | `hh:styles`, `hh:style` | `write_styles` :346 |
 
@@ -381,7 +381,7 @@ IR엔 값이 있으나(hwp5로는 나감) hwpx write가 상수/근사로 눌러 
 | `hp:pagePr landscape` | attr bit0 | default_sec_pr에서 재방출 | 보존(단 secPr 다른 상수와 함께) | `:340` ↔ `:453` |
 | numbering `paraHead` 형식 | template/start/numFormat 수집 | ✅ `numbering_levels` 기반(없으면 기존 상수) | **해소(2026-07-15)** — 다중 번호정의 itemCnt 뭉개짐도 함께 수정 | `:333` ↔ `write_numberings` |
 | tab `tabPr`(위치·채움) | `tabPr/tabItem` 의미 파싱 → IR `TabDef` | ✅ `tab_stops` 기반 방출(없으면 기존 상수) | **해소(2026-07-15, GC-4)** | `read/header.rs` ↔ `write_tab_properties` |
-| paraPr `heading`(문단↔번호 연결) | attr1 bits23‑27 + numbering_id | ✅ OUTLINE/NUMBER/BULLET 역방출 | **해소(2026-07-15 2차)** — [12](12-feature-gaps.md) GE-α8 | `:309` ↔ `write_para_properties` |
+| paraPr `heading`(문단↔번호 연결) | attr1 bits23‑27 + numbering_id | ✅ OUTLINE/NUMBER/BULLET 역방출 | **해소(2026-07-15 2차)** — [12](12-feature-gaps.md) GE-α8. PR #8(07-18)이 OUTLINE idRef +1 밀림 실기 버그 추가 수정(정품 idRef=0) + 정의 id 비연속 관용화 | `:309` ↔ `write_para_properties` |
 
 ### (c) 양쪽 없음(미구현) — read·write 모두 의미 처리 없음
 
