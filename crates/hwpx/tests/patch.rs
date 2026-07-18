@@ -121,3 +121,93 @@ fn fill_동일_입출력_경로_거부() {
 
     let _ = std::fs::remove_file(&f);
 }
+
+// ---- patch::replace_texts ----
+
+/// replace_texts용 픽스처: 섹션에 대학명 텍스트 + PrvText.txt(UTF-8) 포함.
+fn build_replace_fixture(path: &std::path::Path) {
+    let file = std::fs::File::create(path).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+
+    zip.start_file("mimetype", stored).unwrap();
+    zip.write_all(b"application/hwp+zip").unwrap();
+
+    zip.start_file("Preview/PrvImage.png", deflated).unwrap();
+    zip.write_all(PRV_IMAGE).unwrap();
+
+    zip.start_file("Preview/PrvText.txt", deflated).unwrap();
+    zip.write_all("한빛대학교 보고서".as_bytes()).unwrap();
+
+    zip.start_file("Contents/header.xml", deflated).unwrap();
+    zip.write_all(b"<hh:head/>").unwrap();
+
+    // 대학명 + XML 특수문자 포함 본문.
+    zip.start_file("Contents/section0.xml", deflated).unwrap();
+    zip.write_all(
+        "<hs:sec><hp:p><hp:run><hp:t>한빛대학교 &amp; 한빛대 협약</hp:t></hp:run></hp:p></hs:sec>"
+            .as_bytes(),
+    )
+    .unwrap();
+
+    zip.finish().unwrap();
+}
+
+#[test]
+fn replace_texts_바이트보존_순차치환() {
+    let dir = std::env::temp_dir();
+    let src = dir.join("hwpx_repl_src.hwpx");
+    let out = dir.join("hwpx_repl_out.hwpx");
+    build_replace_fixture(&src);
+
+    // 긴 이름 먼저(순차 치환 — 짧은 이름이 먼저면 긴 이름 안을 오염).
+    let pairs = vec![
+        ("한빛대학교".to_string(), "누리대학교".to_string()),
+        ("한빛대".to_string(), "누리대".to_string()),
+    ];
+    let counts = hwpx::patch::replace_texts(&src, &out, &pairs).unwrap();
+    assert_eq!(counts.get("Contents/section0.xml"), Some(&2), "본문 2건");
+    assert_eq!(counts.get("Preview/PrvText.txt"), Some(&1), "미리보기 1건");
+
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(&out).unwrap()).unwrap();
+    // 비대상 엔트리는 바이트 보존.
+    assert_eq!(read_entry(&mut zip, "Preview/PrvImage.png"), PRV_IMAGE);
+    {
+        let first = zip.by_index(0).unwrap();
+        assert_eq!(first.name(), "mimetype");
+        assert_eq!(first.compression(), CompressionMethod::Stored);
+    }
+    // 재오염 없음: "누리대학교" 안에 "누리대"가 다시 치환되지 않았다.
+    let section = String::from_utf8(read_entry(&mut zip, "Contents/section0.xml")).unwrap();
+    assert!(
+        section.contains("누리대학교 &amp; 누리대 협약"),
+        "순차 치환 결과: {section}"
+    );
+    // PrvText도 치환.
+    let prv = String::from_utf8(read_entry(&mut zip, "Preview/PrvText.txt")).unwrap();
+    assert_eq!(prv, "누리대학교 보고서");
+
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_file(&out);
+}
+
+#[test]
+fn replace_texts_xml_이스케이프() {
+    let dir = std::env::temp_dir();
+    let src = dir.join("hwpx_repl_esc_src.hwpx");
+    let out = dir.join("hwpx_repl_esc_out.hwpx");
+    build_replace_fixture(&src);
+
+    // from/to의 특수문자는 XML 이스케이프 후 치환돼야 한다.
+    let pairs = vec![("한빛대 협약".to_string(), "A&B 제휴".to_string())];
+    hwpx::patch::replace_texts(&src, &out, &pairs).unwrap();
+
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(&out).unwrap()).unwrap();
+    let section = String::from_utf8(read_entry(&mut zip, "Contents/section0.xml")).unwrap();
+    assert!(section.contains("A&amp;B 제휴"), "이스케이프 치환: {section}");
+    assert!(!section.contains("A&B"), "날 ampersand 방출 금지: {section}");
+
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_file(&out);
+}

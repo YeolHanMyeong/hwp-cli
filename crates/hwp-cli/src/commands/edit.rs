@@ -32,6 +32,54 @@ pub fn run(
     delete_rows: &[String],
     verify: bool,
 ) -> anyhow::Result<()> {
+    // 고속 경로: hwpx→hwpx이고 --replace뿐이면 패키지 보존 패치로 처리한다(IR 재작성 시
+    // 미리보기·hp:switch 호환 블록·미모델 엔트리가 손실). 한계: <hp:t> 런 분절을
+    // 가로지르는 문자열은 매칭되지 않는다(경고 출력).
+    if !replaces.is_empty()
+        && set_cells.is_empty()
+        && set_fields.is_empty()
+        && set_meta.is_empty()
+        && create_fields.is_empty()
+        && create_bookmarks.is_empty()
+        && create_hyperlinks.is_empty()
+        && insert_images.is_empty()
+        && set_formats.is_empty()
+        && set_aligns.is_empty()
+        && insert_paras.is_empty()
+        && insert_paras_before.is_empty()
+        && delete_paras.is_empty()
+        && add_rows.is_empty()
+        && delete_rows.is_empty()
+        && output
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("hwpx"))
+        && matches!(
+            crate::format::detect(input)?,
+            crate::format::FileFormat::Hwpx
+        )
+    {
+        let mut pairs = Vec::with_capacity(replaces.len());
+        for spec in replaces {
+            let (from, to) = spec
+                .split_once("=>")
+                .with_context(|| format!("--replace 형식은 \"찾기=>바꾸기\" 입니다: {spec:?}"))?;
+            pairs.push((from.to_string(), to.to_string()));
+        }
+        let counts = hwpx::patch::replace_texts(input, output, &pairs)?;
+        for (entry, n) in &counts {
+            eprintln!("치환(패키지 보존): {entry} ({n}건)");
+        }
+        if counts.values().sum::<usize>() == 0 {
+            eprintln!("경고: 치환된 문자열이 없습니다 (런 분절 교차 매칭은 미지원)");
+        }
+        if verify {
+            verify_output(output)?;
+        }
+        eprintln!("편집 완료: {} → {}", input.display(), output.display());
+        return Ok(());
+    }
+
     let mut doc = load_document(input)?;
     let mut edits = 0usize;
     // 구조 편집(문단/행 추가·삭제·이미지 삽입)은 합성 경로로 써야 한다 — 삽입 문단/행
