@@ -1,28 +1,30 @@
 #!/usr/bin/env python3
 """fixtures/samples/report-tables.hwpx 본문 익명화 — 내용을 예시 문구로 재작성.
 
-구조(문단/표/병합/스타일/실행 서식)는 그대로 두고 <hp:t> 텍스트만 규칙 기반 예시
-문구로 바꾼다. 문서 번호(3-2-1.)·불릿 마커(❍/❶/ - /①)와 이미 가명인 대학명
-(한빛대/미륵대/다온대)은 보존한다. Preview/PrvImage.png는 원문 렌더라 제거하고
-(한글이 열 때 재생성), PrvText.txt는 새 본문으로 재생성한다.
+구조(문단/표/병합/스타일/실행 서식/네임스페이스 선언)는 원문 바이트 그대로 두고
+<hp:t> 텍스트만 수술적으로 교체한다(XML 재직렬화 없음 — 한글은 루트 네임스페이스
+선언 등 바이트 수준 형식을 엄격하게 본다). 문서 번호(3-2-1.)·불릿 마커(❍/❶/ - /①)와
+가명 대학명(한빛대/미륵대/다온대/가온)은 보존한다. Preview/PrvImage.png는 원문
+렌더라 제거하고(한글이 열 때 재생성), PrvText.txt는 새 본문으로 재생성한다.
 
 사용: python3 tools/anonymize_fixture.py <in.hwpx> <out.hwpx>
 """
 import re
 import sys
 import zipfile
-import xml.etree.ElementTree as ET
 
-HP = 'http://www.hancom.co.kr/hwpml/2011/paragraph'
-
-# 이미 가명이라 보존하는 문자열(이 중 하나가 들어 있으면 그 문단은 건드리지 않음).
+# 이미 가명이라 보존하는 문자열(이 중 하나가 들어 있으면 이름만 새 문장에 심는다).
 KEEP = ('한빛대', '미륵대', '다온대', '가온')
 
+TOKEN = re.compile(r'<hp:p\b[^>]*>|</hp:p>|<hp:t\s*/>|<hp:t>.*?</hp:t>', re.S)
 
-def register_namespaces(xml_text: str) -> None:
-    """루트 xmlns 선언을 전부 등록해 재직렬화 시 접두사를 보존한다."""
-    for prefix, uri in re.findall(r'xmlns:([A-Za-z0-9]+)="([^"]+)"', xml_text):
-        ET.register_namespace(prefix, uri)
+
+def xml_unescape(s: str) -> str:
+    return s.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
+
+
+def xml_escape(s: str) -> str:
+    return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
 
 
 def synth_text(old: str, idx: int) -> str:
@@ -48,7 +50,7 @@ def synth_text(old: str, idx: int) -> str:
     if m:
         return f'{m.group(1)} {filler(idx, len(t))}'
     # 마커 계열(❍ ❶-❾ ①-⑳ ㅇ ※ △ ○ -) + 공백: 마커 유지
-    m = re.match(r'^([❍❶-❾①-⑳ㅇ※△○<>]*\s*[-–]?\s+)', t)
+    m = re.match(r'^([❍❶-❾①-⑳ㅇ※△○]*\s*[-–]?\s+)', t)
     if m and m.group(1).strip():
         return f'{m.group(1)}예시 항목 {idx} — {filler(idx, len(t))}'
     # 짧은 셀 텍스트(표 헤더/라벨)
@@ -64,47 +66,76 @@ def filler(idx: int, approx: int) -> str:
     return (unit * n).strip()
 
 
-def para_text(p: ET.Element) -> str:
-    # 문단 직계 run의 텍스트만 — p.iter는 중첩 표 난 run까지 잡아 오염된다.
-    return ''.join(t.text or '' for t in p.findall(f'./{{{HP}}}run/{{{HP}}}t'))
+def scan_paragraphs(xml_text: str):
+    """<hp:t> 토큰을 소유 문단(innermost <hp:p>)별로 묶는다.
+
+    반환: [(start,end,para_no,run_no_in_para,inner_text), ...] — <hp:t>…</hp:t> 토큰만.
+    """
+    paras = []  # 현재 열린 문단 스택 [(para_no, run_count)]
+    runs = []
+    para_no = -1
+    for m in TOKEN.finditer(xml_text):
+        tok = m.group(0)
+        if tok.startswith('<hp:p'):
+            if tok.endswith('/>'):
+                continue
+            para_no += 1
+            paras.append([para_no, 0])
+        elif tok == '</hp:p>':
+            paras.pop()
+        elif tok.startswith('<hp:t/>') or tok.startswith('<hp:t />'):
+            continue  # 빈 run은 텍스트 없음 — 건드리지 않음
+        else:  # <hp:t>...</hp:t>
+            if not paras:
+                continue
+            entry = paras[-1]
+            entry[1] += 1
+            inner = tok[6:-7]
+            runs.append((m.start(), m.end(), entry[0], entry[1], xml_unescape(inner)))
+    return runs
+
+
+def transform_section(xml_text: str):
+    runs = scan_paragraphs(xml_text)
+    # 문단별 전체 텍스트 → 새 텍스트 결정
+    para_texts = {}
+    for (_, _, pno, _, inner) in runs:
+        para_texts[pno] = para_texts.get(pno, '') + inner
+    new_text = {}
+    for idx, pno in enumerate(sorted(para_texts), start=1):
+        old = para_texts[pno]
+        new_text[pno] = synth_text(old, idx) if old.strip() else old
+
+    out = []
+    pos = 0
+    plain = []
+    for (start, end, pno, rno, inner) in runs:
+        out.append(xml_text[pos:start])
+        pos = end
+        if rno == 1:
+            out.append('<hp:t>' + xml_escape(new_text[pno]) + '</hp:t>')
+            plain.append(new_text[pno])
+        else:
+            out.append('<hp:t/>')
+    out.append(xml_text[pos:])
+    return ''.join(out), plain
 
 
 def main() -> None:
     src, dst = sys.argv[1], sys.argv[2]
     zin = zipfile.ZipFile(src)
-    names = zin.namelist()
-
-    # 1. section*.xml 본문 변환
-    plain_parts = []
     patched = {}
-    for name in names:
-        if not (name.startswith('Contents/section') and name.endswith('.xml')):
-            continue
-        xml_text = zin.read(name).decode('utf-8')
-        register_namespaces(xml_text)
-        root = ET.fromstring(xml_text)
-        idx = 0
-        for p in root.iter(f'{{{HP}}}p'):
-            runs = p.findall(f'./{{{HP}}}run/{{{HP}}}t')
-            old = para_text(p)
-            if not runs or not old.strip():
-                continue
-            idx += 1
-            new = synth_text(old, idx)
-            runs[0].text = new
-            for r in runs[1:]:
-                r.text = ''
-            plain_parts.append(new)
-        body = ET.tostring(root, encoding='unicode')
-        patched[name] = (
-            '<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>' + body
-        ).encode('utf-8')
+    plain_parts = []
+    for name in zin.namelist():
+        if name.startswith('Contents/section') and name.endswith('.xml'):
+            body, plain = transform_section(zin.read(name).decode('utf-8'))
+            patched[name] = body.encode('utf-8')
+            plain_parts.extend(plain)
 
-    # 2. ZIP 재작성: Preview/PrvImage.png 제거, PrvText.txt 재생성, 나머지 복사
     zout = zipfile.ZipFile(dst, 'w', zipfile.ZIP_DEFLATED)
     for item in zin.infolist():
         if item.filename == 'Preview/PrvImage.png':
-            continue
+            continue  # 원문 렌더 이미지 — 제거(한글이 열 때 재생성)
         if item.filename in patched:
             zout.writestr(item, patched[item.filename])
         elif item.filename == 'Preview/PrvText.txt':
