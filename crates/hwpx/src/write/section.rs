@@ -245,6 +245,14 @@ fn write_paragraph(
                         flush_text(out, &mut text_buf);
                         write_header_footer(out, doc, g, ids, bins, preserve_linesegs, warnings);
                     }
+                    Control::Generic(g) if g.ctrl_id == *b"fn  " || g.ctrl_id == *b"en  " => {
+                        // 각주/미주 — write_header_footer의 subList 스캐폴드 미러.
+                        // (정답지 없음 주의: 한컴 저장 footNote 실물 미확보 — OWPML 스펙 형태
+                        // 로 방출하고 한글 실기 게이트로 확정한다.)
+                        open_run!(cur_shape);
+                        flush_text(out, &mut text_buf);
+                        write_footnote(out, doc, g, ids, bins, preserve_linesegs, warnings);
+                    }
                     Control::Table(table) => {
                         open_run!(cur_shape);
                         flush_text(out, &mut text_buf);
@@ -521,6 +529,45 @@ fn write_header_footer(
         r##"<hp:ctrl><hp:{el} id="{}" applyPageType="BOTH">"##,
         ids.next()
     );
+    for list in &g.paragraph_lists {
+        out.push_str(
+            r##"<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">"##,
+        );
+        for para in &list.paragraphs {
+            write_paragraph(
+                out,
+                doc,
+                para,
+                ids,
+                bins,
+                false,
+                preserve_linesegs,
+                warnings,
+            );
+        }
+        out.push_str("</hp:subList>");
+    }
+    let _ = write!(out, "</hp:{el}></hp:ctrl>");
+}
+
+/// 각주/미주(fn/en) — `<hp:ctrl><hp:footNote|endNote><hp:subList>문단</…></…></hp:ctrl>`.
+/// write_header_footer와 같은 subList 스캐폴드(문단은 write_paragraph 재귀 방출).
+#[allow(clippy::too_many_arguments)]
+fn write_footnote(
+    out: &mut String,
+    doc: &Document,
+    g: &GenericControl,
+    ids: &mut IdSeq,
+    bins: &mut BinCollector,
+    preserve_linesegs: bool,
+    warnings: &mut Vec<String>,
+) {
+    let el = if g.ctrl_id == *b"fn  " {
+        "footNote"
+    } else {
+        "endNote"
+    };
+    let _ = write!(out, r##"<hp:ctrl><hp:{el} id="{}">"##, ids.next());
     for list in &g.paragraph_lists {
         out.push_str(
             r##"<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">"##,

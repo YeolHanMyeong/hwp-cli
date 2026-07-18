@@ -905,3 +905,62 @@ fn 왕복_secpr_tabpr_raw() {
         "tabProperties 슬라이스 바이트 동일"
     );
 }
+
+/// 각주/미주 write arm: fn/en이 `<hp:footNote>`/`<hp:endNote>`로 방출되고
+/// 노트 문단이 왕복된다 (Gap A — 기존에는 DROP arm으로 드롭).
+#[test]
+fn 각주_미주_왕복() {
+    use hwp_model::{Control, GenericControl, HwpChar, Paragraph, ParagraphList};
+    let mut doc = hwp_convert::from_markdown("본문 문장입니다.\n");
+    let note = |id: &[u8; 4], txt: &str| {
+        Control::Generic(GenericControl {
+            ctrl_id: *id,
+            data: vec![],
+            paragraph_lists: vec![ParagraphList {
+                header_data: vec![],
+                paragraphs: vec![Paragraph {
+                    chars: txt.chars().map(HwpChar::Text).collect(),
+                    ..Paragraph::default()
+                }],
+            }],
+            extras: vec![],
+            raw_children: vec![],
+            gso_shapes: vec![],
+            equation: None,
+            column_def: None,
+        })
+    };
+    let anchor = |idx: u32, id: &[u8; 4]| HwpChar::ExtCtrl {
+        code: 17,
+        ctrl_id: *id,
+        payload: vec![],
+        ctrl_index: Some(idx),
+    };
+    let p0 = &mut doc.sections[0].paragraphs[0];
+    let i0 = p0.controls.len() as u32;
+    p0.controls.push(note(b"fn  ", "각주 내용"));
+    p0.controls.push(note(b"en  ", "미주 내용"));
+    p0.chars.push(anchor(i0, b"fn  "));
+    p0.chars.push(anchor(i0 + 1, b"en  "));
+
+    let out = tmp("footnote_endnote.hwpx");
+    let warnings = hwpx::write_document(&doc, &out).unwrap();
+    assert!(
+        warnings.iter().all(|w| !w.contains("DROP")),
+        "드롭 없음: {warnings:?}"
+    );
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(&out).unwrap()).unwrap();
+    let mut xml = String::new();
+    zip.by_name("Contents/section0.xml")
+        .unwrap()
+        .read_to_string(&mut xml)
+        .unwrap();
+    assert!(xml.contains("<hp:footNote"), "footNote 방출: {xml}");
+    assert!(xml.contains("<hp:endNote"), "endNote 방출: {xml}");
+
+    // 재읽기 — 노트 문단이 paragraph_lists로 복원되고 plain_text에 포함.
+    let reread = hwpx::read_document(&out).unwrap().document;
+    let text = reread.plain_text();
+    assert!(text.contains("각주 내용"), "각주 본문 왕복: {text}");
+    assert!(text.contains("미주 내용"), "미주 본문 왕복: {text}");
+}
