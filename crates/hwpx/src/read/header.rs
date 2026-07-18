@@ -618,5 +618,9 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
         };
     }
 
+    // tabPr 원문 에코 — reader는 tabPr를 의미 파싱하지 않으므로, 왕복 보존을
+    // 위해 `<hh:tabPr>` 요소 전문을 문서 순서대로 보존한다(writer가 상수 대신 방출).
+    header.hwpx_tab_defs_raw = crate::read::xml::echo_elements(xml, "hh", "tabPr");
+
     Ok((header, warnings))
 }

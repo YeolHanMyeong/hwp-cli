@@ -298,6 +298,19 @@ fn write_char_properties(out: &mut String, header: &DocHeader) {
 }
 
 fn write_tab_properties(out: &mut String, header: &DocHeader) {
+    // hwpx 출신 원문 tabPr가 있으면 verbatim 방출 (탭 정의 무손실 왕복).
+    if !header.hwpx_tab_defs_raw.is_empty() {
+        let _ = write!(
+            out,
+            r##"<hh:tabProperties itemCnt="{}">"##,
+            header.hwpx_tab_defs_raw.len()
+        );
+        for raw in &header.hwpx_tab_defs_raw {
+            out.push_str(raw);
+        }
+        out.push_str("</hh:tabProperties>");
+        return;
+    }
     let count = header.tab_defs.len().max(1);
     let _ = write!(out, r##"<hh:tabProperties itemCnt="{count}">"##);
     for i in 0..count {
@@ -377,7 +390,11 @@ fn write_para_properties(out: &mut String, header: &DocHeader) {
     let count = header.para_shapes.len().max(1);
     let _ = write!(out, r##"<hh:paraProperties itemCnt="{count}">"##);
     let default_ps = ParaShape::default();
-    let tab_count = header.tab_defs.len().max(1);
+    let tab_count = header
+        .tab_defs
+        .len()
+        .max(header.hwpx_tab_defs_raw.len())
+        .max(1);
     for i in 0..count {
         let ps = header.para_shapes.get(i).unwrap_or(&default_ps);
         let align = match ps.alignment() {

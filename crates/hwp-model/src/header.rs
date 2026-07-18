@@ -28,6 +28,10 @@ pub struct DocHeader {
     pub numbering_levels: Vec<Vec<NumLevel>>,
     pub para_shapes: Vec<ParaShape>,
     pub styles: Vec<Style>,
+    /// hwpx 출신 `<hh:tabPr>` 요소 전문 목록 — 탭 정의 무손실 왕복용(reader는
+    /// tabPr를 의미 파싱하지 않으므로 원문 보존). 있으면 hwpx writer가 상수 대신 방출.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hwpx_tab_defs_raw: Vec<String>,
     /// ID_MAPPINGS 원본 카운트 배열 (버전별 길이 보존 — 쓰기 시 유도값과 대조)
     #[serde(default)]
     pub id_mappings_counts: Vec<u32>,

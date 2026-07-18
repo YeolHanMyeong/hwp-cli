@@ -848,3 +848,60 @@ fn 왕복_스타일_사다리() {
         reread.header.numbering_levels.len()
     );
 }
+
+/// secPr/tabPr 원문 에코 왕복: hwpx read → write에서 verbatim 보존 (Gap B/C).
+#[test]
+fn 왕복_secpr_tabpr_raw() {
+    use hwp_model::Control;
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../fixtures/samples/report-tables.hwpx");
+    assert!(src.exists(), "커밋된 픽스처 없음: {}", src.display());
+    let doc = hwpx::read_document(&src).unwrap().document;
+
+    // 읽기 단계에서 원문이 캡처돼야 한다.
+    assert_eq!(
+        doc.header.hwpx_tab_defs_raw.len(),
+        5,
+        "tabPr 5종 에코 캡처"
+    );
+    let secpr_raw_of = |d: &hwp_model::Document| {
+        d.sections[0]
+            .paragraphs
+            .iter()
+            .flat_map(|p| &p.controls)
+            .find_map(|c| match c {
+                Control::SectionDef(def) => def.hwpx_raw.clone(),
+                _ => None,
+            })
+    };
+    let raw = secpr_raw_of(&doc).expect("secPr 에코 캡처");
+    assert!(raw.starts_with("<hp:secPr"), "secPr 전문: {}", &raw[..80]);
+
+    // 쓰기 → 재읽기: 원문 그대로 보존.
+    let out = tmp("secpr_tabpr_raw.hwpx");
+    let warnings = hwpx::write_document(&doc, &out).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let reread = hwpx::read_document(&out).unwrap().document;
+    assert_eq!(reread.header.hwpx_tab_defs_raw, doc.header.hwpx_tab_defs_raw);
+    assert_eq!(secpr_raw_of(&reread), Some(raw));
+
+    // zip 슬라이스 수준: 입력과 출력의 secPr/tabProperties가 바이트 동일.
+    let slice = |path: &PathBuf, entry: &str, open: &str, close: &str| {
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(path).unwrap()).unwrap();
+        let mut s = String::new();
+        zip.by_name(entry).unwrap().read_to_string(&mut s).unwrap();
+        let i = s.find(open).unwrap();
+        let j = s.find(close).unwrap() + close.len();
+        s[i..j].to_string()
+    };
+    assert_eq!(
+        slice(&src, "Contents/section0.xml", "<hp:secPr", "</hp:secPr>"),
+        slice(&out, "Contents/section0.xml", "<hp:secPr", "</hp:secPr>"),
+        "secPr 슬라이스 바이트 동일"
+    );
+    assert_eq!(
+        slice(&src, "Contents/header.xml", "<hh:tabProperties", "</hh:tabProperties>"),
+        slice(&out, "Contents/header.xml", "<hh:tabProperties", "</hh:tabProperties>"),
+        "tabProperties 슬라이스 바이트 동일"
+    );
+}
