@@ -18,6 +18,7 @@ pub mod control;
 pub mod document;
 pub mod header;
 pub mod ids;
+pub mod list;
 pub mod opaque;
 pub mod paragraph;
 pub mod text;

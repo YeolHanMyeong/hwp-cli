@@ -8,6 +8,17 @@ use std::path::Path;
 use crate::ConvertFormat;
 use crate::commands::cat::load_document;
 
+/// markdown 출력 전용 추가 옵션 (다른 포맷에서는 무시).
+#[derive(Default)]
+pub struct MdOpts<'a> {
+    /// 이미지 추출 디렉터리 (기본: "<출력스템>.media").
+    pub media_dir: Option<&'a Path>,
+    /// 머리말/꼬리말 텍스트 포함.
+    pub with_header_footer: bool,
+    /// 숨은 설명 텍스트 포함.
+    pub with_hidden: bool,
+}
+
 pub fn run(
     input: &Path,
     output: &Path,
@@ -15,6 +26,7 @@ pub fn run(
     strict: bool,
     preserve_layout: bool,
     embed_bin: bool,
+    md_opts: &MdOpts,
 ) -> anyhow::Result<()> {
     // PDF는 문서 포맷 변환이 아니라 렌더 출력 — render 경로에 위임한다
     // (사용자의 "변환" 프레이밍 대응: `hwp convert in.hwp -o out.pdf`).
@@ -42,14 +54,39 @@ pub fn run(
     match target {
         ConvertFormat::Md => {
             let doc = load_document(input)?;
-            // 이미지가 있으면 "<출력스템>.media/"에 추출해 상대참조한다(이미지 없으면
+            // 이미지가 있으면 media 디렉터리에 추출해 상대참조한다(이미지 없으면
             // 디렉터리를 만들지 않음 — to_markdown_with가 첫 이미지에서 지연 생성).
-            let media_dir = output.with_extension("media");
+            // --media-dir 지정 시: 상대경로는 출력 파일 기준으로 해석하고, 링크는
+            // 사용자가 준 경로 문자열을 그대로 쓴다(기본은 "<스템>.media" 관례).
+            let (dir, prefix) = match md_opts.media_dir {
+                Some(d) => {
+                    let resolved = if d.is_absolute() {
+                        d.to_path_buf()
+                    } else {
+                        output.parent().map_or_else(
+                            || d.to_path_buf(),
+                            |parent| {
+                                if parent.as_os_str().is_empty() {
+                                    d.to_path_buf()
+                                } else {
+                                    parent.join(d)
+                                }
+                            },
+                        )
+                    };
+                    (resolved, Some(d.to_string_lossy().into_owned()))
+                }
+                None => (output.with_extension("media"), None),
+            };
             let md = hwp_convert::to_markdown_with(
                 &doc,
                 &hwp_convert::MarkdownOptions {
-                    media_dir: Some(&media_dir),
-                    ..Default::default()
+                    media_dir: Some(&dir),
+                    media_prefix: prefix.as_deref(),
+                    text: hwp_model::TextOptions {
+                        include_header_footer: md_opts.with_header_footer,
+                        include_hidden: md_opts.with_hidden,
+                    },
                 },
             )?;
             std::fs::write(output, md)?;

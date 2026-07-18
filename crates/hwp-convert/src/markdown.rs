@@ -2,24 +2,39 @@
 //!
 //! 매핑 규칙:
 //! - "개요 N" 스타일 문단 → `#` × N 헤딩
-//! - 문자 모양의 굵게/기울임 → `**`/`*` 스팬 (char_shape_runs 기반)
+//! - 문자 모양 굵게/기울임 → `**`/`*` 스팬, 취소선 → `~~`, 밑줄·위/아래첨자 →
+//!   `<u>`·`<sup>`·`<sub>` (char_shape_runs 기반)
 //! - 하이퍼링크(%hlk 필드) → `[표시텍스트](URL)`
 //! - 이미지(Picture) → `![image]()` (또는 media_dir 지정 시 추출·상대참조)
-//! - 표 → GFM 표 (첫 행을 헤더로; 병합은 평탄화)
+//! - 표 → GFM 표 (첫 행을 헤더로). 병합 셀(col_span/row_span>1)이나 셀 안 중첩 표가
+//!   있으면 HTML `<table>`(colspan/rowspan + 인라인 HTML 태그)로 폴백 — 내용 보존 우선
+//! - 글머리표/번호 문단 → `- `/`N. ` 목록 (번호는 numbering_levels 형식 합성;
+//!   아라비아 숫자 외 형식은 `- 가. ` 식 리터럴 마커로 보존)
+//! - 각주/미주 → 본문 `[^N]`/`[^eN]` 마커 + 문서 끝 정의 (GFM 풋노트)
+//! - 수식(eqed) → 인라인 `$스크립트$`, 블록 `$$스크립트$$` (HWP 수식 스크립트 원문)
 //! - 줄나눔(10) → 강제 줄바꿈, 탭 → 공백
 
-use std::path::Path;
+use std::fs::OpenOptions;
+use std::io::{Error, ErrorKind, Write};
+use std::path::{Path, PathBuf};
 
-use hwp_model::{CharShape, Control, Document, HwpChar, Paragraph, TextOptions, ctrl_char};
+use hwp_model::list::ListState;
+use hwp_model::{
+    Cell, CharShape, Control, Document, Equation, GenericControl, HwpChar, Paragraph, Table,
+    TextOptions, ctrl_char,
+};
 
 /// markdown 출력 옵션.
 #[derive(Default)]
 pub struct MarkdownOptions<'a> {
     /// 이미지 바이너리를 추출할 디렉터리. `Some`이면 이미지를 `image1.png` 식으로
-    /// 그 디렉터리에 뽑고 `![image](디렉터리명/image1.png)`로 참조한다(디렉터리는
+    /// 그 디렉터리에 뽑고 `![image](접두사/image1.png)`로 참조한다(디렉터리는
     /// 첫 이미지에서 지연 생성 — 이미지가 없으면 만들지 않는다). `None`이면 기존처럼
     /// 빈 참조 `![image]()`를 유지한다(동작 불변).
     pub media_dir: Option<&'a Path>,
+    /// 이미지 참조 경로 접두사. `None`이면 `media_dir`의 디렉터리명을 쓴다(기존 동작).
+    /// CLI `--media-dir figs`처럼 사용자가 준 상대경로를 링크에 그대로 쓸 때 지정한다.
+    pub media_prefix: Option<&'a str>,
     /// 텍스트 추출 옵션(머리말/꼬리말·숨은 설명 포함 여부). 기본은 제외.
     pub text: TextOptions,
 }
@@ -36,67 +51,201 @@ pub fn to_markdown_with(doc: &Document, opts: &MarkdownOptions) -> std::io::Resu
     let mut ctx = Ctx {
         media_dir: opts.media_dir,
         dir_name: opts
-            .media_dir
-            .and_then(|d| d.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
+            .media_prefix
+            .map(|p| p.replace('\\', "/").trim_end_matches('/').to_string())
+            .or_else(|| {
+                opts.media_dir
+                    .and_then(|d| d.file_name())
+                    .map(|n| n.to_string_lossy().into_owned())
+            })
             .unwrap_or_default(),
         img_no: 0,
-        error: None,
+        pending_media: Vec::new(),
         include_header_footer: opts.text.include_header_footer,
         include_hidden: opts.text.include_hidden,
+        html_mode: false,
+        last_was_list: false,
+        list_widths: Vec::new(),
+        list_keys: Vec::new(),
+        notes: Vec::new(),
+        foot_n: 0,
+        end_n: 0,
     };
 
     let mut out = String::new();
-    for section in &doc.sections {
+    for (section_index, section) in doc.sections.iter().enumerate() {
+        if section_index > 0 {
+            break_section_list(&mut ctx, &mut out);
+        }
+        // 목록 번호 카운터는 구역 단위로 리셋한다(렌더러와 같은 규칙).
+        let mut list_state = ListState::default();
         for para in &section.paragraphs {
-            render_paragraph(doc, para, &mut ctx, &mut out);
+            render_paragraph(doc, para, &mut list_state, &mut ctx, &mut out);
         }
     }
-    if let Some(e) = ctx.error {
-        return Err(e);
+    // 각주/미주 정의는 문서 끝에 모은다.
+    if !ctx.notes.is_empty() {
+        if !out.is_empty() && !out.ends_with("\n\n") {
+            out.push('\n');
+        }
+        for note in &ctx.notes {
+            if note.html {
+                out.push_str(&format!(
+                    "<div class=\"hwp-footnote\" id=\"fn-{}\"><sup>{}</sup> {} <a href=\"#fnref-{}\">&#8617;</a></div>\n",
+                    note.label, note.label, note.text, note.label
+                ));
+            } else {
+                let mut lines = note.text.lines();
+                match lines.next() {
+                    Some(first) => {
+                        out.push_str(&format!("[^{}]: {first}\n", note.label));
+                        // 후속 줄은 4칸 들여쓰기(GFM 풋노트 연속 줄 규칙).
+                        for l in lines {
+                            out.push_str(&format!("    {l}\n"));
+                        }
+                    }
+                    None => out.push_str(&format!("[^{}]:\n", note.label)),
+                }
+            }
+        }
     }
+    ctx.persist_media()?;
     Ok(cleanup(&out))
 }
 
-/// 렌더 중 상태(이미지 추출 진행·텍스트 포함 정책).
+struct PendingMedia {
+    path: PathBuf,
+    data: Vec<u8>,
+}
+
+struct Note {
+    label: String,
+    text: String,
+    html: bool,
+}
+
+/// 렌더 중 상태(이미지 추출 진행·텍스트 포함 정책·목록/각주·HTML 표 모드).
 struct Ctx<'a> {
     media_dir: Option<&'a Path>,
-    /// 참조 경로 접두사(디렉터리명).
+    /// 참조 경로 접두사(media_prefix 또는 디렉터리명).
     dir_name: String,
     /// 다음 이미지 번호(1-기반 카운터).
     img_no: usize,
-    /// 첫 IO 오류(있으면 to_markdown_with가 Err 반환).
-    error: Option<std::io::Error>,
+    /// 렌더 완료 뒤 충돌 검사를 거쳐 기록할 이미지.
+    pending_media: Vec<PendingMedia>,
     include_header_footer: bool,
     include_hidden: bool,
+    /// HTML 표 안 — 블록 HTML에선 md가 렌더되지 않으므로 마크·링크·이미지를 HTML 태그로 방출.
+    html_mode: bool,
+    /// 직전 출력이 목록 항목 — 목록 블록 종료 시 빈 줄 확보용.
+    last_was_list: bool,
+    /// 현재 활성 목록 수준별 콘텐츠 열 너비와 (머리 종류, 정의 ID).
+    list_widths: Vec<usize>,
+    list_keys: Vec<(u8, u16)>,
+    /// 각주/미주 — 문서 끝 정의용.
+    notes: Vec<Note>,
+    foot_n: u32,
+    end_n: u32,
 }
 
 impl Ctx<'_> {
-    /// Picture 바이트를 media_dir에 뽑고 markdown 이미지 참조를 만든다.
-    /// media_dir이 없거나 추출에 실패하면 빈 참조 `![image]()`를 유지한다.
+    /// Picture 바이트를 기록 대기열에 넣고 markdown 이미지 참조를 만든다.
     fn image_ref(&mut self, data: &[u8]) -> String {
+        let html = self.html_mode;
+        let fallback = || {
+            if html {
+                "<!-- image -->".to_string()
+            } else {
+                "![image]()".to_string()
+            }
+        };
         let Some(dir) = self.media_dir else {
-            return "![image]()".to_string();
+            return fallback();
         };
         self.img_no += 1;
         let (ext, _) = crate::image::image_kind(data);
         let file = format!("image{}.{ext}", self.img_no);
-        // 첫 이미지에서 디렉터리 지연 생성(이미지 없으면 만들지 않음).
-        if let Err(e) = std::fs::create_dir_all(dir) {
-            self.record_err(e);
-            return "![image]()".to_string();
+        self.pending_media.push(PendingMedia {
+            path: dir.join(&file),
+            data: data.to_vec(),
+        });
+        let reference = if self.dir_name.is_empty() {
+            file
+        } else {
+            format!("{}/{}", self.dir_name, file)
+        };
+        if html {
+            format!(
+                "<img src=\"{}\" alt=\"image\">",
+                escape_html_attr(&reference)
+            )
+        } else {
+            format!("![image]({})", md_link_dest(&reference))
         }
-        if let Err(e) = std::fs::write(dir.join(&file), data) {
-            self.record_err(e);
-            return "![image]()".to_string();
-        }
-        format!("![image]({}/{})", self.dir_name, file)
     }
 
-    fn record_err(&mut self, e: std::io::Error) {
-        if self.error.is_none() {
-            self.error = Some(e);
+    /// 기존 파일은 동일 바이트일 때만 재사용한다. 충돌을 모두 선확인한 뒤 새 파일을
+    /// create_new로 기록하고, 도중 실패하면 이번 호출에서 만든 파일만 제거한다.
+    fn persist_media(&self) -> std::io::Result<()> {
+        if self.pending_media.is_empty() {
+            return Ok(());
         }
+        for item in &self.pending_media {
+            match std::fs::read(&item.path) {
+                Ok(existing) if existing == item.data => {}
+                Ok(_) => return Err(media_collision(&item.path)),
+                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
+
+        let dir = self.media_dir.expect("대기 이미지가 있으면 media_dir 존재");
+        std::fs::create_dir_all(dir)?;
+        let mut created = Vec::new();
+        for item in &self.pending_media {
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&item.path)
+            {
+                Ok(mut file) => {
+                    created.push(item.path.clone());
+                    if let Err(e) = file.write_all(&item.data) {
+                        rollback_media(&created);
+                        return Err(e);
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => match std::fs::read(&item.path) {
+                    Ok(existing) if existing == item.data => {}
+                    Ok(_) => {
+                        rollback_media(&created);
+                        return Err(media_collision(&item.path));
+                    }
+                    Err(read_error) => {
+                        rollback_media(&created);
+                        return Err(read_error);
+                    }
+                },
+                Err(e) => {
+                    rollback_media(&created);
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn media_collision(path: &Path) -> Error {
+    Error::new(
+        ErrorKind::AlreadyExists,
+        format!("기존 미디어 파일을 덮어쓸 수 없습니다: {}", path.display()),
+    )
+}
+
+fn rollback_media(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -119,7 +268,92 @@ fn cleanup(out: &str) -> String {
     cleaned
 }
 
-fn render_paragraph(doc: &Document, para: &Paragraph, ctx: &mut Ctx, out: &mut String) {
+/// 인라인 문자 효과 상태. 열기 순서 bold→italic→strike→underline→sup/sub, 닫기는 역순.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+struct Marks {
+    bold: bool,
+    italic: bool,
+    strike: bool,
+    underline: bool,
+    sup: bool,
+    sub: bool,
+}
+
+impl Marks {
+    fn from_shape(shape: Option<&CharShape>) -> Self {
+        shape.map_or(Self::default(), |s| Self {
+            bold: s.is_bold(),
+            italic: s.is_italic(),
+            strike: s.has_strike(),
+            underline: s.has_underline(),
+            sup: s.is_superscript(),
+            sub: s.is_subscript(),
+        })
+    }
+
+    fn open(self, html: bool) -> String {
+        let mut s = String::new();
+        if self.bold {
+            s.push_str(if html { "<b>" } else { "**" });
+        }
+        if self.italic {
+            s.push_str(if html { "<i>" } else { "*" });
+        }
+        if self.strike {
+            s.push_str(if html { "<s>" } else { "~~" });
+        }
+        if self.underline {
+            s.push_str("<u>");
+        }
+        if self.sup {
+            s.push_str("<sup>");
+        }
+        if self.sub {
+            s.push_str("<sub>");
+        }
+        s
+    }
+
+    fn close(self, html: bool) -> String {
+        let mut s = String::new();
+        if self.sub {
+            s.push_str("</sub>");
+        }
+        if self.sup {
+            s.push_str("</sup>");
+        }
+        if self.underline {
+            s.push_str("</u>");
+        }
+        if self.strike {
+            s.push_str(if html { "</s>" } else { "~~" });
+        }
+        if self.italic {
+            s.push_str(if html { "</i>" } else { "*" });
+        }
+        if self.bold {
+            s.push_str(if html { "</b>" } else { "**" });
+        }
+        s
+    }
+}
+
+/// 열린 마크를 전부 닫고 상태를 리셋한다(링크 경계·줄바꿈 등 강제 경계).
+/// 이후 Text 문자가 오면 모양 전환 로직이 다시 연다.
+fn close_marks(body: &mut String, marks: &mut Marks, html: bool) {
+    body.push_str(&marks.close(html));
+    *marks = Marks::default();
+}
+
+fn render_paragraph(
+    doc: &Document,
+    para: &Paragraph,
+    list_state: &mut ListState,
+    ctx: &mut Ctx,
+    out: &mut String,
+) {
+    // 목록 번호는 문서 순서대로 모든 문단에 대해 갱신한다(빈 문단도 카운트 — 렌더와 동일).
+    let marker = list_state.marker(doc, para);
     // 개요 스타일 → 헤딩
     let heading = doc
         .header
@@ -129,57 +363,253 @@ fn render_paragraph(doc: &Document, para: &Paragraph, ctx: &mut Ctx, out: &mut S
         .and_then(|n| n.trim().parse::<usize>().ok())
         .filter(|n| (1..=6).contains(n));
 
-    let body = render_inline(doc, para, ctx, out);
-    let body = body.trim_end();
+    let fragments = render_fragments(doc, para, ctx);
 
     if let Some(level) = heading {
-        if !body.is_empty() {
-            out.push_str(&"#".repeat(level));
-            out.push(' ');
-            out.push_str(body);
-            out.push_str("\n\n");
+        close_list_block(ctx, out);
+        emit_paragraph_fragments(&fragments, out, Some(&format!("{} ", "#".repeat(level))));
+        return;
+    }
+
+    if let Some(mk) = marker.as_deref() {
+        let (ty, level, definition_id) = list_head(doc, para).unwrap_or((3, 1, 0));
+        emit_list_fragments(&fragments, ty, level, definition_id, mk, ctx, out);
+        return;
+    }
+
+    close_list_block(ctx, out);
+    emit_paragraph_fragments(&fragments, out, None);
+}
+
+/// 인라인과 블록을 문서 등장 순서대로 유지하는 중간 표현.
+enum Fragment {
+    Inline(String),
+    Block(String),
+}
+
+fn emit_paragraph_fragments(fragments: &[Fragment], out: &mut String, prefix: Option<&str>) {
+    let mut prefix = prefix;
+    for fragment in fragments {
+        match fragment {
+            Fragment::Inline(text) => {
+                let text = text.trim();
+                if text.is_empty() {
+                    continue;
+                }
+                if let Some(p) = prefix.take() {
+                    out.push_str(p);
+                }
+                out.push_str(text);
+                out.push_str("\n\n");
+            }
+            Fragment::Block(block) => append_block(out, block, 0),
         }
-    } else if !body.is_empty() {
-        out.push_str(body);
-        out.push_str("\n\n");
     }
 }
 
-/// 문단의 인라인 내용을 렌더링해 반환한다.
-/// 표 등 블록 컨트롤은 out에 직접 쓴다 (문단 텍스트와 분리).
-fn render_inline(doc: &Document, para: &Paragraph, ctx: &mut Ctx, out: &mut String) -> String {
+fn append_block(out: &mut String, block: &str, indent: usize) {
+    let block = block.trim_matches('\n');
+    if block.is_empty() {
+        return;
+    }
+    if !out.is_empty() && !out.ends_with("\n\n") {
+        out.push('\n');
+    }
+    let pad = " ".repeat(indent);
+    for line in block.lines() {
+        if !line.is_empty() {
+            out.push_str(&pad);
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push('\n');
+}
+
+fn emit_list_fragments(
+    fragments: &[Fragment],
+    ty: u8,
+    level: u8,
+    definition_id: u16,
+    marker: &str,
+    ctx: &mut Ctx,
+    out: &mut String,
+) {
+    let (gfm_marker, literal_prefix) = if ty == 3 {
+        ("-", None)
+    } else if is_digit_marker(marker) {
+        (marker, None)
+    } else {
+        ("-", Some(marker))
+    };
+    let indent = prepare_list_level(ctx, ty, level, definition_id, gfm_marker, out);
+    let first_prefix = format!("{}{gfm_marker} ", " ".repeat(indent));
+    let continuation = " ".repeat(indent + gfm_marker.chars().count() + 1);
+    let mut emitted = false;
+    let mut literal_pending = literal_prefix;
+
+    for fragment in fragments {
+        match fragment {
+            Fragment::Inline(text) => {
+                let text = text.trim();
+                if text.is_empty() {
+                    continue;
+                }
+                let content = match literal_pending.take() {
+                    Some(literal) => format!("{literal} {text}"),
+                    None => text.to_string(),
+                };
+                if emitted {
+                    out.push('\n');
+                    push_indented_lines(out, &continuation, &continuation, &content);
+                } else {
+                    push_indented_lines(out, &first_prefix, &continuation, &content);
+                    emitted = true;
+                }
+            }
+            Fragment::Block(block) => {
+                if !emitted {
+                    let initial = literal_pending.take().unwrap_or_default();
+                    out.push_str(&first_prefix);
+                    out.push_str(initial);
+                    out.push('\n');
+                    emitted = true;
+                }
+                append_block(out, block, continuation.len());
+            }
+        }
+    }
+    if emitted && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    ctx.last_was_list = emitted;
+}
+
+fn push_indented_lines(out: &mut String, first: &str, continuation: &str, text: &str) {
+    for (i, line) in text.lines().enumerate() {
+        out.push_str(if i == 0 { first } else { continuation });
+        out.push_str(line);
+        out.push('\n');
+    }
+}
+
+fn prepare_list_level(
+    ctx: &mut Ctx,
+    ty: u8,
+    level: u8,
+    definition_id: u16,
+    marker: &str,
+    out: &mut String,
+) -> usize {
+    let index = level.saturating_sub(1) as usize;
+    if ctx
+        .list_keys
+        .get(index)
+        .is_some_and(|key| *key != (ty, definition_id))
+    {
+        if index == 0 {
+            if !out.ends_with("\n\n") {
+                out.push('\n');
+            }
+            out.push_str("<!-- list-break -->\n\n");
+        } else if !out.ends_with("\n\n") {
+            out.push('\n');
+        }
+        ctx.list_widths.truncate(index);
+        ctx.list_keys.truncate(index);
+    }
+    while ctx.list_widths.len() < index {
+        ctx.list_widths.push(2);
+        ctx.list_keys.push((ty, definition_id));
+    }
+    let indent = ctx.list_widths.iter().take(index).sum();
+    let width = marker.chars().count() + 1;
+    if ctx.list_widths.len() == index {
+        ctx.list_widths.push(width);
+        ctx.list_keys.push((ty, definition_id));
+    } else {
+        ctx.list_widths[index] = width;
+        ctx.list_keys[index] = (ty, definition_id);
+        ctx.list_widths.truncate(index + 1);
+        ctx.list_keys.truncate(index + 1);
+    }
+    indent
+}
+
+/// 목록 블록 종료 — 항목 뒤 일반 문단/헤딩 앞에 빈 줄을 확보한다.
+fn close_list_block(ctx: &mut Ctx, out: &mut String) {
+    if ctx.last_was_list && !out.ends_with("\n\n") {
+        out.push('\n');
+    }
+    ctx.last_was_list = false;
+    ctx.list_widths.clear();
+    ctx.list_keys.clear();
+}
+
+fn break_section_list(ctx: &mut Ctx, out: &mut String) {
+    if ctx.last_was_list {
+        if !out.ends_with("\n\n") {
+            out.push('\n');
+        }
+        out.push_str("<!-- list-break -->\n\n");
+    }
+    ctx.last_was_list = false;
+    ctx.list_widths.clear();
+    ctx.list_keys.clear();
+}
+
+/// (머리 종류, 수준) — 2=번호, 3=글머리표. 목록이 아니면 None.
+fn list_head(doc: &Document, para: &Paragraph) -> Option<(u8, u8, u16)> {
+    let ps = doc.header.para_shapes.get(para.para_shape.0 as usize)?;
+    let ty = ps.head_type();
+    (ty == 2 || ty == 3).then(|| (ty, ps.head_level(), ps.numbering_id))
+}
+
+/// "1."/"1)" 같이 GFM 순서 목록으로 쓸 수 있는 형태인지.
+fn is_digit_marker(mk: &str) -> bool {
+    let Some(digits) = mk.strip_suffix('.').or_else(|| mk.strip_suffix(')')) else {
+        return false;
+    };
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// 문단 내용을 인라인/블록 fragment로 등장 순서대로 렌더링한다.
+fn render_fragments(doc: &Document, para: &Paragraph, ctx: &mut Ctx) -> Vec<Fragment> {
+    let mut fragments = Vec::new();
     let mut body = String::new();
     let mut wchar_pos = 0u32;
-    let mut bold = false;
-    let mut italic = false;
+    let mut marks = Marks::default();
     // 하이퍼링크 필드 열림 상태(대상 URL). FIELD_START에서 채우고 FIELD_END에서 닫는다.
     let mut link_url: Option<String> = None;
 
     for ch in &para.chars {
-        // 현재 위치의 문자 모양으로 굵게/기울임 전환
+        // 현재 위치의 문자 모양으로 효과 전환
         // (중첩 정합성을 위해 변경 시 전부 닫고 다시 연다)
         if let HwpChar::Text(_) = ch {
-            let shape = shape_at(doc, para, wchar_pos);
-            let (want_bold, want_italic) =
-                shape.map_or((false, false), |s| (s.is_bold(), s.is_italic()));
-            if want_bold != bold || want_italic != italic {
-                close_marks(&mut body, &mut bold, &mut italic);
-                if want_bold {
-                    body.push_str("**");
-                    bold = true;
-                }
-                if want_italic {
-                    body.push('*');
-                    italic = true;
-                }
+            let mut want = Marks::from_shape(shape_at(doc, para, wchar_pos));
+            // 하이퍼링크 표시 텍스트의 밑줄은 링크 표기 자체가 함의한다 —
+            // `[<u>텍스트</u>](URL)` 같은 군더더기를 막는다.
+            if link_url.is_some() {
+                want.underline = false;
+            }
+            if want != marks {
+                body.push_str(&marks.close(ctx.html_mode));
+                body.push_str(&want.open(ctx.html_mode));
+                marks = want;
             }
         }
         match ch {
-            HwpChar::Text(c) => body.push(*c),
+            HwpChar::Text(c) => {
+                if ctx.html_mode {
+                    push_html_escaped(&mut body, *c);
+                } else {
+                    body.push(*c);
+                }
+            }
             HwpChar::CharCtrl(code) => match *code {
                 ctrl_char::LINE_BREAK => {
-                    close_marks(&mut body, &mut bold, &mut italic);
-                    body.push_str("  \n");
+                    close_marks(&mut body, &mut marks, ctx.html_mode);
+                    body.push_str(if ctx.html_mode { "<br>" } else { "  \n" });
                 }
                 ctrl_char::HYPHEN => body.push('-'),
                 ctrl_char::NB_SPACE | ctrl_char::FW_SPACE => body.push(' '),
@@ -187,12 +617,16 @@ fn render_inline(doc: &Document, para: &Paragraph, ctx: &mut Ctx, out: &mut Stri
             },
             HwpChar::InlineCtrl { code, .. } => {
                 if *code == ctrl_char::FIELD_END {
-                    // 하이퍼링크 표시 텍스트 종료 → `](URL)`로 닫는다.
+                    // 하이퍼링크 표시 텍스트 종료 → `](URL)`/`</a>`로 닫는다.
                     if let Some(url) = link_url.take() {
-                        close_marks(&mut body, &mut bold, &mut italic);
-                        body.push_str("](");
-                        body.push_str(&md_link_dest(&url));
-                        body.push(')');
+                        close_marks(&mut body, &mut marks, ctx.html_mode);
+                        if ctx.html_mode {
+                            body.push_str("</a>");
+                        } else {
+                            body.push_str("](");
+                            body.push_str(&md_link_dest(&url));
+                            body.push(')');
+                        }
                     }
                 } else if *code == ctrl_char::TAB {
                     body.push(' ');
@@ -207,25 +641,68 @@ fn render_inline(doc: &Document, para: &Paragraph, ctx: &mut Ctx, out: &mut Stri
                     if *code == ctrl_char::FIELD_START
                         && let Some(url) = crate::field::hyperlink_url(control)
                     {
-                        // 하이퍼링크 필드 시작 → `[` 방출, 이후 표시 텍스트를 링크로 묶는다.
-                        close_marks(&mut body, &mut bold, &mut italic);
-                        body.push('[');
+                        // 하이퍼링크 필드 시작 → `[`/`<a href>` 방출, 이후 표시 텍스트를 링크로 묶는다.
+                        close_marks(&mut body, &mut marks, ctx.html_mode);
+                        if ctx.html_mode {
+                            body.push_str("<a href=\"");
+                            for c in url.chars() {
+                                match c {
+                                    '&' => body.push_str("&amp;"),
+                                    '"' => body.push_str("&quot;"),
+                                    '<' => body.push_str("&lt;"),
+                                    _ => body.push(c),
+                                }
+                            }
+                            body.push_str("\">");
+                        } else {
+                            body.push('[');
+                        }
                         link_url = Some(url);
                     } else {
-                        render_control(doc, control, *code, ctx, &mut body, out);
+                        render_control(
+                            doc,
+                            control,
+                            *code,
+                            ctx,
+                            &mut body,
+                            &mut marks,
+                            &mut fragments,
+                        );
                     }
                 }
             }
         }
         wchar_pos += ch.wchar_width();
     }
-    close_marks(&mut body, &mut bold, &mut italic);
-    body
+    body.push_str(&marks.close(ctx.html_mode));
+    flush_inline(&mut body, &mut fragments);
+    fragments
+}
+
+fn flush_inline(body: &mut String, fragments: &mut Vec<Fragment>) {
+    if !body.is_empty() {
+        fragments.push(Fragment::Inline(std::mem::take(body)));
+    }
+}
+
+fn push_block(
+    body: &mut String,
+    marks: &mut Marks,
+    html: bool,
+    fragments: &mut Vec<Fragment>,
+    block: String,
+) {
+    close_marks(body, marks, html);
+    flush_inline(body, fragments);
+    fragments.push(Fragment::Block(block));
 }
 
 /// markdown 링크 대상 포맷: 공백·괄호가 있으면 `<...>`로 감싼다.
 fn md_link_dest(url: &str) -> String {
-    if url.chars().any(|c| c.is_whitespace() || c == '(' || c == ')') {
+    if url
+        .chars()
+        .any(|c| c.is_whitespace() || c == '(' || c == ')')
+    {
         format!("<{}>", url.replace('<', "%3C").replace('>', "%3E"))
     } else {
         url.to_string()
@@ -238,7 +715,8 @@ fn render_control(
     code: u16,
     ctx: &mut Ctx,
     body: &mut String,
-    out: &mut String,
+    marks: &mut Marks,
+    fragments: &mut Vec<Fragment>,
 ) {
     match control {
         Control::SectionDef(_) => {}
@@ -247,42 +725,53 @@ fn render_control(
                 let r = ctx.image_ref(data);
                 body.push_str(&r);
             }
-            None => body.push_str("![image]()"),
+            None => body.push_str(if ctx.html_mode {
+                "<!-- image -->"
+            } else {
+                "![image]()"
+            }),
         },
         Control::Table(table) => {
-            // 표는 블록 요소로 out에 직접
-            let cols = table.cols.max(1) as usize;
-            let mut grid: Vec<Vec<String>> = Vec::new();
-            for cell in &table.cells {
-                let row = cell.row as usize;
-                while grid.len() <= row {
-                    grid.push(vec![String::new(); cols]);
-                }
-                let mut text = String::new();
-                for p in &cell.paragraphs {
-                    let mut cell_out = String::new();
-                    let inline = render_inline(doc, p, ctx, &mut cell_out);
-                    if !text.is_empty() && !inline.is_empty() {
-                        text.push(' ');
-                    }
-                    text.push_str(inline.trim());
-                }
-                if let Some(slot) = grid[row].get_mut(cell.col as usize) {
-                    *slot = text.replace('|', "\\|").replace('\n', " ");
-                }
+            let mut block = String::new();
+            // 병합 셀·셀 안 블록은 GFM 파이프 표로 표현 불가 → HTML 표 폴백.
+            if ctx.html_mode || has_span(table) || has_block_content(table, ctx) {
+                render_html_table(doc, table, ctx, &mut block);
+            } else {
+                render_gfm_table(doc, table, ctx, &mut block);
             }
-            out.push('\n');
-            for (i, row) in grid.iter().enumerate() {
-                out.push_str("| ");
-                out.push_str(&row.join(" | "));
-                out.push_str(" |\n");
-                if i == 0 {
-                    out.push_str(&format!("|{}\n", " --- |".repeat(cols)));
-                }
-            }
-            out.push('\n');
+            push_block(body, marks, ctx.html_mode, fragments, block);
         }
         Control::Generic(g) => {
+            // 수식 → $스크립트$ (원문 보존).
+            if let Some(eq) = &g.equation {
+                render_equation(eq, ctx, body, marks, fragments);
+                return;
+            }
+            // 각주/미주 → 본문 `[^N]` 마커 + 문서 끝 정의 (본문 인라인 흡수 대체).
+            if code == ctrl_char::FOOTNOTE_ENDNOTE && matches!(&g.ctrl_id, b"fn  " | b"en  ") {
+                let label = if g.ctrl_id == *b"fn  " {
+                    ctx.foot_n += 1;
+                    ctx.foot_n.to_string()
+                } else {
+                    ctx.end_n += 1;
+                    format!("e{}", ctx.end_n)
+                };
+                let text = note_text(doc, g, ctx);
+                let html = ctx.html_mode;
+                ctx.notes.push(Note {
+                    label: label.clone(),
+                    text,
+                    html,
+                });
+                if html {
+                    body.push_str(&format!(
+                        "<sup id=\"fnref-{label}\"><a href=\"#fn-{label}\">{label}</a></sup>"
+                    ));
+                } else {
+                    body.push_str(&format!("[^{label}]"));
+                }
+                return;
+            }
             // 머리말/꼬리말·숨은설명은 옵션에 따라 제외 (텍스트 추출 정책과 동일).
             if (code == ctrl_char::HEADER_FOOTER && !ctx.include_header_footer)
                 || (code == ctrl_char::HIDDEN_COMMENT && !ctx.include_hidden)
@@ -291,20 +780,244 @@ fn render_control(
             }
             for list in &g.paragraph_lists {
                 for p in &list.paragraphs {
-                    let mut sub_out = String::new();
-                    let inline = render_inline(doc, p, ctx, &mut sub_out);
-                    let inline = inline.trim();
-                    if !inline.is_empty() {
-                        if !body.is_empty() && !body.ends_with([' ', '\n']) {
-                            body.push(' ');
+                    for fragment in render_fragments(doc, p, ctx) {
+                        match fragment {
+                            Fragment::Inline(inline) => {
+                                let inline = inline.trim();
+                                if !inline.is_empty() {
+                                    if !body.is_empty() && !body.ends_with([' ', '\n']) {
+                                        body.push(' ');
+                                    }
+                                    body.push_str(inline);
+                                }
+                            }
+                            Fragment::Block(block) => {
+                                push_block(body, marks, ctx.html_mode, fragments, block);
+                            }
                         }
-                        body.push_str(inline);
                     }
-                    out.push_str(&sub_out);
                 }
             }
         }
     }
+}
+
+/// 수식 — 인라인은 `$..$`, 블록은 `$$..$$` (HWP 수식 스크립트 원문, LaTeX 아님).
+fn render_equation(
+    eq: &Equation,
+    ctx: &mut Ctx,
+    body: &mut String,
+    marks: &mut Marks,
+    fragments: &mut Vec<Fragment>,
+) {
+    if ctx.html_mode && eq.inline {
+        body.push_str("<code>");
+        for c in eq.script.chars() {
+            push_html_escaped(body, c);
+        }
+        body.push_str("</code>");
+    } else if eq.inline {
+        body.push('$');
+        body.push_str(&eq.script);
+        body.push('$');
+    } else if ctx.html_mode {
+        let mut block = String::from("<div class=\"hwp-equation\"><code>");
+        for c in eq.script.chars() {
+            push_html_escaped(&mut block, c);
+        }
+        block.push_str("</code></div>");
+        push_block(body, marks, true, fragments, block);
+    } else {
+        push_block(
+            body,
+            marks,
+            false,
+            fragments,
+            format!("$$\n{}\n$$", eq.script),
+        );
+    }
+}
+
+/// 각주/미주 본문 — 문단 fragment를 등장 순서대로 합친다.
+fn note_text(doc: &Document, g: &GenericControl, ctx: &mut Ctx) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for list in &g.paragraph_lists {
+        for p in &list.paragraphs {
+            for fragment in render_fragments(doc, p, ctx) {
+                let text = match fragment {
+                    Fragment::Inline(text) | Fragment::Block(text) => text,
+                };
+                let text = text.trim();
+                if !text.is_empty() {
+                    parts.push(text.to_string());
+                }
+            }
+        }
+    }
+    parts.join("\n")
+}
+
+/// 병합 셀(가로/세로)이 하나라도 있으면 GFM 파이프 표로 표현 불가.
+fn has_span(table: &Table) -> bool {
+    table.cells.iter().any(|c| c.col_span > 1 || c.row_span > 1)
+}
+
+/// 셀 안에 표·블록 수식 등 블록 fragment가 있으면 GFM 파이프 표로 표현 불가.
+fn has_block_content(table: &Table, ctx: &Ctx) -> bool {
+    table
+        .cells
+        .iter()
+        .any(|c| c.paragraphs.iter().any(|p| paragraph_has_block(p, ctx)))
+}
+
+fn paragraph_has_block(para: &Paragraph, ctx: &Ctx) -> bool {
+    para.controls.iter().any(|control| match control {
+        Control::Table(_) => true,
+        Control::Generic(g) => {
+            let excluded = ((g.ctrl_id == *b"head" || g.ctrl_id == *b"foot")
+                && !ctx.include_header_footer)
+                || (g.ctrl_id == *b"tcmt" && !ctx.include_hidden);
+            !excluded
+                && (g.equation.as_ref().is_some_and(|eq| !eq.inline)
+                    || g.paragraph_lists.iter().any(|list| {
+                        list.paragraphs
+                            .iter()
+                            .any(|paragraph| paragraph_has_block(paragraph, ctx))
+                    }))
+        }
+        _ => false,
+    })
+}
+
+/// GFM 파이프 표 (첫 행 헤더, 병합 없음).
+fn render_gfm_table(doc: &Document, table: &Table, ctx: &mut Ctx, out: &mut String) {
+    let cols = table.cols.max(1) as usize;
+    let mut grid: Vec<Vec<String>> = Vec::new();
+    for cell in &table.cells {
+        let row = cell.row as usize;
+        while grid.len() <= row {
+            grid.push(vec![String::new(); cols]);
+        }
+        let mut text = String::new();
+        for p in &cell.paragraphs {
+            for fragment in render_fragments(doc, p, ctx) {
+                let Fragment::Inline(inline) = fragment else {
+                    debug_assert!(false, "블록 셀은 HTML 표로 선분기되어야 함");
+                    continue;
+                };
+                if !text.is_empty() && !inline.is_empty() {
+                    text.push(' ');
+                }
+                text.push_str(inline.trim());
+            }
+        }
+        if let Some(slot) = grid[row].get_mut(cell.col as usize) {
+            *slot = text.replace('|', "\\|").replace('\n', " ");
+        }
+    }
+    out.push('\n');
+    for (i, row) in grid.iter().enumerate() {
+        out.push_str("| ");
+        out.push_str(&row.join(" | "));
+        out.push_str(" |\n");
+        if i == 0 {
+            out.push_str(&format!("|{}\n", " --- |".repeat(cols)));
+        }
+    }
+    out.push('\n');
+}
+
+/// HTML 표 — 병합 셀(colspan/rowspan)·셀 내 블록(중첩 표 포함)을 보존한다.
+/// 블록 HTML 안에선 md가 렌더되지 않으므로 셀 내용은 html_mode로 방출한다.
+fn render_html_table(doc: &Document, table: &Table, ctx: &mut Ctx, out: &mut String) {
+    let rows = table.rows.max(1) as usize;
+    let cols = table.cols.max(1) as usize;
+    // 병합 셀이 덮는 칸 표시 격자.
+    let mut covered = vec![vec![false; cols]; rows];
+    out.push_str("\n<table>\n");
+    for r in 0..rows {
+        out.push_str("<tr>");
+        for c in 0..cols {
+            if covered[r][c] {
+                continue; // 앞선 병합 셀이 덮은 칸
+            }
+            let Some(cell) = table
+                .cells
+                .iter()
+                .find(|cell| cell.row as usize == r && cell.col as usize == c)
+            else {
+                out.push_str("<td></td>");
+                continue;
+            };
+            for dr in 0..cell.row_span.max(1) as usize {
+                for dc in 0..cell.col_span.max(1) as usize {
+                    if let Some(slot) = covered.get_mut(r + dr).and_then(|row| row.get_mut(c + dc))
+                    {
+                        *slot = true;
+                    }
+                }
+            }
+            let mut attrs = String::new();
+            if cell.col_span > 1 {
+                attrs.push_str(&format!(" colspan=\"{}\"", cell.col_span));
+            }
+            if cell.row_span > 1 {
+                attrs.push_str(&format!(" rowspan=\"{}\"", cell.row_span));
+            }
+            let content = render_cell_html(doc, cell, ctx);
+            out.push_str(&format!("<td{attrs}>{content}</td>"));
+        }
+        out.push_str("</tr>\n");
+    }
+    out.push_str("</table>\n\n");
+}
+
+/// 셀 내용을 html_mode fragment로 렌더해 원래 순서를 보존한다.
+fn render_cell_html(doc: &Document, cell: &Cell, ctx: &mut Ctx) -> String {
+    let saved = ctx.html_mode;
+    ctx.html_mode = true;
+    let mut content = String::new();
+    for p in &cell.paragraphs {
+        for fragment in render_fragments(doc, p, ctx) {
+            let text = match fragment {
+                Fragment::Inline(text) | Fragment::Block(text) => text,
+            };
+            let text = text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            if !content.is_empty() {
+                content.push_str("<br>");
+            }
+            content.push_str(text);
+        }
+    }
+    ctx.html_mode = saved;
+    content
+}
+
+/// HTML 텍스트 노드 이스케이프 (& < >).
+fn push_html_escaped(out: &mut String, c: char) {
+    match c {
+        '&' => out.push_str("&amp;"),
+        '<' => out.push_str("&lt;"),
+        '>' => out.push_str("&gt;"),
+        _ => out.push(c),
+    }
+}
+
+fn escape_html_attr(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// 주어진 WCHAR 위치의 문자 모양.
@@ -318,27 +1031,17 @@ fn shape_at<'d>(doc: &'d Document, para: &Paragraph, pos: u32) -> Option<&'d Cha
     doc.header.char_shapes.get(id.0 as usize)
 }
 
-fn close_marks(body: &mut String, bold: &mut bool, italic: &mut bool) {
-    // 닫는 순서: 기울임 → 굵게 (여는 순서의 역)
-    if *italic {
-        body.push('*');
-        *italic = false;
-    }
-    if *bold {
-        body.push_str("**");
-        *bold = false;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::from_markdown::from_markdown;
+    use hwp_model::{CharShapeId, HwpChar, ParagraphList};
 
     /// 하이퍼링크가 md→IR→md 왕복에서 `[표시](URL)`로 보존된다.
+    /// (링크 표시 텍스트의 밑줄 서식은 링크 표기가 함의하므로 `<u>`를 내지 않는다.)
     #[test]
     fn 하이퍼링크_왕복_보존() {
-        let doc = from_markdown("자세히는 [여기](https://example.com/path)를 보라\n");
+        let doc = from_markdown("자세히는 [여기](https://example.com/path)를 본다\n");
         let md = to_markdown(&doc);
         assert!(
             md.contains("[여기](https://example.com/path)"),
@@ -413,30 +1116,6 @@ mod tests {
         assert!(!dir.exists(), "이미지 없으면 디렉터리 미생성");
     }
 
-    fn png_bytes() -> Vec<u8> {
-        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
-        png.extend([0, 0, 0, 13]);
-        png.extend(b"IHDR");
-        png.extend(96u32.to_be_bytes());
-        png.extend(96u32.to_be_bytes());
-        png.extend([0u8; 8]);
-        png
-    }
-
-    fn write_temp(name: &str, data: &[u8]) -> std::path::PathBuf {
-        let p = std::env::temp_dir().join(name);
-        std::fs::write(&p, data).unwrap();
-        p
-    }
-
-    fn unique_dir(stem: &str) -> std::path::PathBuf {
-        let uniq = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!("{stem}_{uniq}"))
-    }
-
     /// 이미지 여러 개가 등장 순서대로 image1/image2로 번호 매겨진다.
     #[test]
     fn 이미지_카운터_증가() {
@@ -471,5 +1150,689 @@ mod tests {
         assert!(md.contains(&format!("{name}/image2.png")), "둘째 이미지");
         assert!(dir.join("image2.png").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// media_prefix 지정 시 이미지 참조가 디렉터리명 대신 접두사 경로를 쓴다.
+    #[test]
+    fn 이미지_media_prefix() {
+        let mut doc = from_markdown("사진: 여기");
+        let png = png_bytes();
+        crate::image::insert_image(
+            &mut doc,
+            "사진:",
+            &write_temp("md_img_prefix.png", &png),
+            crate::image::ImageSize::Natural,
+        )
+        .unwrap();
+        let dir = unique_dir("md_media_prefix");
+        let md = to_markdown_with(
+            &doc,
+            &MarkdownOptions {
+                media_dir: Some(&dir),
+                media_prefix: Some("figs"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            md.contains("![image](figs/image1.png)"),
+            "prefix 참조: {md}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 이미지_경로를_markdown에_안전하게_인코딩() {
+        let mut doc = from_markdown("사진: 여기");
+        let png = png_bytes();
+        crate::image::insert_image(
+            &mut doc,
+            "사진:",
+            &write_temp("md_img_escaped.png", &png),
+            crate::image::ImageSize::Natural,
+        )
+        .unwrap();
+        let dir = unique_dir("md_media_escaped");
+        let md = to_markdown_with(
+            &doc,
+            &MarkdownOptions {
+                media_dir: Some(&dir),
+                media_prefix: Some(r"my figs\(draft)"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            md.contains("![image](<my figs/(draft)/image1.png>)"),
+            "공백·괄호·구분자 처리: {md}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 이미지_충돌은_덮어쓰지_않고_동일파일만_재사용() {
+        let mut doc = from_markdown("사진: 여기");
+        let png = png_bytes();
+        crate::image::insert_image(
+            &mut doc,
+            "사진:",
+            &write_temp("md_img_collision.png", &png),
+            crate::image::ImageSize::Natural,
+        )
+        .unwrap();
+        let dir = unique_dir("md_media_collision");
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("image1.png");
+        std::fs::write(&target, b"existing file").unwrap();
+
+        let error = to_markdown_with(
+            &doc,
+            &MarkdownOptions {
+                media_dir: Some(&dir),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&target).unwrap(), b"existing file");
+
+        std::fs::write(&target, &png).unwrap();
+        to_markdown_with(
+            &doc,
+            &MarkdownOptions {
+                media_dir: Some(&dir),
+                ..Default::default()
+            },
+        )
+        .expect("동일 바이트는 재사용");
+        assert_eq!(std::fs::read(&target).unwrap(), png);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 이미지_충돌은_새파일_기록_전에_선검사() {
+        let mut doc = from_markdown("첫 사진: 여기\n\n둘 사진: 저기");
+        let png = png_bytes();
+        crate::image::insert_image(
+            &mut doc,
+            "첫 사진:",
+            &write_temp("md_preflight1.png", &png),
+            crate::image::ImageSize::Natural,
+        )
+        .unwrap();
+        crate::image::insert_image(
+            &mut doc,
+            "둘 사진:",
+            &write_temp("md_preflight2.png", &png),
+            crate::image::ImageSize::Natural,
+        )
+        .unwrap();
+        let dir = unique_dir("md_media_preflight");
+        std::fs::create_dir_all(dir.join("image2.png")).unwrap();
+
+        assert!(
+            to_markdown_with(
+                &doc,
+                &MarkdownOptions {
+                    media_dir: Some(&dir),
+                    ..Default::default()
+                },
+            )
+            .is_err()
+        );
+        assert!(!dir.join("image1.png").exists(), "선검사 전에는 기록 금지");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 각주/미주가 본문 `[^N]`/`[^eN]` 마커 + 문서 끝 정의로 방출된다 (GH-3).
+    #[test]
+    fn 각주_미주_마커와_정의() {
+        let mut doc = from_markdown("본문 문단\n");
+        let note = |id: &[u8; 4], txt: &str| {
+            Control::Generic(GenericControl {
+                ctrl_id: *id,
+                data: vec![],
+                paragraph_lists: vec![ParagraphList {
+                    header_data: vec![],
+                    paragraphs: vec![Paragraph {
+                        chars: txt.chars().map(HwpChar::Text).collect(),
+                        ..Paragraph::default()
+                    }],
+                }],
+                extras: vec![],
+                raw_children: vec![],
+                gso_shapes: vec![],
+                equation: None,
+                column_def: None,
+            })
+        };
+        let anchor = |idx: u32, id: &[u8; 4]| HwpChar::ExtCtrl {
+            code: ctrl_char::FOOTNOTE_ENDNOTE,
+            ctrl_id: *id,
+            payload: vec![],
+            ctrl_index: Some(idx),
+        };
+        let para = &mut doc.sections[0].paragraphs[0];
+        // 첫 문단에는 구역 정의 컨트롤이 선주입돼 있으므로 현재 개수가 곧 인덱스다.
+        let i0 = para.controls.len() as u32;
+        para.controls.push(note(b"fn  ", "각주 내용"));
+        let i1 = para.controls.len() as u32;
+        para.controls.push(note(b"en  ", "미주 내용"));
+        para.chars.push(anchor(i0, b"fn  "));
+        para.chars.push(anchor(i1, b"en  "));
+
+        let md = to_markdown(&doc);
+        assert!(md.contains("본문 문단[^1][^e1]"), "본문 마커: {md}");
+        assert!(md.contains("[^1]: 각주 내용"), "각주 정의: {md}");
+        assert!(md.contains("[^e1]: 미주 내용"), "미주 정의: {md}");
+        // 정의는 문서 끝에 모인다.
+        assert!(
+            md.trim_end().ends_with("[^e1]: 미주 내용"),
+            "정의는 문서 끝: {md}"
+        );
+    }
+
+    #[test]
+    fn html_표_각주는_html_링크와_정의로_연결() {
+        let note = Control::Generic(GenericControl {
+            ctrl_id: *b"fn  ",
+            data: vec![],
+            paragraph_lists: vec![ParagraphList {
+                header_data: vec![],
+                paragraphs: vec![Paragraph {
+                    chars: "표 안 각주".chars().map(HwpChar::Text).collect(),
+                    ..Paragraph::default()
+                }],
+            }],
+            extras: vec![],
+            raw_children: vec![],
+            gso_shapes: vec![],
+            equation: None,
+            column_def: None,
+        });
+        let cell_para = Paragraph {
+            chars: "셀 본문"
+                .chars()
+                .map(HwpChar::Text)
+                .chain(std::iter::once(HwpChar::ExtCtrl {
+                    code: ctrl_char::FOOTNOTE_ENDNOTE,
+                    ctrl_id: *b"fn  ",
+                    payload: vec![],
+                    ctrl_index: Some(0),
+                }))
+                .collect(),
+            controls: vec![note],
+            ..Paragraph::default()
+        };
+        let mut doc = from_markdown("표\n");
+        insert_table(
+            &mut doc.sections[0].paragraphs[0],
+            one_cell_table(cell_para, 2, 2),
+        );
+
+        let md = to_markdown(&doc);
+        assert!(
+            md.contains(r##"<sup id="fnref-1"><a href="#fn-1">1</a></sup>"##),
+            "HTML 각주 참조: {md}"
+        );
+        assert!(
+            md.contains(r#"id="fn-1"><sup>1</sup> 표 안 각주"#),
+            "HTML 각주 정의: {md}"
+        );
+    }
+
+    /// 수식이 인라인은 `$..$`, 블록은 `$$..$$`로 방출된다.
+    #[test]
+    fn 수식_인라인_블록() {
+        let mk = |script: &str, inline: bool| {
+            Control::Generic(GenericControl {
+                ctrl_id: *b"eqed",
+                data: vec![],
+                paragraph_lists: vec![],
+                extras: vec![],
+                raw_children: vec![],
+                gso_shapes: vec![],
+                equation: Some(Equation {
+                    script: script.to_string(),
+                    width: 0,
+                    height: 0,
+                    inline,
+                    x: 0,
+                    y: 0,
+                }),
+                column_def: None,
+            })
+        };
+        let anchor = |idx: u32| HwpChar::ExtCtrl {
+            code: ctrl_char::OBJECT,
+            ctrl_id: *b"eqed",
+            payload: vec![],
+            ctrl_index: Some(idx),
+        };
+        let mut doc = from_markdown("인라인 수식: \n");
+        let p0 = &mut doc.sections[0].paragraphs[0];
+        // 첫 문단의 선주입 구역 정의 컨트롤 뒤 인덱스를 쓴다.
+        let i0 = p0.controls.len() as u32;
+        p0.chars.push(anchor(i0));
+        p0.controls.push(mk("a+b", true));
+        // 블록 수식만 있는 문단 추가.
+        doc.sections[0].paragraphs.push(Paragraph {
+            chars: vec![anchor(0)],
+            controls: vec![mk("x^2", false)],
+            ..Paragraph::default()
+        });
+
+        let md = to_markdown(&doc);
+        assert!(md.contains("$a+b$"), "인라인 수식: {md}");
+        assert!(md.contains("$$\nx^2\n$$"), "블록 수식: {md}");
+    }
+
+    #[test]
+    fn 블록_수식_앞뒤_순서_보존() {
+        let mut doc = from_markdown("앞 뒤\n");
+        let para = &mut doc.sections[0].paragraphs[0];
+        let index = para.controls.len() as u32;
+        para.controls.push(equation_control("x^2", false));
+        para.chars = "앞 "
+            .chars()
+            .map(HwpChar::Text)
+            .chain(std::iter::once(control_anchor(index, b"eqed")))
+            .chain(" 뒤".chars().map(HwpChar::Text))
+            .collect();
+
+        let md = to_markdown(&doc);
+        let before = md.find("앞").unwrap();
+        let equation = md.find("$$\nx^2\n$$").unwrap();
+        let after = md.find("뒤").unwrap();
+        assert!(
+            before < equation && equation < after,
+            "등장 순서 보존: {md}"
+        );
+    }
+
+    #[test]
+    fn 블록_수식_셀은_html_표로_내용_보존() {
+        use hwp_model::{BorderFillId, HwpUnit};
+        let mut cell_para = Paragraph::default();
+        cell_para.controls.push(equation_control("a+b", false));
+        cell_para.chars = "앞"
+            .chars()
+            .map(HwpChar::Text)
+            .chain(std::iter::once(control_anchor(0, b"eqed")))
+            .chain("뒤".chars().map(HwpChar::Text))
+            .collect();
+        let table = Table {
+            rows: 1,
+            cols: 1,
+            row_cell_counts: vec![1],
+            cells: vec![Cell {
+                list_attr: 0,
+                col: 0,
+                row: 0,
+                col_span: 1,
+                row_span: 1,
+                width: HwpUnit(0),
+                height: HwpUnit(0),
+                margins: [0; 4],
+                border_fill: BorderFillId(0),
+                header_tail: vec![],
+                paragraphs: vec![cell_para],
+            }],
+            common_data: vec![],
+            placement: None,
+            attr: 0,
+            cell_spacing: 0,
+            inner_margins: [0; 4],
+            border_fill: BorderFillId(0),
+            table_tail: vec![],
+            extras: vec![],
+        };
+        let mut doc = from_markdown("표\n");
+        insert_table(&mut doc.sections[0].paragraphs[0], table);
+
+        let md = to_markdown(&doc);
+        assert!(md.contains("<table>"), "블록 셀은 HTML 폴백: {md}");
+        let before = md.find("<td>앞").unwrap();
+        let equation = md.find("hwp-equation").unwrap();
+        let after = md.find("뒤</td>").unwrap();
+        assert!(before < equation && equation < after, "셀 순서 보존: {md}");
+    }
+
+    /// 글머리표/번호 문단이 GFM 목록으로 방출된다 (GH-6).
+    #[test]
+    fn 목록_불릿과_번호() {
+        use hwp_model::{NumFmt, NumLevel, ParaShape, ParaShapeId};
+        let ps = |ty: u32, lv: u32, nid: u16| ParaShape {
+            attr1: (ty << 23) | (lv << 25),
+            numbering_id: nid,
+            ..ParaShape::default()
+        };
+        // 숫자 번호 목록. 카운터는 번호 정의(numbering id)별 독립이며,
+        // 형식이 다른 목록은 문서를 나눠 따로 검증한다.
+        let mut doc = from_markdown("불릿 하나\n\n번호 하나\n\n번호 둘\n");
+        let base = doc.header.para_shapes.len() as u16;
+        doc.header.para_shapes.push(ps(3, 1, 0)); // 불릿
+        doc.header.para_shapes.push(ps(2, 1, 0)); // 번호(숫자)
+        doc.header.bullet_chars = vec!['•'];
+        doc.header.numbering_levels = vec![vec![NumLevel::default(); 7]];
+        for (i, p) in doc.sections[0].paragraphs.iter_mut().enumerate() {
+            p.para_shape = ParaShapeId(if i == 0 { base } else { base + 1 });
+        }
+        let md = to_markdown(&doc);
+        assert!(md.contains("- 불릿 하나\n"), "불릿: {md}");
+        assert!(md.contains("1. 번호 하나\n"), "숫자 번호 1: {md}");
+        assert!(md.contains("2. 번호 둘\n"), "숫자 번호 2: {md}");
+
+        // 가나다 형식 번호는 GFM 목록 마커가 없어 리터럴 마커로 보존한다.
+        let mut doc2 = from_markdown("한글 번호\n");
+        let base2 = doc2.header.para_shapes.len() as u16;
+        doc2.header.para_shapes.push(ps(2, 1, 1));
+        doc2.header.numbering_levels = vec![
+            vec![NumLevel::default(); 7],
+            vec![
+                NumLevel {
+                    start: 1,
+                    fmt: NumFmt::HangulSyllable,
+                    template: String::new(),
+                };
+                7
+            ],
+        ];
+        doc2.sections[0].paragraphs[0].para_shape = ParaShapeId(base2);
+        let md2 = to_markdown(&doc2);
+        assert!(md2.contains("- 가. 한글 번호"), "한글 형식 리터럴: {md2}");
+    }
+
+    #[test]
+    fn 목록_중첩은_부모_마커_폭으로_들여쓰기() {
+        use hwp_model::{NumLevel, ParaShape, ParaShapeId};
+        use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+
+        let mut doc = from_markdown("상위\n\n하위\n\n다음\n");
+        let base = doc.header.para_shapes.len() as u16;
+        let ps = |ty: u32, level: u32| ParaShape {
+            attr1: (ty << 23) | (level << 25),
+            numbering_id: 0,
+            ..ParaShape::default()
+        };
+        doc.header.para_shapes.push(ps(2, 1));
+        doc.header.para_shapes.push(ps(3, 2));
+        doc.header.numbering_levels = vec![vec![NumLevel::default(); 7]];
+        doc.header.bullet_chars = vec!['•'];
+        for (paragraph, shape) in doc.sections[0]
+            .paragraphs
+            .iter_mut()
+            .zip([base, base + 1, base])
+        {
+            paragraph.para_shape = ParaShapeId(shape);
+        }
+
+        let md = to_markdown(&doc);
+        assert!(
+            md.contains("1. 상위\n   - 하위\n2. 다음"),
+            "목록 들여쓰기: {md}"
+        );
+        let mut depth = 0usize;
+        let mut max_depth = 0usize;
+        for event in Parser::new(&md) {
+            match event {
+                Event::Start(Tag::List(_)) => {
+                    depth += 1;
+                    max_depth = max_depth.max(depth);
+                }
+                Event::End(TagEnd::List(_)) => depth -= 1,
+                _ => {}
+            }
+        }
+        assert_eq!(max_depth, 2, "파서에서도 중첩 목록이어야 함: {md}");
+    }
+
+    #[test]
+    fn 순서목록_마커_판별() {
+        assert!(is_digit_marker("1."));
+        assert!(is_digit_marker("12)"));
+        assert!(!is_digit_marker("1"));
+        assert!(!is_digit_marker("가."));
+    }
+
+    #[test]
+    fn 구역_경계에서_번호목록_재시작() {
+        use hwp_model::{NumLevel, ParaShape, ParaShapeId};
+        use pulldown_cmark::{Event, Parser, Tag};
+
+        let mut doc = from_markdown("첫 구역\n");
+        let shape = doc.header.para_shapes.len() as u16;
+        doc.header.para_shapes.push(ParaShape {
+            attr1: (2 << 23) | (1 << 25),
+            numbering_id: 0,
+            ..ParaShape::default()
+        });
+        doc.header.numbering_levels = vec![vec![NumLevel::default(); 7]];
+        doc.sections[0].paragraphs[0].para_shape = ParaShapeId(shape);
+        let mut second = doc.sections[0].clone();
+        second.paragraphs[0].chars = "둘째 구역".chars().map(HwpChar::Text).collect();
+        doc.sections.push(second);
+
+        let md = to_markdown(&doc);
+        assert!(md.contains("<!-- list-break -->"), "구역 목록 분리: {md}");
+        let starts = Parser::new(&md)
+            .filter(|event| matches!(event, Event::Start(Tag::List(_))))
+            .count();
+        assert_eq!(starts, 2, "서로 다른 최상위 목록이어야 함: {md}");
+    }
+
+    /// 병합 셀이 있으면 HTML 표(colspan/rowspan)로 폴백한다 (GH-4).
+    #[test]
+    fn 병합셀_html_표() {
+        use hwp_model::{BorderFillId, Cell, HwpUnit, Table};
+        let cell = |row: u16, col: u16, cs: u16, rs: u16, txt: &str| Cell {
+            list_attr: 0,
+            col,
+            row,
+            col_span: cs,
+            row_span: rs,
+            width: HwpUnit(0),
+            height: HwpUnit(0),
+            margins: [0; 4],
+            border_fill: BorderFillId(0),
+            header_tail: vec![],
+            paragraphs: vec![Paragraph {
+                chars: txt.chars().map(HwpChar::Text).collect(),
+                ..Paragraph::default()
+            }],
+        };
+        let table = Table {
+            common_data: vec![],
+            placement: None,
+            attr: 0,
+            rows: 2,
+            cols: 2,
+            cell_spacing: 0,
+            inner_margins: [0; 4],
+            row_cell_counts: vec![1, 2],
+            border_fill: BorderFillId(0),
+            table_tail: vec![],
+            cells: vec![
+                cell(0, 0, 2, 1, "병합"),
+                cell(1, 0, 1, 1, "가"),
+                cell(1, 1, 1, 1, "나"),
+            ],
+            extras: vec![],
+        };
+        let mut doc = from_markdown("표 문단\n");
+        let p = &mut doc.sections[0].paragraphs[0];
+        // 첫 문단의 선주입 구역 정의 컨트롤 뒤 인덱스를 쓴다.
+        let i0 = p.controls.len() as u32;
+        p.chars.push(HwpChar::ExtCtrl {
+            code: ctrl_char::OBJECT,
+            ctrl_id: *b"tbl ",
+            payload: vec![],
+            ctrl_index: Some(i0),
+        });
+        p.controls.push(Control::Table(table));
+
+        let md = to_markdown(&doc);
+        assert!(md.contains("<table>"), "HTML 표: {md}");
+        assert!(md.contains("<td colspan=\"2\">병합</td>"), "colspan: {md}");
+        assert!(md.contains("<td>가</td><td>나</td>"), "나머지 행: {md}");
+    }
+
+    #[test]
+    fn html_표_이미지_경로_속성_이스케이프() {
+        let mut doc = from_markdown("사진: 여기");
+        let png = png_bytes();
+        crate::image::insert_image(
+            &mut doc,
+            "사진:",
+            &write_temp("md_html_attr.png", &png),
+            crate::image::ImageSize::Natural,
+        )
+        .unwrap();
+        let cell_para = doc.sections[0].paragraphs.remove(0);
+        let mut parent = Paragraph::default();
+        insert_table(&mut parent, one_cell_table(cell_para, 2, 2));
+        doc.sections[0].paragraphs.push(parent);
+        let dir = unique_dir("md_html_attr");
+
+        let md = to_markdown_with(
+            &doc,
+            &MarkdownOptions {
+                media_dir: Some(&dir),
+                media_prefix: Some("my figs/\"draft\"&more"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            md.contains(r#"src="my figs/&quot;draft&quot;&amp;more/image1.png""#),
+            "HTML 속성 이스케이프: {md}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 밑줄/취소선/위·아래첨자가 스팬으로 방출된다.
+    #[test]
+    fn 글자효과_스팬() {
+        let mut doc = from_markdown("효과\n");
+        let shapes = [
+            CharShape {
+                attr: 1 << 2, // 밑줄(글자 아래)
+                ..CharShape::default()
+            },
+            CharShape {
+                strike: true,
+                ..CharShape::default()
+            },
+            CharShape {
+                attr: 1 << 15, // 위첨자
+                ..CharShape::default()
+            },
+            CharShape {
+                attr: 1 << 16, // 아래첨자
+                ..CharShape::default()
+            },
+        ];
+        let base = doc.header.char_shapes.len() as u16;
+        doc.header.char_shapes.extend(shapes);
+        let para = &mut doc.sections[0].paragraphs[0];
+        para.chars = "ABCD".chars().map(HwpChar::Text).collect();
+        para.char_shape_runs = (0..4)
+            .map(|i| (i as u32, CharShapeId(base + i as u16)))
+            .collect();
+
+        let md = to_markdown(&doc);
+        assert!(
+            md.contains("<u>A</u>~~B~~<sup>C</sup><sub>D</sub>"),
+            "효과 스팬: {md}"
+        );
+    }
+
+    fn equation_control(script: &str, inline: bool) -> Control {
+        Control::Generic(GenericControl {
+            ctrl_id: *b"eqed",
+            data: vec![],
+            paragraph_lists: vec![],
+            extras: vec![],
+            raw_children: vec![],
+            gso_shapes: vec![],
+            equation: Some(Equation {
+                script: script.to_string(),
+                width: 0,
+                height: 0,
+                inline,
+                x: 0,
+                y: 0,
+            }),
+            column_def: None,
+        })
+    }
+
+    fn control_anchor(index: u32, id: &[u8; 4]) -> HwpChar {
+        HwpChar::ExtCtrl {
+            code: ctrl_char::OBJECT,
+            ctrl_id: *id,
+            payload: vec![],
+            ctrl_index: Some(index),
+        }
+    }
+
+    fn insert_table(paragraph: &mut Paragraph, table: Table) {
+        let index = paragraph.controls.len() as u32;
+        paragraph.controls.push(Control::Table(table));
+        paragraph.chars.push(control_anchor(index, b"tbl "));
+    }
+
+    fn one_cell_table(paragraph: Paragraph, cols: u16, col_span: u16) -> Table {
+        use hwp_model::{BorderFillId, HwpUnit};
+        Table {
+            common_data: vec![],
+            placement: None,
+            attr: 0,
+            rows: 1,
+            cols,
+            cell_spacing: 0,
+            inner_margins: [0; 4],
+            row_cell_counts: vec![1],
+            border_fill: BorderFillId(0),
+            table_tail: vec![],
+            cells: vec![Cell {
+                list_attr: 0,
+                col: 0,
+                row: 0,
+                col_span,
+                row_span: 1,
+                width: HwpUnit(0),
+                height: HwpUnit(0),
+                margins: [0; 4],
+                border_fill: BorderFillId(0),
+                header_tail: vec![],
+                paragraphs: vec![paragraph],
+            }],
+            extras: vec![],
+        }
+    }
+
+    fn png_bytes() -> Vec<u8> {
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend([0, 0, 0, 13]);
+        png.extend(b"IHDR");
+        png.extend(96u32.to_be_bytes());
+        png.extend(96u32.to_be_bytes());
+        png.extend([0u8; 8]);
+        png
+    }
+
+    fn write_temp(name: &str, data: &[u8]) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(name);
+        std::fs::write(&p, data).unwrap();
+        p
+    }
+
+    fn unique_dir(stem: &str) -> std::path::PathBuf {
+        let uniq = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{stem}_{uniq}"))
     }
 }

@@ -69,7 +69,11 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 
 /// 1970-01-01 기준 일수 → 요일(0=일요일 … 6=토요일). Howard Hinnant `weekday_from_days`.
 fn weekday_from_days(z: i64) -> usize {
-    (if z >= -4 { (z + 4) % 7 } else { (z + 5) % 7 + 6 }) as usize
+    (if z >= -4 {
+        (z + 4) % 7
+    } else {
+        (z + 5) % 7 + 6
+    }) as usize
 }
 
 /// FILETIME(1601 기준 100ns) → 1970-01-01 기준 (일수, 하루 내 초).
@@ -97,9 +101,7 @@ pub fn filetime_to_iso8601_utc(ft: u64) -> Option<String> {
     let (days, sod) = filetime_to_days_secs(ft);
     let (y, m, d) = civil_from_days(days);
     let (h, min, s) = (sod / 3600, (sod % 3600) / 60, sod % 60);
-    Some(format!(
-        "{y:04}-{m:02}-{d:02}T{h:02}:{min:02}:{s:02}Z"
-    ))
+    Some(format!("{y:04}-{m:02}-{d:02}T{h:02}:{min:02}:{s:02}Z"))
 }
 
 /// FILETIME → 한국어 로캘 KST 문자열 `"2025년 9월 17일 수요일 오후 1:32:50"`.

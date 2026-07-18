@@ -61,6 +61,16 @@ enum Cmd {
         /// JSON 출력 시 첨부 바이너리(이미지)를 base64로 임베드 (자급식 JSON)
         #[arg(long)]
         embed_bin: bool,
+        /// (md) 이미지 추출 디렉터리 — 기본 "<출력스템>.media". 상대경로는 출력
+        /// 파일 기준으로 해석하고 링크는 입력한 경로 그대로 쓴다 (예: figs)
+        #[arg(long)]
+        media_dir: Option<PathBuf>,
+        /// (md) 머리말/꼬리말 텍스트도 포함 (기본: 제외)
+        #[arg(long = "with-header-footer")]
+        with_header_footer: bool,
+        /// (md) 숨은 설명 텍스트도 포함 (기본: 제외)
+        #[arg(long = "with-hidden")]
+        with_hidden: bool,
     },
 
     /// 페이지 렌더링 (M3에서 구현)
@@ -295,7 +305,22 @@ fn main() -> anyhow::Result<()> {
             strict,
             preserve_layout,
             embed_bin,
-        } => commands::convert::run(&input, &output, to, strict, preserve_layout, embed_bin),
+            media_dir,
+            with_header_footer,
+            with_hidden,
+        } => commands::convert::run(
+            &input,
+            &output,
+            to,
+            strict,
+            preserve_layout,
+            embed_bin,
+            &commands::convert::MdOpts {
+                media_dir: media_dir.as_deref(),
+                with_header_footer,
+                with_hidden,
+            },
+        ),
         Cmd::Render {
             input,
             output,

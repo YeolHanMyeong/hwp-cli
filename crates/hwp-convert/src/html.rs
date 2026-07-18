@@ -392,7 +392,10 @@ mod tests {
             html.contains("<a href=\"https://example.com/a?b=1&amp;c=2\">"),
             "href 이스케이프: {html}"
         );
-        assert!(html.contains("여기") && html.contains("</a>"), "링크 닫힘: {html}");
+        assert!(
+            html.contains("여기") && html.contains("</a>"),
+            "링크 닫힘: {html}"
+        );
     }
 
     #[test]
