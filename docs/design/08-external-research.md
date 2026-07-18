@@ -75,13 +75,13 @@ owpml-model은 전부 **파서/객체모델**(layout/draw/paint 패키지 없음
 |---|---|---|
 | **수식** | hwp5(HWPTAG_EQEDIT)·hwpx(CEquationType→CScript) 둘 다 **텍스트 스크립트** 저장(글립 아님). 예약문자 `~`공백·`` ` ``¼공백·`{}`그룹·`" "`단어·`#`줄바꿈·`&`열정렬. 키워드 OVER(분수선)/ATOP(선없음)/SQRT/SUP·`^`/SUB·`_`/적분족 INT·OINT·DINT·TINT·ODINT·OTINT/SUM·PROD·UNION·INTER/matrix{`&`열 `#`행}·P/B/D-MATRIX. 함수어(sin·log·lim…) 로만체, 이름 내부 공백→이탤릭. | 한컴 수식 spec rev1.2, equation help, hwplib ControlEquation |
 | **차트** | hwp5=ChartObj 이진 트리(VtChart 루트, StoredtypeID 중복 dedup). hwpx=CChartType이 `chartIDRef`만→외부 `chart/chartN.xml`(OOXML DrawingML). 시리즈/축 필드 레이아웃 **미확보(open)**. | 한컴 차트 spec rev1.2, hancom owpml-model |
-| **쪽테두리** | BorderFill=4변+대각+채움1, u16 비트필드(bit0 3D·bit1 그림자·bit2-4 slash·…·bit13 중심선), 채움종류 u32(0없음/1색/2이미지/4그러데이션). 위치기준 종이(안쪽)/쪽(바깥), gap 4방향, 최대 25mm(UI 제약). **HWPTAG_PAGE_BORDER_FILL 바이트 레이아웃은 반증(미확정)** → 정답지 역설계 필요. | rust hwp border_fill.rs, 5.0 spec 표24, hwplib PageBorderFillProperty |
+| **쪽테두리** | BorderFill=4변+대각+채움1, u16 비트필드(bit0 3D·bit1 그림자·bit2-4 slash·…·bit13 중심선), 채움종류 u32(0없음/1색/2이미지/4그러데이션). 위치기준 종이(안쪽)/쪽(바깥), gap 4방향, 최대 25mm(UI 제약). ~~HWPTAG_PAGE_BORDER_FILL 바이트 레이아웃은 반증(미확정)~~ → **해소(2026-07-19, GC-2 조사)**: 당시 "반증"의 근본 원인은 스펙 표135의 자기모순(선언 12B ≠ 필드 합 14B). 정품 236파일·714레코드 전수 **14B**(속성 u32 + 4방향 gap u16×4 + 테두리ID u16, BOTH/EVEN/ODD는 레코드 순서로 구분)로 확정 — 우리 코드는 이미 올바름 | rust hwp border_fill.rs, 5.0 spec 표24, hwplib PageBorderFillProperty, 정품 전수 스윕 |
 | **다단** | COLDEF(`cold`, 표138/139): attr **bit0-1 종류(0일반/1배분/2평행)·bit2-9 단수(1-255)·bit10-11 방향(0왼/1오른/2맞쪽)·bit12 동일폭**; gap HWPUNIT16; 비동일폭이면 단별 폭 배열; 구분선(type·굵기·색). **hwplib과 bit단위 일치**. | 5.0 spec, hwplib ControlColumnDefine |
 | **세로쓰기** | "방향 플래그일 뿐" 주장 **반증** — 확정 렌더 알고리즘 없음. → **보류**. | (open question) |
 | **자간/장평** | CharShape 장평 ratio INT8[7] 50-200%, 자간 spacing 실질 -50~50%. glyph advance = base×장평 + 자간. (우리 shape.rs 이미 적용) | 한컴테크 python-hwp-parsing-2 |
 
 ## 미확정(열린 질문) — 구현 시 정답지로 해소
-- HWPTAG_PAGE_BORDER_FILL 정확 바이트 구조(반증됨) → 실기 표본 역설계.
+- ~~HWPTAG_PAGE_BORDER_FILL 정확 바이트 구조(반증됨) → 실기 표본 역설계~~ — 해소(2026-07-19, 위 참조).
 - 세로쓰기 글립 회전·행 진행 규칙 → 확정 알고리즘 없음.
 - justify(양쪽정렬) CJK vs 라틴 여백 분배 정확 규칙·마지막 줄 → 미확보(휴리스틱).
 - 차트 시리즈/축 이하 필드 레이아웃, hwpx chartN.xml OOXML 매핑 → 트리/참조까지만 확보.

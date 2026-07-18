@@ -24,7 +24,7 @@ pub use field::{
     scan_placeholders, set_field,
 };
 pub use format::{CharFormat, set_char_format, set_para_align};
-pub use from_markdown::{default_header, from_markdown};
+pub use from_markdown::{MarkdownImportOptions, default_header, from_markdown, from_markdown_with};
 pub use html::{to_html, to_html_fragment};
 pub use image::{ImageSize, image_kind, insert_image, insert_seal};
 pub use markdown::{MarkdownOptions, to_markdown, to_markdown_with};

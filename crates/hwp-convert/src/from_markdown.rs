@@ -12,17 +12,26 @@
 //!   `numbering_levels`/`bullet_chars`로 마커를 그리므로 그 정의를 만든다.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use hwp_model::{
-    BorderFill, BorderFillId, BorderLine, Cell, CharShape, CharShapeId, Control, DocMeta, Document,
-    FaceName, GenericControl, HwpChar, HwpUnit, LANG_COUNT, NumLevel, ParaShape, ParaShapeId,
-    Paragraph, ParagraphList, Section, Style, StyleId, Table, ctrl_char,
+    BinRef, BinStream, BorderFill, BorderFillId, BorderLine, Cell, CharShape, CharShapeId, Control,
+    DocMeta, Document, FaceName, GenericControl, HwpChar, HwpUnit, LANG_COUNT, NumLevel, ParaShape,
+    ParaShapeId, Paragraph, ParagraphList, Picture, Section, Style, StyleId, Table, ctrl_char,
 };
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 /// default_header가 만드는 기본 문단 모양 개수(인덱스 0~4). 목록용 문단 모양은
 /// 이 뒤(5~)에 붙는다.
 const BASE_PARA_SHAPES: u16 = 5;
+
+/// markdown 들여오기 옵션.
+#[derive(Default)]
+pub struct MarkdownImportOptions<'a> {
+    /// 상대 경로 이미지(`![](fig.png)`)를 해석할 기준 디렉터리(md 파일의 위치).
+    /// `None`이면 상대 경로 이미지는 경고 후 alt 텍스트만 보존한다(절대 경로는 그대로 시도).
+    pub base_dir: Option<&'a Path>,
+}
 
 /// 문자 모양 ID 배치 (default_header와 일치해야 함).
 mod shapes {
@@ -39,7 +48,12 @@ mod shapes {
     pub const BOLD_STRIKE: u16 = 12;
     pub const ITALIC_STRIKE: u16 = 13;
     pub const BOLD_ITALIC_STRIKE: u16 = 14;
+    /// 인라인 코드(함초롬돋움 + 연회색 음영) → 15
+    pub const CODE: u16 = 15;
 }
+
+/// default_header 글꼴 테이블의 함초롬돋움 인덱스(인라인 코드용). 함초롬바탕=0.
+const FONT_DOTUM: u16 = 1;
 
 /// 테두리/배경 ID 배치: 1·2 = 무테두리(기본/참조용), 3 = 실선 0.12mm.
 const TABLE_BORDER_FILL: u16 = 3;
@@ -54,15 +68,27 @@ pub fn default_header() -> hwp_model::DocHeader {
     let h = |factor: i32| (body * factor) / 100;
     let mut header = hwp_model::DocHeader::default();
     for slot in 0..LANG_COUNT {
-        header.fonts[slot] = vec![FaceName {
-            name: "함초롬바탕".to_string(),
-            // 한글 무결성 검사는 글꼴 대체를 위해 기본 글꼴 이름(attr bit5, 0x20)을 기대한다.
-            // 정상 표본 hello_world.hwp 의 '함초롬바탕'은 default_name="HCR Batang", attr=0x21.
-            // attr 하위 0x01 = 글꼴 유형 TTF(표 20). emit_face_name 이 0x20 비트를 자동 OR 한다.
-            attr: 0x01,
-            default_name: Some("HCR Batang".to_string()),
-            ..FaceName::default()
-        }];
+        header.fonts[slot] = vec![
+            FaceName {
+                name: "함초롬바탕".to_string(),
+                // 한글 무결성 검사는 글꼴 대체를 위해 기본 글꼴 이름(attr bit5, 0x20)을 기대한다.
+                // 정상 표본 hello_world.hwp 의 '함초롬바탕'은 default_name="HCR Batang", attr=0x21.
+                // attr 하위 0x01 = 글꼴 유형 TTF(표 20). emit_face_name 이 0x20 비트를 자동 OR 한다.
+                attr: 0x01,
+                default_name: Some("HCR Batang".to_string()),
+                ..FaceName::default()
+            },
+            // 인덱스 1 = 함초롬돋움(고딕/산세리프) — 인라인 코드용. 번들 fonts/의 HCRDotum으로
+            // 렌더러도 실제 글리프를 그린다. 두 writer(hwp5 emit_face_name 루프·hwpx
+            // write_fontfaces)가 슬롯별 fonts 전체를 방출하고 ID_MAPPINGS 카운트도 len으로 유도돼
+            // 정합한다.
+            FaceName {
+                name: "함초롬돋움".to_string(),
+                attr: 0x01,
+                default_name: Some("HCR Dotum".to_string()),
+                ..FaceName::default()
+            },
+        ];
     }
 
     let base = CharShape {
@@ -119,6 +145,14 @@ pub fn default_header() -> hwp_model::DocHeader {
     header.char_shapes.push(cs_strike(true, false)); // 12 굵게+취소선
     header.char_shapes.push(cs_strike(false, true)); // 13 기울임+취소선
     header.char_shapes.push(cs_strike(true, true)); // 14 굵게+기울임+취소선
+    // 15 인라인 코드: 함초롬돋움(face_id=1) + 연회색 음영(0xF0F0F0). 한글은 shade_color를
+    // 글자 배경 하이라이트로 그려 코드 스팬에 회색 배경을 준다(0xFFFFFFFF='없음'과 대비).
+    header.char_shapes.push(CharShape {
+        base_size: body,
+        face_ids: [FONT_DOTUM; LANG_COUNT],
+        shade_color: 0x00F0_F0F0,
+        ..base.clone()
+    });
 
     // 탭 정의 — 한글 기본 좌/중/우 자동 탭 3개. 정상 표본(hello_world 등
     // 5.1.0.1)은 전부 이 3개를 가지며, 모든 PARA_SHAPE가 tab_def_id=0 을
@@ -261,8 +295,14 @@ pub fn default_header() -> hwp_model::DocHeader {
     header
 }
 
-/// markdown 텍스트를 문서로 변환한다.
+/// markdown 텍스트를 문서로 변환한다(기존 시그니처 — 상대 경로 이미지는 경고 후 alt 보존).
 pub fn from_markdown(md: &str) -> Document {
+    from_markdown_with(md, &MarkdownImportOptions::default())
+}
+
+/// 옵션을 받는 변형. `base_dir` 지정 시 상대 경로 이미지(`![](fig.png)`)를 임베드한다.
+/// 원격 URL·없는 파일·미지원 포맷은 경고(stderr) 후 alt 텍스트만 본문에 보존한다.
+pub fn from_markdown_with(md: &str, opts: &MarkdownImportOptions) -> Document {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     // 취소선(`~~`)·각주(`[^N]`)를 파싱한다. 작업목록(TASKLISTS)은 대응 IR 의미가 없어 제외.
@@ -277,12 +317,18 @@ pub fn from_markdown(md: &str) -> Document {
     // 2) 본문 처리.
     let mut b = Builder {
         note_bodies,
+        base_dir: opts.base_dir.map(Path::to_path_buf),
         ..Builder::default()
     };
     for event in &events {
         b.event(event.clone());
     }
     b.flush_paragraph();
+
+    // 이미지 실패 등 경고는 stderr로 남긴다(문서 생성 자체는 성공한다).
+    for w in &b.warnings {
+        eprintln!("경고: {w}");
+    }
 
     if b.paragraphs.is_empty() {
         // 빈 문서도 문단 하나로 닫는다. 문단끝 문자는 writer가 보장한다.
@@ -308,7 +354,7 @@ pub fn from_markdown(md: &str) -> Document {
             paragraphs: b.paragraphs,
             extras: Vec::new(),
         }],
-        bin_streams: Vec::new(),
+        bin_streams: b.bin_streams,
         hwpx_settings_xml: None,
         hwpx_version_xml: None,
     }
@@ -390,6 +436,7 @@ struct Builder {
     bold: bool,
     italic: bool,
     strike: bool,              // 취소선 구간(`~~`)
+    in_code: bool,             // 인라인 코드 구간(`code` — 함초롬돋움+음영)
     in_link: bool,             // 하이퍼링크 표시 텍스트 구간(파랑+밑줄)
     link_end: Option<HwpChar>, // 링크 종료 시 방출할 FIELD_END 문자
     in_blockquote: u32,        // 인용문 중첩 깊이(>0이면 인용 문단)
@@ -406,6 +453,11 @@ struct Builder {
     // 각주/미주: 선수집한 정의 본문(라벨→문단) + 정의 블록 건너뛰기 깊이.
     note_bodies: HashMap<String, Vec<Paragraph>>,
     skip_note_def: u32,
+    // 이미지: 상대 경로 기준 디렉터리 + 임베드한 바이너리 + 경고 + alt 억제 상태.
+    base_dir: Option<PathBuf>,
+    bin_streams: Vec<BinStream>,
+    warnings: Vec<String>,
+    in_image_suppress: bool, // 이미지 임베드 성공 시 alt 텍스트를 억제
 }
 
 /// 목록 한 수준(프레임). `Start(List)`마다 하나 생기고 항목이 이 머리 문단모양을 쓴다.
@@ -425,6 +477,10 @@ struct TableBuilder {
 
 impl Builder {
     fn current_shape(&self) -> u16 {
+        // 인라인 코드는 함초롬돋움+음영으로 다른 서식을 지배한다(가장 우선).
+        if self.in_code {
+            return shapes::CODE;
+        }
         if self.in_link {
             return shapes::HYPERLINK;
         }
@@ -648,6 +704,81 @@ impl Builder {
         }));
     }
 
+    /// 이미지 참조를 현재 문단에 임베드한다 — 로컬 파일이면 BinStream + 인라인 Picture(글자처럼,
+    /// 자연 크기)로 삽입하고 alt를 억제, 실패면(원격/없음/미지원) 경고 후 alt 텍스트를 남긴다.
+    fn start_image(&mut self, dest_url: &str) {
+        match self.load_image(dest_url) {
+            Ok((data, name, w, h)) => {
+                let idx = self.controls.len() as u32;
+                self.controls.push(Control::Picture(Picture {
+                    common_data: Vec::new(),
+                    width: HwpUnit(w.max(1)),
+                    height: HwpUnit(h.max(1)),
+                    treat_as_char: true, // 인라인(글자처럼) 배치 — writer가 도형 레코드 합성
+                    z_order: 0,
+                    vert_offset: 0,
+                    horz_offset: 0,
+                    bin_ref: BinRef::ItemRef(name.clone()),
+                    extras: Vec::new(),
+                }));
+                // gso 앵커 문자(code 11) — insert_image와 동일 규약. relink가 ctrl_index 재배치.
+                self.chars.push(HwpChar::ExtCtrl {
+                    code: 11,
+                    ctrl_id: *b"gso ",
+                    payload: crate::field::rev_payload(b"gso "),
+                    ctrl_index: Some(idx),
+                });
+                self.wchar_pos += 8;
+                self.bin_streams.push(BinStream { name, data });
+                self.in_image_suppress = true;
+            }
+            Err(warn) => {
+                self.warnings.push(warn);
+                self.in_image_suppress = false; // alt 텍스트를 폴백으로 보존
+            }
+        }
+    }
+
+    /// 이미지 경로를 해석·판독한다. 성공 시 (바이트, bin 이름, 표시폭, 표시높이).
+    /// 로컬 경로(절대 + base_dir 기준 상대)만 허용 — 원격 URL은 네트워크 의존 금지.
+    fn load_image(&self, dest_url: &str) -> Result<(Vec<u8>, String, i32, i32), String> {
+        let lower = dest_url.to_ascii_lowercase();
+        if lower.starts_with("http://") || lower.starts_with("https://") {
+            return Err(format!("원격 이미지 URL은 지원하지 않습니다(alt 보존): {dest_url}"));
+        }
+        // file: 스킴 접두는 벗겨서 로컬 경로로 다룬다.
+        let raw = dest_url.strip_prefix("file://").unwrap_or(dest_url);
+        let path = Path::new(raw);
+        let resolved: PathBuf = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            match &self.base_dir {
+                Some(dir) => dir.join(path),
+                None => {
+                    return Err(format!(
+                        "상대 경로 이미지의 기준 디렉터리를 알 수 없습니다(alt 보존): {dest_url}"
+                    ));
+                }
+            }
+        };
+        let data = std::fs::read(&resolved)
+            .map_err(|e| format!("이미지 읽기 실패 {}: {e} (alt 보존)", resolved.display()))?;
+        if data.is_empty() {
+            return Err(format!("빈 이미지 파일(alt 보존): {}", resolved.display()));
+        }
+        // 매직 바이트로 포맷 판별 — 미지(.bin)면 미지원으로 처리(alt 보존).
+        let (ext, _) = crate::image::image_kind(&data);
+        if ext == "bin" {
+            return Err(format!(
+                "지원하지 않는 이미지 형식(alt 보존): {}",
+                resolved.display()
+            ));
+        }
+        let (w, h) = crate::image::display_size(&data, &crate::image::ImageSize::Natural, BODY_WIDTH);
+        let name = format!("md_image{}.{ext}", self.bin_streams.len() + 1);
+        Ok((data, name, w, h))
+    }
+
     fn event(&mut self, event: Event<'_>) {
         // 각주/미주 정의 블록은 collect_note_bodies가 선수집했으므로 본문에서 건너뛴다
         // (깊이만 추적). skip 중에는 다른 이벤트를 무시한다.
@@ -683,13 +814,23 @@ impl Builder {
             Event::Start(Tag::Strikethrough) => self.strike = true,
             Event::End(TagEnd::Strikethrough) => self.strike = false,
             Event::Text(t) => {
-                if self.in_codeblock {
+                if self.in_image_suppress {
+                    // 이미지 임베드 성공 → alt 텍스트 억제(그림이 대체한다).
+                } else if self.in_codeblock {
                     self.push_code_text(&t); // 코드블록 텍스트의 \n → 줄바꿈
                 } else {
                     self.push_text(&t);
                 }
             }
-            Event::Code(t) => self.push_text(&t),
+            // ── 인라인 코드(`code`) → 함초롬돋움+음영 글자모양 run ──
+            Event::Code(t) => {
+                self.in_code = true;
+                self.push_text(&t);
+                self.in_code = false;
+            }
+            // ── 이미지(`![alt](경로)`) → 인라인 Picture + BinStream (로컬 경로만) ──
+            Event::Start(Tag::Image { dest_url, .. }) => self.start_image(&dest_url),
+            Event::End(TagEnd::Image) => self.in_image_suppress = false,
             // ── 각주/미주 참조(`[^N]`/`[^eN]`) → FOOTNOTE_ENDNOTE ExtCtrl + fn/en 컨트롤 ──
             Event::FootnoteReference(label) => self.push_footnote(&label),
             // ── 하이퍼링크: [텍스트](url) → %hlk 필드(FIELD_START + 파랑밑줄 텍스트 + FIELD_END) ──
@@ -1042,6 +1183,118 @@ mod tests {
         let has_ctrl = para.controls.iter().any(|c| matches!(c,
             Control::Generic(g) if g.ctrl_id == *b"fn  " && !g.paragraph_lists.is_empty()));
         assert!(has_ctrl, "각주 컨트롤+본문 존재");
+    }
+
+    /// 테스트용 최소 PNG(치수 헤더만) 파일을 쓰고 경로를 돌려준다.
+    fn write_png(dir: &std::path::Path, name: &str, w: u32, h: u32) -> std::path::PathBuf {
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.extend([0, 0, 0, 13]);
+        png.extend(b"IHDR");
+        png.extend(w.to_be_bytes());
+        png.extend(h.to_be_bytes());
+        png.extend([0u8; 8]);
+        let p = dir.join(name);
+        std::fs::write(&p, &png).unwrap();
+        p
+    }
+
+    /// GI-3: 로컬 이미지 `![alt](fig.png)` → 인라인 Picture + BinStream(자연 크기).
+    #[test]
+    fn 이미지_로컬_임베드() {
+        let dir = std::env::temp_dir().join("hwp-md-img-embed");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_png(&dir, "fig.png", 96, 48);
+        let doc = from_markdown_with(
+            "본문\n\n![대체텍스트](fig.png)\n",
+            &MarkdownImportOptions {
+                base_dir: Some(&dir),
+            },
+        );
+        assert_eq!(doc.bin_streams.len(), 1, "BinStream 1개 임베드");
+        let pic = doc.sections[0]
+            .paragraphs
+            .iter()
+            .flat_map(|p| &p.controls)
+            .find_map(|c| match c {
+                Control::Picture(p) => Some(p),
+                _ => None,
+            })
+            .expect("Picture 존재");
+        assert!(pic.treat_as_char, "인라인(글자처럼) 배치");
+        assert!(pic.extras.is_empty(), "writer 합성용 빈 extras");
+        assert!(doc.resolve_bin(&pic.bin_ref).is_some(), "bin_ref 해석");
+        assert_eq!(pic.width.0, 96 * 7200 / 96, "자연 크기(96px→7200)");
+        // 성공한 이미지의 alt 텍스트는 억제된다.
+        assert!(!doc.plain_text().contains("대체텍스트"), "alt 억제");
+    }
+
+    /// GI-3: 없는 파일·원격 URL·상대경로(기준 없음)는 경고 후 alt 텍스트를 보존한다.
+    #[test]
+    fn 이미지_실패는_alt_보존() {
+        let dir = std::env::temp_dir().join("hwp-md-img-fail");
+        std::fs::create_dir_all(&dir).unwrap();
+        // 없는 파일.
+        let d1 = from_markdown_with(
+            "![없음alt](nope.png)\n",
+            &MarkdownImportOptions {
+                base_dir: Some(&dir),
+            },
+        );
+        assert!(d1.bin_streams.is_empty(), "임베드 없음");
+        assert!(d1.plain_text().contains("없음alt"), "alt 보존");
+        // 원격 URL(네트워크 금지).
+        let d2 = from_markdown("![원격alt](https://example.com/a.png)\n");
+        assert!(d2.bin_streams.is_empty());
+        assert!(d2.plain_text().contains("원격alt"), "원격은 alt 보존");
+        // 상대경로 + 기준 디렉터리 없음.
+        let d3 = from_markdown("![상대alt](fig.png)\n");
+        assert!(d3.bin_streams.is_empty());
+        assert!(d3.plain_text().contains("상대alt"), "기준없음은 alt 보존");
+    }
+
+    /// GI-3 왕복: md(이미지)→IR→#8 exporter(media_dir) 재수출 시 이미지 데이터 보존.
+    #[test]
+    fn 이미지_왕복_exporter_데이터보존() {
+        let dir = std::env::temp_dir().join("hwp-md-img-rt");
+        std::fs::create_dir_all(&dir).unwrap();
+        let png_path = write_png(&dir, "rt.png", 32, 32);
+        let orig = std::fs::read(&png_path).unwrap();
+        let doc = from_markdown_with(
+            "![x](rt.png)\n",
+            &MarkdownImportOptions {
+                base_dir: Some(&dir),
+            },
+        );
+        let media = dir.join("out_media");
+        let _ = std::fs::remove_dir_all(&media);
+        let md = crate::markdown::to_markdown_with(
+            &doc,
+            &crate::markdown::MarkdownOptions {
+                media_dir: Some(&media),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(md.contains("!["), "이미지 참조 재수출: {md}");
+        let extracted = std::fs::read(media.join("image1.png")).expect("추출 이미지");
+        assert_eq!(extracted, orig, "추출 이미지 바이트 == 원본(무손실)");
+        let _ = std::fs::remove_dir_all(&media);
+    }
+
+    /// GI-4: 인라인 코드 `code` → 함초롬돋움(face_id=1) + 연회색 음영 글자모양 run.
+    #[test]
+    fn 인라인_코드_글자모양() {
+        let doc = from_markdown("이건 `let x = 1;` 코드다.\n");
+        let code_id = shapes::CODE;
+        let cs = &doc.header.char_shapes[code_id as usize];
+        assert_eq!(cs.face_ids[0], FONT_DOTUM, "함초롬돋움 face_id");
+        assert_eq!(cs.shade_color, 0x00F0_F0F0, "연회색 음영");
+        // 코드 텍스트가 CODE 글자모양 run으로 적재됐는지.
+        let para = &doc.sections[0].paragraphs[0];
+        let has_code_run = para.char_shape_runs.iter().any(|(_, id)| id.0 == code_id);
+        assert!(has_code_run, "CODE run 존재: {:?}", para.char_shape_runs);
+        // 함초롬돋움 글꼴이 테이블에 있다.
+        assert_eq!(doc.header.fonts[0][FONT_DOTUM as usize].name, "함초롬돋움");
     }
 
     /// push_text: 탭은 InlineCtrl(9)로, 그 외 C0 제어문자는 드롭, 일반 문자는 Text로.

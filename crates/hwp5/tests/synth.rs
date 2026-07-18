@@ -220,6 +220,65 @@ fn hwp5_numbering_id_0기반_경계왕복() {
     }
 }
 
+/// GI-3/GI-4 왕복: md(이미지+인라인 코드) → hwp5 저장 → 재읽기에서 Picture·bin·코드 글자모양 생존.
+#[test]
+fn md_이미지_코드_hwp5_왕복() {
+    use std::io::Write;
+    let dir = std::env::temp_dir().join("hwp5-md-imgcode");
+    std::fs::create_dir_all(&dir).unwrap();
+    // 최소 PNG(16×16 치수 헤더).
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend([0, 0, 0, 13]);
+    png.extend(b"IHDR");
+    png.extend(16u32.to_be_bytes());
+    png.extend(16u32.to_be_bytes());
+    png.extend([0u8; 8]);
+    let fig = dir.join("f.png");
+    std::fs::File::create(&fig).unwrap().write_all(&png).unwrap();
+
+    let doc = hwp_convert::from_markdown_with(
+        "본문 `let x = 1;` 코드와 이미지.\n\n![alt](f.png)\n",
+        &hwp_convert::MarkdownImportOptions {
+            base_dir: Some(&dir),
+        },
+    );
+    let out = tmp("md_imgcode.hwp");
+    let warnings = hwp5::write_document(&doc, &out, &hwp5::WriteOptions::default()).unwrap();
+    assert!(
+        !warnings.iter().any(|w| w.contains("DROP")),
+        "DROP 경고: {warnings:?}"
+    );
+    let reread = hwp5::read_document(&out).unwrap().document;
+
+    // 이미지 Picture + bin 데이터 생존.
+    let has_pic = reread.sections[0]
+        .paragraphs
+        .iter()
+        .any(|p| {
+            p.controls
+                .iter()
+                .any(|c| matches!(c, hwp_model::Control::Picture(_)))
+        });
+    assert!(has_pic, "이미지 Picture 왕복");
+    assert!(!reread.bin_streams.is_empty(), "bin_streams 왕복");
+
+    // 인라인 코드: 함초롬돋움(face_id=1) 글자모양 + 그걸 참조하는 run.
+    let code_ids: std::collections::HashSet<u16> = reread
+        .header
+        .char_shapes
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.face_ids[0] == 1)
+        .map(|(i, _)| i as u16)
+        .collect();
+    assert!(!code_ids.is_empty(), "코드 글자모양(함초롬돋움) 왕복");
+    let has_run = reread.sections[0]
+        .paragraphs
+        .iter()
+        .any(|p| p.char_shape_runs.iter().any(|(_, id)| code_ids.contains(&id.0)));
+    assert!(has_run, "코드 run 왕복");
+}
+
 /// 본문 탭이 md→hwp5 경로에서 8 WCHAR 인라인 컨트롤(코드 9)로 저장·복원돼야 한다.
 /// Text('\t')로 1 WCHAR만 나가면 한글이 코드 9를 인라인 컨트롤 선두로 오인해 뒤
 /// 7 WCHAR를 잘못 삼켜 파일이 깨진다(§3.2.3 표 6).

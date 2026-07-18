@@ -121,6 +121,60 @@ fn markdown_생성_왕복() {
     assert!(md_out.contains("| 1 | 2 |"), "{md_out}");
 }
 
+/// GI-3/GI-4 왕복: md(이미지+인라인 코드) → hwpx 저장 → 재읽기에서 Picture·bin·코드 글자모양 생존.
+#[test]
+fn md_이미지_코드_hwpx_왕복() {
+    use std::io::Write as _;
+    let dir = std::env::temp_dir().join("hwpx-md-imgcode");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend([0, 0, 0, 13]);
+    png.extend(b"IHDR");
+    png.extend(16u32.to_be_bytes());
+    png.extend(16u32.to_be_bytes());
+    png.extend([0u8; 8]);
+    let fig = dir.join("f.png");
+    std::fs::File::create(&fig).unwrap().write_all(&png).unwrap();
+
+    let doc = hwp_convert::from_markdown_with(
+        "본문 `let x = 1;` 코드와 이미지.\n\n![alt](f.png)\n",
+        &hwp_convert::MarkdownImportOptions {
+            base_dir: Some(&dir),
+        },
+    );
+    let out = tmp("md_imgcode.hwpx");
+    let warnings = hwpx::write_document(&doc, &out).unwrap();
+    assert!(!warnings.iter().any(|w| w.contains("DROP")), "{warnings:?}");
+
+    let reread = hwpx::read_document(&out).unwrap().document;
+    let has_pic = reread.sections[0]
+        .paragraphs
+        .iter()
+        .any(|p| {
+            p.controls
+                .iter()
+                .any(|c| matches!(c, hwp_model::Control::Picture(_)))
+        });
+    assert!(has_pic, "이미지 Picture 왕복");
+    assert!(!reread.bin_streams.is_empty(), "bin_streams 왕복");
+    let code_ids: std::collections::HashSet<u16> = reread
+        .header
+        .char_shapes
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.face_ids[0] == 1)
+        .map(|(i, _)| i as u16)
+        .collect();
+    assert!(!code_ids.is_empty(), "코드 글자모양(함초롬돋움) 왕복");
+    assert!(
+        reread.sections[0]
+            .paragraphs
+            .iter()
+            .any(|p| p.char_shape_runs.iter().any(|(_, id)| code_ids.contains(&id.0))),
+        "코드 run 왕복"
+    );
+}
+
 /// GI-1/GI-2 왕복 (b): md(각주·취소선·순서목록·중첩) → hwpx 저장 → 재읽기 → md.
 #[test]
 fn markdown_각주_취소선_목록_hwpx_완전왕복() {

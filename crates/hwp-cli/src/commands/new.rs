@@ -19,7 +19,13 @@ pub fn run(output: &Path, from: Option<&Path>, set_meta: &[String]) -> anyhow::R
                 hwp_convert::from_json(&text)
                     .map_err(|e| anyhow::anyhow!("JSON IR 파싱 실패 ({}): {e}", src.display()))?
             } else {
-                hwp_convert::from_markdown(&text)
+                // md 파일의 디렉터리를 상대 경로 이미지의 기준으로 넘긴다.
+                hwp_convert::from_markdown_with(
+                    &text,
+                    &hwp_convert::MarkdownImportOptions {
+                        base_dir: src.parent(),
+                    },
+                )
             }
         }
         None => hwp_convert::from_markdown(""),

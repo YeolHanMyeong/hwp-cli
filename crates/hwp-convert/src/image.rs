@@ -109,7 +109,7 @@ fn ext_of(path: &Path) -> Result<String, String> {
 }
 
 /// 표시 크기(HWPUNIT)를 계산한다. 자연 크기는 본문 폭(max_w) 초과 시 비례 축소.
-fn display_size(data: &[u8], size: &ImageSize, max_w: i32) -> (i32, i32) {
+pub(crate) fn display_size(data: &[u8], size: &ImageSize, max_w: i32) -> (i32, i32) {
     match size {
         ImageSize::Mm(w, h) => (
             (*w * MM_TO_HWPUNIT).round() as i32,
