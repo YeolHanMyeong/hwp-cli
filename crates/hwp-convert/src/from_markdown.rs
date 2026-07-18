@@ -1,14 +1,28 @@
 //! Markdown → IR.
 //!
-//! 매핑: 헤딩 → "개요 N" 스타일, 굵게/기울임 → 문자 모양 변형,
-//! GFM 표 → Table 컨트롤, 목록 → "• " 접두 문단, 줄바꿈 → CharCtrl(10).
+//! 매핑: 헤딩 → "개요 N" 스타일, 굵게/기울임/취소선 → 문자 모양 변형,
+//! GFM 표 → Table 컨트롤, 순서·글머리 목록 → 머리(NUMBER/BULLET) 문단,
+//! 각주/미주(`[^N]`/`[^eN]`) → fn/en 컨트롤, 줄바꿈 → CharCtrl(10).
+//!
+//! 내보내기(markdown.rs)와의 대칭이 왕복 폐쇄의 기준이다:
+//! - 취소선: 내보내기가 `CharShape.strike`를 읽으므로 strike=true 전용 문자모양을 만든다.
+//! - 각주/미주: 내보내기가 `FOOTNOTE_ENDNOTE` ExtCtrl + `fn `/`en ` GenericControl의
+//!   `paragraph_lists`를 읽으므로 그 구조를 그대로 합성한다.
+//! - 목록: 내보내기가 `ParaShape.head_type()/head_level()/numbering_id`와
+//!   `numbering_levels`/`bullet_chars`로 마커를 그리므로 그 정의를 만든다.
+
+use std::collections::HashMap;
 
 use hwp_model::{
     BorderFill, BorderFillId, BorderLine, Cell, CharShape, CharShapeId, Control, DocMeta, Document,
-    FaceName, HwpChar, HwpUnit, LANG_COUNT, ParaShape, ParaShapeId, Paragraph, Section, Style,
-    StyleId, Table,
+    FaceName, GenericControl, HwpChar, HwpUnit, LANG_COUNT, NumLevel, ParaShape, ParaShapeId,
+    Paragraph, ParagraphList, Section, Style, StyleId, Table, ctrl_char,
 };
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+
+/// default_header가 만드는 기본 문단 모양 개수(인덱스 0~4). 목록용 문단 모양은
+/// 이 뒤(5~)에 붙는다.
+const BASE_PARA_SHAPES: u16 = 5;
 
 /// 문자 모양 ID 배치 (default_header와 일치해야 함).
 mod shapes {
@@ -20,6 +34,11 @@ mod shapes {
     pub const HEADING_BASE: u16 = 4;
     /// 하이퍼링크 표시 텍스트(파랑 + 밑줄)
     pub const HYPERLINK: u16 = 10;
+    /// 취소선 조합(본문/굵게/기울임/굵게+기울임 + strike) → 11~14
+    pub const STRIKE: u16 = 11;
+    pub const BOLD_STRIKE: u16 = 12;
+    pub const ITALIC_STRIKE: u16 = 13;
+    pub const BOLD_ITALIC_STRIKE: u16 = 14;
 }
 
 /// 테두리/배경 ID 배치: 1·2 = 무테두리(기본/참조용), 3 = 실선 0.12mm.
@@ -87,6 +106,19 @@ pub fn default_header() -> hwp_model::DocHeader {
             ..base.clone()
         },
     ];
+    // 11~14 취소선 조합. 내보내기(markdown.rs)는 CharShape.strike(명시 플래그)로
+    // 취소선을 감지하므로, `~~`가 왕복하려면 strike=true 전용 문자모양이 필요하다.
+    // hwp5는 strike를 바이트로 쓰지 않아(무영향), hwpx는 <hh:strikeout SOLID>로 방출.
+    let cs_strike = |bold: bool, italic: bool| CharShape {
+        base_size: body,
+        attr: u32::from(bold) << 1 | u32::from(italic),
+        strike: true,
+        ..base.clone()
+    };
+    header.char_shapes.push(cs_strike(false, false)); // 11 취소선
+    header.char_shapes.push(cs_strike(true, false)); // 12 굵게+취소선
+    header.char_shapes.push(cs_strike(false, true)); // 13 기울임+취소선
+    header.char_shapes.push(cs_strike(true, true)); // 14 굵게+기울임+취소선
 
     // 탭 정의 — 한글 기본 좌/중/우 자동 탭 3개. 정상 표본(hello_world 등
     // 5.1.0.1)은 전부 이 3개를 가지며, 모든 PARA_SHAPE가 tab_def_id=0 을
@@ -233,11 +265,22 @@ pub fn default_header() -> hwp_model::DocHeader {
 pub fn from_markdown(md: &str) -> Document {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
-    let parser = Parser::new_ext(md, options);
+    // 취소선(`~~`)·각주(`[^N]`)를 파싱한다. 작업목록(TASKLISTS)은 대응 IR 의미가 없어 제외.
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_FOOTNOTES);
+    // 각주 참조 시점에 정의 본문이 필요하므로 이벤트를 한 번에 모아 두 번 훑는다.
+    let events: Vec<Event> = Parser::new_ext(md, options).collect();
 
-    let mut b = Builder::default();
-    for event in parser {
-        b.event(event);
+    // 1) 각주/미주 정의 본문을 미리 렌더한다(참조에서 재사용).
+    let note_bodies = collect_note_bodies(&events);
+
+    // 2) 본문 처리.
+    let mut b = Builder {
+        note_bodies,
+        ..Builder::default()
+    };
+    for event in &events {
+        b.event(event.clone());
     }
     b.flush_paragraph();
 
@@ -247,13 +290,20 @@ pub fn from_markdown(md: &str) -> Document {
     }
     // 첫 문단에 구역/단 정의 주입 — hwp5/한글 호환의 전제 조건
     inject_section_controls(&mut b.paragraphs[0]);
+
+    // 목록에서 만든 문단 모양·번호/글머리 정의를 헤더에 합친다.
+    let mut header = default_header();
+    header.para_shapes.extend(b.extra_para_shapes);
+    header.numbering_levels = b.numbering_levels;
+    header.bullet_chars = b.bullet_chars;
+
     Document {
         meta: DocMeta {
             source_format: "markdown".to_string(),
             source_version: String::new(),
         },
         metadata: Default::default(),
-        header: default_header(),
+        header,
         sections: vec![Section {
             paragraphs: b.paragraphs,
             extras: Vec::new(),
@@ -261,6 +311,70 @@ pub fn from_markdown(md: &str) -> Document {
         bin_streams: Vec::new(),
         hwpx_settings_xml: None,
         hwpx_version_xml: None,
+    }
+}
+
+/// 각주/미주 라벨이 미주(`eN`)인지 — 내보내기가 미주를 `[^eN]`으로 쓰는 규약과 대칭.
+fn is_endnote_label(label: &str) -> bool {
+    label
+        .strip_prefix('e')
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// 각주/미주 정의(`[^N]: 본문`) 블록을 라벨→본문 문단으로 미리 렌더한다.
+/// 참조(`[^N]`)가 정의보다 먼저 등장할 수 있어 선수집이 필요하다.
+fn collect_note_bodies(events: &[Event]) -> HashMap<String, Vec<Paragraph>> {
+    let mut map = HashMap::new();
+    let mut i = 0;
+    while i < events.len() {
+        let Event::Start(Tag::FootnoteDefinition(label)) = &events[i] else {
+            i += 1;
+            continue;
+        };
+        // 대응하는 End까지의 내부 이벤트를 추린다(정의는 중첩되지 않지만 깊이로 방어).
+        let mut depth = 1usize;
+        let start = i + 1;
+        let mut j = start;
+        while j < events.len() {
+            match &events[j] {
+                Event::Start(Tag::FootnoteDefinition(_)) => depth += 1,
+                Event::End(TagEnd::FootnoteDefinition) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        let mut sub = Builder::default();
+        for ev in &events[start..j] {
+            sub.event(ev.clone());
+        }
+        sub.flush_paragraph();
+        let mut body = sub.paragraphs;
+        if body.is_empty() {
+            body.push(note_body_para());
+        }
+        // 각주 본문은 목록 문단모양(합쳐지지 않는 서브빌더 산출)을 참조할 수 없으므로
+        // 기본 본문 모양으로 되돌린다(각주 안 목록은 v1 미지원 — 텍스트만 보존).
+        for p in &mut body {
+            if p.para_shape.0 >= BASE_PARA_SHAPES {
+                p.para_shape = ParaShapeId(2);
+            }
+        }
+        map.insert(label.to_string(), body);
+        i = j + 1;
+    }
+    map
+}
+
+/// 빈 각주/미주 본문 문단(문자 모양 run 1개 필수 불변식 충족).
+fn note_body_para() -> Paragraph {
+    Paragraph {
+        char_shape_runs: vec![(0, CharShapeId(0))],
+        ..Paragraph::default()
     }
 }
 
@@ -275,6 +389,7 @@ struct Builder {
     style: u16,
     bold: bool,
     italic: bool,
+    strike: bool,              // 취소선 구간(`~~`)
     in_link: bool,             // 하이퍼링크 표시 텍스트 구간(파랑+밑줄)
     link_end: Option<HwpChar>, // 링크 종료 시 방출할 FIELD_END 문자
     in_blockquote: u32,        // 인용문 중첩 깊이(>0이면 인용 문단)
@@ -282,8 +397,23 @@ struct Builder {
     heading: Option<u16>,      // 1..=6
     // 표 수집 상태
     table: Option<TableBuilder>,
-    list_depth: usize,
-    pending_bullet: bool,
+    // 목록 상태 — 수준별 프레임 스택(중첩), 항목 문단에 머리 문단모양을 부여.
+    list_stack: Vec<ListFrame>,
+    // 목록에서 만든 문단 모양(헤더 인덱스 BASE_PARA_SHAPES~)·번호/글머리 정의(0~).
+    extra_para_shapes: Vec<ParaShape>,
+    numbering_levels: Vec<Vec<NumLevel>>,
+    bullet_chars: Vec<char>,
+    // 각주/미주: 선수집한 정의 본문(라벨→문단) + 정의 블록 건너뛰기 깊이.
+    note_bodies: HashMap<String, Vec<Paragraph>>,
+    skip_note_def: u32,
+}
+
+/// 목록 한 수준(프레임). `Start(List)`마다 하나 생기고 항목이 이 머리 문단모양을 쓴다.
+struct ListFrame {
+    /// 이 목록 항목 문단이 참조할 문단 모양 인덱스.
+    para_shape_id: u16,
+    /// 지금 이 수준의 항목이 열려 있는지(문단 flush 시 머리 부여 여부).
+    item_open: bool,
 }
 
 #[derive(Default)]
@@ -301,11 +431,15 @@ impl Builder {
         if let Some(level) = self.heading {
             return shapes::HEADING_BASE + level - 1;
         }
-        match (self.bold, self.italic) {
-            (false, false) => shapes::NORMAL,
-            (true, false) => shapes::BOLD,
-            (false, true) => shapes::ITALIC,
-            (true, true) => shapes::BOLD_ITALIC,
+        match (self.bold, self.italic, self.strike) {
+            (false, false, false) => shapes::NORMAL,
+            (true, false, false) => shapes::BOLD,
+            (false, true, false) => shapes::ITALIC,
+            (true, true, false) => shapes::BOLD_ITALIC,
+            (false, false, true) => shapes::STRIKE,
+            (true, false, true) => shapes::BOLD_STRIKE,
+            (false, true, true) => shapes::ITALIC_STRIKE,
+            (true, true, true) => shapes::BOLD_ITALIC_STRIKE,
         }
     }
 
@@ -378,8 +512,12 @@ impl Builder {
         if runs.is_empty() {
             runs.push((0, CharShapeId(self.current_shape())));
         }
-        // 코드블록→4(회색 배경), 인용→3(들여쓰기+막대), 제목→1, 표 셀→0(간격 없음), 본문→2.
-        let para_shape = if self.in_codeblock {
+        // 목록 항목이 열려 있으면 머리(NUMBER/BULLET) 문단모양을 우선한다.
+        // 그 외: 코드블록→4(회색 배경), 인용→3(들여쓰기+막대), 제목→1,
+        // 표 셀→0(간격 없음), 본문→2.
+        let para_shape = if let Some(id) = self.active_list_para_shape() {
+            id
+        } else if self.in_codeblock {
             4
         } else if self.in_blockquote > 0 {
             3
@@ -407,7 +545,123 @@ impl Builder {
         }
     }
 
+    /// 지금 열려 있는 목록 항목의 머리 문단모양(없으면 None).
+    fn active_list_para_shape(&self) -> Option<u16> {
+        self.list_stack
+            .last()
+            .filter(|f| f.item_open)
+            .map(|f| f.para_shape_id)
+    }
+
+    /// 목록 진입 — 상위 항목 문단을 닫고 이 수준의 머리 문단모양·정의를 만든다.
+    fn start_list(&mut self, start: Option<u64>) {
+        // 상위 항목의 문단(예: 중첩 앞 "second")을 먼저 닫는다.
+        self.flush_paragraph();
+        let level = (self.list_stack.len() as u16 + 1).min(7);
+        let para_shape_id = match start {
+            // 순서 목록: 번호 정의(내보내기가 numbering_levels로 마커 그림) + NUMBER 머리.
+            Some(s) => {
+                let def_id = self.numbering_levels.len() as u16;
+                let mut levels = vec![NumLevel::default(); 7];
+                // 이 목록 수준의 시작 번호를 보존한다(내보내기가 start를 반영).
+                levels[(level as usize - 1).min(6)].start = s.max(1) as u32;
+                self.numbering_levels.push(levels);
+                self.push_list_para_shape(2, level, def_id)
+            }
+            // 글머리표 목록: 불릿 문자 + BULLET 머리.
+            None => {
+                let def_id = self.bullet_chars.len() as u16;
+                self.bullet_chars.push('•');
+                self.push_list_para_shape(3, level, def_id)
+            }
+        };
+        self.list_stack.push(ListFrame {
+            para_shape_id,
+            item_open: false,
+        });
+    }
+
+    fn end_list(&mut self) {
+        self.flush_paragraph();
+        self.list_stack.pop();
+    }
+
+    /// 목록 항목용 문단 모양을 만들어 인덱스를 돌려준다.
+    /// head_type: 2=번호, 3=글머리표. level 1~7 → 머리 수준(내보내기가 중첩 감지에 사용).
+    fn push_list_para_shape(&mut self, head_type: u32, level: u16, def_id: u16) -> u16 {
+        let idx = BASE_PARA_SHAPES + self.extra_para_shapes.len() as u16;
+        // 수준당 들여쓰기(HWPUNIT) — 한글에서 중첩이 눈에 띄게. 내보내기의 중첩 감지는
+        // head_level 기준이라 왕복 폐쇄에는 무영향(여백은 실기 표시용).
+        let step = 2000i32;
+        self.extra_para_shapes.push(ParaShape {
+            // 정상 본문 문단모양(0x180: 한글 줄나눔+줄격자) + 왼쪽 정렬 + 머리 종류/수준.
+            attr1: 0x180 | (1 << 2) | (head_type << 23) | (u32::from(level) << 25),
+            margin_left: i32::from(level) * step,
+            indent: -step, // 내어쓰기: 마커와 본문 정렬
+            line_spacing_old: 160,
+            line_spacing: 160,
+            border_fill_id: 2,
+            numbering_id: def_id,
+            ..ParaShape::default()
+        });
+        idx
+    }
+
+    /// 각주/미주 참조를 현재 문단에 심는다 — FOOTNOTE_ENDNOTE ExtCtrl(앵커) +
+    /// fn/en GenericControl(본문 문단 리스트). 내보내기가 이 구조를 읽어 `[^N]`을 낸다.
+    fn push_footnote(&mut self, label: &str) {
+        let ctrl_id = if is_endnote_label(label) {
+            *b"en  "
+        } else {
+            *b"fn  "
+        };
+        let body = self
+            .note_bodies
+            .get(label)
+            .cloned()
+            .unwrap_or_else(|| vec![note_body_para()]);
+        // 앵커: ExtCtrl(code 17). payload 12B 앞 4B = 역순 ctrl_id(다른 앵커와 동일 규약).
+        let mut payload = vec![0u8; 12];
+        let mut rev = ctrl_id;
+        rev.reverse();
+        payload[..4].copy_from_slice(&rev);
+        let idx = self.controls.len() as u32;
+        self.chars.push(HwpChar::ExtCtrl {
+            code: ctrl_char::FOOTNOTE_ENDNOTE,
+            ctrl_id,
+            payload,
+            ctrl_index: Some(idx), // flush의 relink_ctrl_index가 최종 재배치
+        });
+        self.wchar_pos += 8;
+        self.controls.push(Control::Generic(GenericControl {
+            ctrl_id,
+            data: Vec::new(),
+            paragraph_lists: vec![ParagraphList {
+                header_data: Vec::new(),
+                paragraphs: body,
+            }],
+            extras: Vec::new(),
+            raw_children: Vec::new(),
+            gso_shapes: Vec::new(),
+            equation: None,
+            column_def: None,
+        }));
+    }
+
     fn event(&mut self, event: Event<'_>) {
+        // 각주/미주 정의 블록은 collect_note_bodies가 선수집했으므로 본문에서 건너뛴다
+        // (깊이만 추적). skip 중에는 다른 이벤트를 무시한다.
+        if let Event::Start(Tag::FootnoteDefinition(_)) = &event {
+            self.skip_note_def += 1;
+            return;
+        }
+        if let Event::End(TagEnd::FootnoteDefinition) = &event {
+            self.skip_note_def = self.skip_note_def.saturating_sub(1);
+            return;
+        }
+        if self.skip_note_def > 0 {
+            return;
+        }
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 self.flush_paragraph();
@@ -420,22 +674,15 @@ impl Builder {
                 self.heading = None;
                 self.style = 0;
             }
-            Event::Start(Tag::Paragraph) => {
-                if self.pending_bullet {
-                    self.push_text("• ");
-                    self.pending_bullet = false;
-                }
-            }
+            Event::Start(Tag::Paragraph) => {}
             Event::End(TagEnd::Paragraph) => self.flush_paragraph(),
             Event::Start(Tag::Strong) => self.bold = true,
             Event::End(TagEnd::Strong) => self.bold = false,
             Event::Start(Tag::Emphasis) => self.italic = true,
             Event::End(TagEnd::Emphasis) => self.italic = false,
+            Event::Start(Tag::Strikethrough) => self.strike = true,
+            Event::End(TagEnd::Strikethrough) => self.strike = false,
             Event::Text(t) => {
-                if self.pending_bullet {
-                    self.push_text("• ");
-                    self.pending_bullet = false;
-                }
                 if self.in_codeblock {
                     self.push_code_text(&t); // 코드블록 텍스트의 \n → 줄바꿈
                 } else {
@@ -443,6 +690,8 @@ impl Builder {
                 }
             }
             Event::Code(t) => self.push_text(&t),
+            // ── 각주/미주 참조(`[^N]`/`[^eN]`) → FOOTNOTE_ENDNOTE ExtCtrl + fn/en 컨트롤 ──
+            Event::FootnoteReference(label) => self.push_footnote(&label),
             // ── 하이퍼링크: [텍스트](url) → %hlk 필드(FIELD_START + 파랑밑줄 텍스트 + FIELD_END) ──
             Event::Start(Tag::Link { dest_url, .. }) => {
                 let (start, _end, control) = crate::field::hyperlink_field_parts(&dest_url);
@@ -482,12 +731,19 @@ impl Builder {
                 self.flush_paragraph();
                 self.in_codeblock = false;
             }
-            Event::Start(Tag::List(_)) => self.list_depth += 1,
-            Event::End(TagEnd::List(_)) => self.list_depth -= 1,
-            Event::Start(Tag::Item) => self.pending_bullet = true,
+            // ── 순서/글머리 목록 → 머리(NUMBER/BULLET) 문단, 중첩은 수준으로 ──
+            Event::Start(Tag::List(start)) => self.start_list(start),
+            Event::End(TagEnd::List(_)) => self.end_list(),
+            Event::Start(Tag::Item) => {
+                if let Some(f) = self.list_stack.last_mut() {
+                    f.item_open = true;
+                }
+            }
             Event::End(TagEnd::Item) => {
                 self.flush_paragraph();
-                self.pending_bullet = false;
+                if let Some(f) = self.list_stack.last_mut() {
+                    f.item_open = false;
+                }
             }
             // ── GFM 표 ──
             Event::Start(Tag::Table(_)) => {
@@ -715,6 +971,77 @@ mod tests {
         let h = default_header();
         assert_eq!(h.char_shapes[0].base_size, 1000); // 본문 10pt
         assert_eq!(h.char_shapes[4].base_size, 1800); // H1 = 본문 × 1.8
+    }
+
+    /// GI-1/GI-2 왕복 (a): md → IR → md 에서 각주·취소선·순서목록(start)·중첩이 보존.
+    #[test]
+    fn 왕복_각주_취소선_순서목록_중첩() {
+        let md = "\
+문단에 각주[^1]가 있다.
+
+~~지운 글~~ 과 보통 글.
+
+1. 첫째
+2. 둘째
+   - 안쪽 가
+   - 안쪽 나
+3. 셋째
+
+[^1]: 각주 본문이다.
+";
+        let doc = from_markdown(md);
+        let out = crate::markdown::to_markdown(&doc);
+
+        // 각주: 본문 마커 + 문서 끝 정의.
+        assert!(out.contains("[^1]"), "각주 마커: {out}");
+        assert!(out.contains("[^1]: 각주 본문이다."), "각주 정의: {out}");
+        // 취소선.
+        assert!(out.contains("~~지운 글~~"), "취소선: {out}");
+        // 순서 목록(1./2./3.).
+        assert!(out.contains("1. 첫째"), "순서1: {out}");
+        assert!(out.contains("2. 둘째"), "순서2: {out}");
+        assert!(out.contains("3. 셋째"), "순서3: {out}");
+        // 중첩 글머리 목록(들여쓰기된 `-`).
+        assert!(out.contains("- 안쪽 가"), "중첩 불릿: {out}");
+        let idx = out.find("안쪽 가").unwrap();
+        let line_start = out[..idx].rfind('\n').map_or(0, |p| p + 1);
+        assert!(
+            out[line_start..idx].starts_with(' '),
+            "중첩은 들여쓰기: {out}"
+        );
+    }
+
+    /// 순서 목록 start 보존: `3.`으로 시작하면 왕복 후에도 `3.`.
+    #[test]
+    fn 왕복_순서목록_start_보존() {
+        let doc = from_markdown("3. 셋\n4. 넷\n");
+        let out = crate::markdown::to_markdown(&doc);
+        assert!(out.contains("3. 셋"), "start=3 보존: {out}");
+        assert!(out.contains("4. 넷"), "다음 번호: {out}");
+    }
+
+    /// 미주(`[^eN]`)도 대칭 왕복.
+    #[test]
+    fn 왕복_미주() {
+        let doc = from_markdown("본문[^e1] 끝.\n\n[^e1]: 미주 본문.\n");
+        let out = crate::markdown::to_markdown(&doc);
+        assert!(out.contains("[^e1]"), "미주 마커: {out}");
+        assert!(out.contains("[^e1]: 미주 본문."), "미주 정의: {out}");
+    }
+
+    /// 각주 컨트롤이 fn GenericControl + FOOTNOTE_ENDNOTE 앵커로 합성되는지(구조 단언).
+    #[test]
+    fn 각주_컨트롤_구조() {
+        let doc = from_markdown("가[^1]나\n\n[^1]: 각주.\n");
+        let para = &doc.sections[0].paragraphs[0];
+        let has_anchor = para.chars.iter().any(|c| {
+            matches!(c, HwpChar::ExtCtrl { code, ctrl_id, .. }
+                if *code == hwp_model::ctrl_char::FOOTNOTE_ENDNOTE && ctrl_id == b"fn  ")
+        });
+        assert!(has_anchor, "각주 앵커 존재");
+        let has_ctrl = para.controls.iter().any(|c| matches!(c,
+            Control::Generic(g) if g.ctrl_id == *b"fn  " && !g.paragraph_lists.is_empty()));
+        assert!(has_ctrl, "각주 컨트롤+본문 존재");
     }
 
     /// push_text: 탭은 InlineCtrl(9)로, 그 외 C0 제어문자는 드롭, 일반 문자는 Text로.

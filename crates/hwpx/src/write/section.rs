@@ -371,6 +371,13 @@ fn write_paragraph(
                         write_gso(out, doc, g, ids, bins, preserve_linesegs, warnings);
                         run_shapes += count_shape_tags(&out[before..]);
                     }
+                    Control::Generic(g) if g.ctrl_id == *b"fn  " || g.ctrl_id == *b"en  " => {
+                        // 각주/미주 — <hp:footNote>/<hp:endNote> + 본문 subList. reader는
+                        // 속성을 무시하고 subList 문단만 수집하므로 표준 속성으로 방출한다.
+                        open_run!(cur_shape);
+                        flush_text(out, &mut text_buf, &mut pending_tabs);
+                        write_foot_end_note(out, doc, g, ids, bins, preserve_linesegs, warnings);
+                    }
                     Control::Generic(g) => {
                         warnings.push(format!(
                             "DROP: hwpx 쓰기 미지원 컨트롤 드롭: {:?}",
@@ -671,6 +678,50 @@ fn write_header_footer(
     let _ = write!(
         out,
         r##"<hp:ctrl><hp:{el} id="{}" applyPageType="BOTH">"##,
+        ids.next()
+    );
+    for list in &g.paragraph_lists {
+        out.push_str(
+            r##"<hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" textHeight="0" hasTextRef="0" hasNumRef="0">"##,
+        );
+        for para in &list.paragraphs {
+            write_paragraph(
+                out,
+                doc,
+                para,
+                ids,
+                bins,
+                false,
+                preserve_linesegs,
+                warnings,
+            );
+        }
+        out.push_str("</hp:subList>");
+    }
+    let _ = write!(out, "</hp:{el}></hp:ctrl>");
+}
+
+/// 각주/미주 — `<hp:footNote>`/`<hp:endNote>` + 본문 `<hp:subList>`.
+/// reader(section.rs)는 `footNote`/`endNote` 요소를 `fn `/`en ` GenericControl로
+/// 되읽고 subList 문단을 paragraph_lists로 수집한다 — 속성은 무시하므로 표준값을 쓴다.
+#[allow(clippy::too_many_arguments)]
+fn write_foot_end_note(
+    out: &mut String,
+    doc: &Document,
+    g: &GenericControl,
+    ids: &mut IdSeq,
+    bins: &mut BinCollector,
+    preserve_linesegs: bool,
+    warnings: &mut Vec<String>,
+) {
+    let el = if g.ctrl_id == *b"fn  " {
+        "footNote"
+    } else {
+        "endNote"
+    };
+    let _ = write!(
+        out,
+        r##"<hp:ctrl><hp:{el} number="0" suffixChar="" prefixChar="" instId="{}">"##,
         ids.next()
     );
     for list in &g.paragraph_lists {

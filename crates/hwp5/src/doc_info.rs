@@ -123,10 +123,12 @@ fn parse_id_mapping_child(
                 .push(parse_numbering_levels(&node.data));
         }
         tag::BULLET => {
-            // 글머리 문자 = BULLET offset+8의 WCHAR(UTF-16LE).
+            // 글머리 문자 = BULLET **offset 12**의 WCHAR(UTF-16LE) — 정품 실측(사업계획서
+            // 전수). [0..8]=문단 머리 정보, [8..12]=번호 글자모양 id(0xFFFFFFFF), [12..14]=문자.
+            // (스펙 md 표42의 오프셋 8은 오답 — 그 위치는 글자모양 id의 하위 워드다.)
             let ch = node
                 .data
-                .get(8..10)
+                .get(12..14)
                 .map(|b| u16::from_le_bytes([b[0], b[1]]))
                 .and_then(|u| char::from_u32(u32::from(u)))
                 .filter(|c| !c.is_control())
@@ -274,7 +276,17 @@ fn parse_para_shape(data: &[u8]) -> Result<ParaShape> {
     let spacing_bottom = r.read_i32()?;
     let line_spacing_old = r.read_i32()?;
     let tab_def_id = r.read_u16()?;
-    let numbering_id = r.read_u16()?;
+    // 번호/글머리 머리(head_type 2/3)의 on-disk id는 1-기반(스펙 §4.2.10, 0=none).
+    // IR 규약은 0-기반(numbering_levels/bullet_chars 인덱스)이므로 경계에서 -1 정규화한다.
+    // 개요(1)·머리없음(0)은 다른 참조 체계라 그대로 둔다. emit_para_shape가 쓰기 시 +1로
+    // 복원하므로 hwp5 왕복은 무손실이다(정품 문단모양은 head 2/3면 항상 id≥1).
+    let numbering_id_raw = r.read_u16()?;
+    let head_type = ((attr1 >> 23) & 0x3) as u8;
+    let numbering_id = if matches!(head_type, 2 | 3) {
+        numbering_id_raw.saturating_sub(1)
+    } else {
+        numbering_id_raw
+    };
     let border_fill_id = r.read_u16()?;
     let mut border_offsets = [0i16; 4];
     for v in &mut border_offsets {

@@ -194,6 +194,11 @@ pub struct ParaShape {
     /// 줄간격 (5.0.2.5 미만에서 사용)
     pub line_spacing_old: i32,
     pub tab_def_id: u16,
+    /// 번호(head_type 2)·글머리(3) 정의 참조 — **IR 규약: 0-기반 인덱스**
+    /// (`numbering_levels`/`bullet_chars`의 인덱스). 포맷 경계에서 ±1로 변환한다:
+    /// hwp5는 on-disk가 1-기반이라 read에서 -1(`doc_info.rs`), write에서 +1(`write.rs`);
+    /// hwpx는 idRef=numbering_id+1로 방출하고 read가 다시 0-기반으로 정규화한다.
+    /// (head_type 0 없음·1 개요는 다른 참조 체계라 변환하지 않는다.)
     pub numbering_id: u16,
     pub border_fill_id: u16,
     /// 테두리 여백 (좌/우/위/아래)

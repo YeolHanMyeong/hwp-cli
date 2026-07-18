@@ -121,6 +121,48 @@ fn markdown_생성_왕복() {
     assert!(md_out.contains("| 1 | 2 |"), "{md_out}");
 }
 
+/// GI-1/GI-2 왕복 (b): md(각주·취소선·순서목록·중첩) → hwpx 저장 → 재읽기 → md.
+#[test]
+fn markdown_각주_취소선_목록_hwpx_완전왕복() {
+    let md = "\
+문단에 각주[^1]가 있다.
+
+~~지운 글~~ 과 보통 글.
+
+1. 첫째
+2. 둘째
+   - 안쪽 가
+   - 안쪽 나
+3. 셋째
+
+[^1]: 각주 본문이다.
+";
+    let doc = hwp_convert::from_markdown(md);
+    let out = tmp("from_md_notes.hwpx");
+    let warnings = hwpx::write_document(&doc, &out).unwrap();
+    // 각주·목록은 DROP 경고 없이 방출돼야 한다.
+    assert!(
+        !warnings.iter().any(|w| w.contains("DROP")),
+        "DROP 경고: {warnings:?}"
+    );
+
+    let reread = hwpx::read_document(&out).unwrap().document;
+    // 각주 컨트롤이 hwpx 왕복에서 fn GenericControl로 되살아난다.
+    let has_fn = reread.sections[0].paragraphs.iter().any(|p| {
+        p.controls.iter().any(|c| matches!(c,
+            hwp_model::Control::Generic(g) if g.ctrl_id == *b"fn  " && !g.paragraph_lists.is_empty()))
+    });
+    assert!(has_fn, "각주 컨트롤 왕복");
+
+    let md_out = hwp_convert::to_markdown(&reread);
+    assert!(md_out.contains("[^1]"), "각주 마커: {md_out}");
+    assert!(md_out.contains("[^1]: 각주 본문이다."), "각주 정의: {md_out}");
+    assert!(md_out.contains("~~지운 글~~"), "취소선: {md_out}");
+    assert!(md_out.contains("1. 첫째"), "순서1: {md_out}");
+    assert!(md_out.contains("3. 셋째"), "순서3: {md_out}");
+    assert!(md_out.contains("- 안쪽 가"), "중첩 불릿: {md_out}");
+}
+
 /// 본문 탭이 hwpx에서 `<hp:t>` **안**의 중첩 `<hp:tab width leader type/>`(정품 mixed
 /// content)로 방출되고 raw 0x09가 절대 없어야 한다. t 밖 형제 bare 탭은 한글이 폭 0으로
 /// 무시하고(D3 밀착), raw 0x09를 t 안에 그대로 두면 한글이 파일을 열지 못한다(D3 먹통).

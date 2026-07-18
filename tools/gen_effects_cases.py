@@ -380,12 +380,15 @@ def c6_numbering(dest):
         {"start": 5, "fmt": "Digit", "template": "제^1조."}
     ]]
     # 각 조항 문단 para_shape 에 번호 머리(NUMBER)와 numbering_id 를 표기(IR 의미 보존).
+    # numbering_id 는 numbering_levels 인덱스(0-기반). 첫 번호 정의(위 index 0)를 가리키므로 0.
+    # (writer 는 idRef=numbering_id+1 로 OWPML 1-기반 id 로 방출하고, reader 가 다시 0-기반으로
+    # 정규화한다 — 왕복이 0-기반으로 닫힌다.)
     for needle in ("첫째 조항", "둘째 조항", "셋째 조항"):
         p = find_para(ir, needle)
         src = p["para_shape"]
         np = copy.deepcopy(ir["header"]["para_shapes"][src])
         np["attr1"] = np.get("attr1", 0) | (2 << 23) | (1 << 25)  # head_type=NUMBER, level1
-        np["numbering_id"] = 1
+        np["numbering_id"] = 0
         nid = len(ir["header"]["para_shapes"])
         ir["header"]["para_shapes"].append(np)
         p["para_shape"] = nid
@@ -394,6 +397,17 @@ def c6_numbering(dest):
     ok, _ = validate_ok(out)
     if not ok:
         raise Fail("validate 실패")
+    # XML 수준 배선 검증: 산출 header.xml의 NUMBER 머리 idRef가 실제 방출된 numbering id를
+    # 가리켜야 한다(dangling 금지). 0-기반 numbering_id=0 → idRef=1 → <hh:numbering id="1">.
+    with zipfile.ZipFile(out) as z:
+        hx = z.read("Contents/header.xml").decode("utf-8")
+    num_ids = set(re.findall(r'<hh:numbering id="(\d+)"', hx))
+    head_refs = re.findall(r'<hh:heading type="NUMBER" idRef="(\d+)"', hx)
+    if not head_refs:
+        raise Fail("header.xml에 NUMBER 머리 문단 없음")
+    dangling = [ref for ref in head_refs if ref not in num_ids]
+    if dangling:
+        raise Fail(f"번호 머리 idRef dangling(미정의): {dangling} not in {sorted(num_ids)}")
     r = reread(out)
     lv = r["header"].get("numbering_levels") or [[]]
     if not lv or not lv[0]:
@@ -401,7 +415,8 @@ def c6_numbering(dest):
     n0 = lv[0][0]
     if n0.get("template") != "제^1조." or n0.get("start") != 5:
         raise Fail(f"번호형식 소실: {n0}")
-    # 재읽기에서 각 조항 문단의 heading 링크(head_type=NUMBER, numbering_id) 보존 확인.
+    # 재읽기에서 각 조항 문단의 heading 링크가 살아 있고, numbering_id 가 사용자 번호
+    # 정의('제^1조.')를 실제로 가리키는지(0-기반 인덱스로 해소되는지) 확인한다.
     shapes = r["header"]["para_shapes"]
     for needle in ("첫째 조항", "둘째 조항", "셋째 조항"):
         p = find_para(r, needle)
@@ -409,9 +424,11 @@ def c6_numbering(dest):
         head_type = (ps.get("attr1", 0) >> 23) & 0x3
         if head_type != 2:
             raise Fail(f"heading 미표시({needle}): head_type={head_type}")
-        if ps.get("numbering_id", 0) <= 0:
-            raise Fail(f"heading numbering_id 소실({needle}): {ps.get('numbering_id')}")
-    return out, "번호 정의 template='제^1조.' start=5 + 문단 heading 링크(NUMBER) 보존"
+        nid_para = ps.get("numbering_id", 0)
+        linked = lv[nid_para] if nid_para < len(lv) else None
+        if not linked or linked[0].get("template") != "제^1조.":
+            raise Fail(f"heading numbering 링크 소실({needle}): numbering_id={nid_para}")
+    return out, "번호 정의 template='제^1조.' start=5 + 문단 heading 링크(NUMBER, 0-기반 numbering_id) 보존"
 
 
 def c7_all(dest):
@@ -668,6 +685,147 @@ def d3_tab_hwpx(dest):
     return out, "사용자 탭 정의(왼쪽30mm=8504·가운데80mm=22677, 채움 대시) + 문단 tabPrIDRef 배선(hp:switch 정품 구조) + 본문 탭 hp:t 안 중첩 방출(type/leader 유도)"
 
 
+# ── H 시리즈: markdown 왕복(각주·취소선·순서/중첩 목록) ─────────────────────
+# GI-1/GI-2: markdown 들여오기가 각주/취소선/순서·중첩 목록을 IR로 재구성하고
+# hwpx/hwp5 쓰기가 이를 수용하는지 실기 파일로 확인한다.
+
+# 각주 1개 + 취소선 + 순서목록(3항목, start=1) + 중첩 글머리 목록이 든 검증 md.
+H_MD = (
+    "문단에 각주[^1]가 있다.\n\n"
+    "~~지운 글~~ 과 보통 글.\n\n"
+    "1. 첫째\n"
+    "2. 둘째\n"
+    "   - 안쪽 가\n"
+    "   - 안쪽 나\n"
+    "3. 셋째\n\n"
+    "[^1]: 각주 본문이다.\n"
+)
+
+
+def _ctrl_id_bytes(cid):
+    """JSON ctrl_id(정수 배열 또는 문자열)를 bytes로 정규화."""
+    return cid.encode("latin-1") if isinstance(cid, str) else bytes(cid)
+
+
+def _has_footnote(ir):
+    """본문에 fn/en GenericControl(본문 문단 리스트 포함)이 있는가."""
+    for sec in ir["sections"]:
+        for p in sec["paragraphs"]:
+            for c in p.get("controls", []):
+                if isinstance(c, dict) and "Generic" in c:
+                    g = c["Generic"]
+                    if _ctrl_id_bytes(g.get("ctrl_id")) in (b"fn  ", b"en  ") \
+                            and g.get("paragraph_lists"):
+                        return True
+    return False
+
+
+def _has_strike_run(ir):
+    """어떤 char_shape_run이 strike=true 문자모양을 실제로 참조하는가."""
+    strike_ids = {i for i, c in enumerate(ir["header"]["char_shapes"])
+                  if c.get("strike")}
+    for sec in ir["sections"]:
+        for p in sec["paragraphs"]:
+            for _, sid in p.get("char_shape_runs", []):
+                if sid in strike_ids:
+                    return True
+    return False
+
+
+def _list_heads(ir):
+    """목록 문단모양의 (head_type, numbering_id) 목록(2=번호,3=글머리)."""
+    out = []
+    for c in ir["header"]["para_shapes"]:
+        ht = (c.get("attr1", 0) >> 23) & 3
+        if ht in (2, 3):
+            out.append((ht, c.get("numbering_id", 0)))
+    return out
+
+
+def _write_md(md_text, tag, out):
+    """md_text → hwp new --from → out. 실패면 Fail."""
+    md = os.path.join(WORK, f"{tag}.md")
+    with open(md, "w", encoding="utf-8") as f:
+        f.write(md_text)
+    p = subprocess.run([HWP, "new", "--from", md, "-o", out],
+                       capture_output=True, text=True)
+    if not os.path.exists(out) or os.path.getsize(out) == 0:
+        raise Fail("hwp new 실패: " + p.stderr.strip()[-160:])
+
+
+def h1_md_hwpx(dest):
+    out = os.path.join(dest, "H1_md왕복.hwpx")
+    _write_md(H_MD, "h1", out)
+    ok, _ = validate_ok(out)
+    if not ok:
+        raise Fail("validate 실패")
+    r = reread(out)
+    if not _has_footnote(r):
+        raise Fail("각주 컨트롤(fn) 소실")
+    if not _has_strike_run(r):
+        raise Fail("취소선(strike) run 소실")
+    heads = _list_heads(r)
+    if not any(ht == 2 for ht, _ in heads):
+        raise Fail("순서목록(NUMBER) 머리 소실")
+    if not any(ht == 3 for ht, _ in heads):
+        raise Fail("중첩 글머리(BULLET) 머리 소실")
+    return out, "md 왕복: 각주(fn)+취소선(strike run)+순서목록(NUMBER)+중첩 글머리(BULLET) 보존"
+
+
+def h2_md_hwp(dest):
+    out = os.path.join(dest, "H2_md왕복.hwp")
+    _write_md(H_MD, "h2", out)
+    r = reread(out)
+    if not _has_footnote(r):
+        raise Fail("각주 컨트롤(fn) 소실")
+    heads = _list_heads(r)
+    if not any(ht == 2 for ht, _ in heads):
+        raise Fail("순서목록(NUMBER) 머리 소실")
+    if not any(ht == 3 for ht, _ in heads):
+        raise Fail("중첩 글머리(BULLET) 머리 소실")
+    # 번호/글머리 정의 참조가 dangling 아님(defect A10).
+    nums = len(r["header"].get("numberings", []))
+    buls = len(r["header"].get("bullets", []))
+    for ht, nid in heads:
+        if ht == 2 and nid >= nums:
+            raise Fail(f"번호 정의 dangling: {nid} >= {nums}")
+        if ht == 3 and nid >= buls:
+            raise Fail(f"글머리 정의 dangling: {nid} >= {buls}")
+    if not doc_has_text(r, "지운 글"):
+        raise Fail("취소선 텍스트 소실")
+    # 취소선: hwp5는 CHAR_SHAPE 속성 bit18(취소선 여부=1)로 기록한다. 리더는 bit18을
+    # 신뢰하지 않아(변경추적 오검 회피) strike 플래그는 false지만, 한글은 bit18로 렌더한다.
+    # → strike run이 실제로 있는지 bit18로 단언(⚠ 한글 수용은 H2 실기로 최종 확정).
+    shapes = r["header"]["char_shapes"]
+    strike_ids = {i for i, c in enumerate(shapes) if (c.get("attr", 0) >> 18) & 1}
+    if not strike_ids:
+        raise Fail("취소선 CharShape(속성 bit18) 소실")
+    has_strike_run = any(
+        sid in strike_ids
+        for sec in r["sections"]
+        for p in sec["paragraphs"]
+        for _, sid in p.get("char_shape_runs", [])
+    )
+    if not has_strike_run:
+        raise Fail("취소선 run(bit18 참조) 소실")
+    # BULLET 레코드가 정품 필드 패턴과 일치하는지(바이트 수준, 사업계획서 전수 대조):
+    # 25B, [8..12]=글자모양 id 없음(ffffffff), [12..14]=글머리표 문자('•'=0x2022).
+    # 오프셋이 어긋나면(과거 20B/오프셋8 합성) 한글이 마커를 미표시한다(1차 H2 결함).
+    bullets = r["header"].get("bullets") or []
+    if not bullets:
+        raise Fail("BULLET 레코드 소실")
+    data = bytes.fromhex(bullets[0]["data"])
+    if len(data) != 25:
+        raise Fail(f"BULLET 레코드 길이 {len(data)}B != 정품 25B")
+    if data[8:12] != b"\xff\xff\xff\xff":
+        raise Fail(f"BULLET 글자모양 id 필드(8..12) 불일치: {data[8:12].hex()}")
+    ch = int.from_bytes(data[12:14], "little")
+    if ch != 0x2022:
+        raise Fail(f"BULLET 글머리표 문자(오프셋12)가 '•' 아님: {hex(ch)}")
+    return out, ("md 왕복: 각주(fn)+순서/글머리 머리(정의 non-dangling)+취소선 run(속성 bit18) "
+                 "+ BULLET 25B 정품 패턴(문자 오프셋12) (취소선 bit18 한글수용은 실기 확정 대상)")
+
+
 CASES = [
     ("C1_그림자.hwpx", c1_shadow),
     ("C2_외곽선.hwpx", c2_outline),
@@ -681,6 +839,8 @@ CASES = [
     ("D1_도장.hwpx", d1_seal_hwpx),
     ("D2_도장.hwp", d2_seal_hwp),
     ("D3_사용자탭.hwpx", d3_tab_hwpx),
+    ("H1_md왕복.hwpx", h1_md_hwpx),
+    ("H2_md왕복.hwp", h2_md_hwp),
 ]
 
 

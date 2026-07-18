@@ -397,7 +397,9 @@ fn num_format_name(fmt: hwp_model::NumFmt) -> &'static str {
 
 fn write_numberings(out: &mut String, header: &DocHeader) {
     // hwpx 읽기는 수준 형식을 numbering_levels에 담는다(numberings는 hwp5 raw 전용).
-    // 둘 중 큰 개수를 방출해 hwpx→hwpx 왕복에서 번호 정의 수를 잃지 않는다.
+    // 둘 중 큰 개수를 방출해 hwpx→hwpx 왕복에서 번호 정의 수를 잃지 않는다. IR의
+    // numbering_id는 0-기반이라(포맷 경계에서 정규화됨) idRef=numbering_id+1이 항상
+    // 정의 범위 안에 든다 — 정의 수만큼 방출하면 dangling이 없다.
     let count = header
         .numbering_levels
         .len()
@@ -427,6 +429,8 @@ fn write_numberings(out: &mut String, header: &DocHeader) {
 }
 
 fn write_bullets(out: &mut String, header: &DocHeader) {
+    // IR의 글머리 참조(numbering_id)는 0-기반이라 idRef=numbering_id+1이 정의 범위 안에
+    // 든다(포맷 경계에서 정규화됨). 정의 수만큼 방출하면 dangling이 없다.
     let count = header.bullet_chars.len().max(header.bullets.len());
     if count == 0 {
         return;
