@@ -19,6 +19,7 @@ HWP_FONT_DIR=$PWD/fonts python3 tools/diagnostic_corpus.py   # 진단 코퍼스 
 ## 데이터 정책 (중요)
 
 - `fixtures/hwp5/*.hwp`·`fixtures/hwpx/*.hwpx`는 gitignore(로컬 전용). 없으면 테스트가 skip될 뿐 실패하지 않는다. 출처는 `fixtures/README.md`.
+- `fixtures/samples/`는 **예외적으로 커밋한다** — 소유자 자작 문서를 대학명 가명 치환한 테스트 샘플만 둔다(익명화 레시피는 `fixtures/README.md`). 원본은 커밋 금지.
 - **정답지 코퍼스(`~/Documents/hwp_samples` 등 정품 한글 파일)는 절대 커밋 금지.**
 - **한컴 스펙 문서·파생물(추출 텍스트, 페이지 캡처) 커밋 금지** — `docs/README.md` 참조. 스펙은 섹션 번호로만 인용한다(예: `한글문서파일형식 5.0 §4.2.6`). 로컬 `docs/spec.txt`(gitignore)는 작업 참고용.
 
