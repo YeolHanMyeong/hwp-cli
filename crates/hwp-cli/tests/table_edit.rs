@@ -54,6 +54,26 @@ fn fixture_is_valid() {
     );
 }
 
+/// 본문 문단에 hp:linesegarray가 남아 있으면 안 된다 — 익명화로 텍스트 길이가 바뀌어
+/// 줄 배치 캐시와 어긋나면 한글이 "손상/변조" 보안 경고를 띄운다(04-hwpx-owpml §3.5).
+/// 도형 내 텍스트(hp:drawText)의 줄 배치는 writer 규칙대로 보존 대상이라 제외.
+#[test]
+fn fixture_has_no_body_linesegarray() {
+    let xml = String::from_utf8(read_zip_entry(&fixture(), "Contents/section0.xml")).unwrap();
+    let mut body = String::with_capacity(xml.len());
+    let mut rest = xml.as_str();
+    while let Some(s) = rest.find("<hp:drawText") {
+        body.push_str(&rest[..s]);
+        let e = rest[s..].find("</hp:drawText>").expect("drawText 닫힘 없음") + s;
+        rest = &rest[e + "</hp:drawText>".len()..];
+    }
+    body.push_str(rest);
+    assert!(
+        !body.contains("<hp:linesegarray"),
+        "본문에 linesegarray 잔존 — 텍스트 재작성과 어긋나 한글 변조 경고 유발"
+    );
+}
+
 /// 표#0(병합2, 깨끗한 행 존재): 행 추가 성공 → 새 행에 값 채우기까지.
 /// (edit는 add-row를 set-cell 뒤에 적용하므로 두 호출로 나눈다 — 기존 CLI 의미.)
 #[test]

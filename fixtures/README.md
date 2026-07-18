@@ -16,10 +16,12 @@
   - 익명화 파이프라인(재현용):
     1. 대학명 가명 치환(`hwp edit --replace`, 패키지 보존 경로): 제주한라대학교→한빛대학교,
        제주대학교→미륵대학교, 관광대→다온대 + 약칭, JOY→가온
-    2. `Contents/content.hpf`의 creator/lastsaveby→`hwp-cli` (zip 수준)
-    3. `tools/anonymize_fixture.py`로 본문 전체를 구조 보존 예시 문구로 재작성
-       (문서 번호·불릿 마커·가명 대학명은 유지, `Preview/PrvImage.png` 제거)
-    4. 검사: 전 엔트리에서 실명·실내용 키워드 0건, `hwp validate` 유효
+    2. `tools/anonymize_fixture.py`로 본문 전체를 구조 보존 예시 문구로 재작성
+       (문서 번호·불릿 마커·가명 대학명은 유지, `Preview/PrvImage.png` 제거,
+       content.hpf creator/lastsaveby→`hwp-cli` 중화, **본문 linesegarray 제거**:
+       텍스트 재작성으로 줄 배치 캐시가 어긋나면 한글이 "손상/변조" 경고를 띄운다)
+    3. 검사: 전 엔트리에서 실명·실내용 키워드 0건, `hwp validate` 유효,
+       본문 linesegarray 0건(`table_edit.rs::fixture_has_no_body_linesegarray`)
 
 ## hwp5/
 

@@ -7,6 +7,11 @@
 가명 대학명(한빛대/미륵대/다온대/가온)은 보존한다. Preview/PrvImage.png는 원문
 렌더라 제거하고(한글이 열 때 재생성), PrvText.txt는 새 본문으로 재생성한다.
 
+텍스트를 바꾸면 원문의 줄 배치 캐시(hp:linesegarray)가 내용과 어긋나 한글이
+"손상/변조" 보안 경고를 띄우므로, 본문 linesegarray는 제거해 한글이 재계산하게
+한다(도형 내 텍스트 hp:drawText 내부는 writer 규칙대로 보존 — 04-hwpx-owpml §3.5).
+Contents/content.hpf의 creator/lastsaveby도 hwp-cli로 중화한다.
+
 사용: python3 tools/anonymize_fixture.py <in.hwpx> <out.hwpx>
 """
 import re
@@ -17,6 +22,25 @@ import zipfile
 KEEP = ('한빛대', '미륵대', '다온대', '가온')
 
 TOKEN = re.compile(r'<hp:p\b[^>]*>|</hp:p>|<hp:t\s*/>|<hp:t>.*?</hp:t>', re.S)
+LINESEG = re.compile(r'<hp:linesegarray>.*?</hp:linesegarray>|<hp:linesegarray\s*/>', re.S)
+
+
+def strip_body_linesegs(xml_text: str) -> str:
+    """본문 linesegarray 제거(한글이 재계산). hp:drawText 내부는 보존."""
+    out = []
+    rest = xml_text
+    while True:
+        s = rest.find('<hp:drawText')
+        if s < 0:
+            out.append(LINESEG.sub('', rest))
+            return ''.join(out)
+        e = rest.find('</hp:drawText>', s)
+        if e < 0:
+            raise SystemExit('hp:drawText 닫힘 태그 없음 — 입력 확인 필요')
+        e += len('</hp:drawText>')
+        out.append(LINESEG.sub('', rest[:s]))
+        out.append(rest[s:e])  # 도형 내 텍스트: 줄 배치 보존
+        rest = rest[e:]
 
 
 def xml_unescape(s: str) -> str:
@@ -129,8 +153,14 @@ def main() -> None:
     for name in zin.namelist():
         if name.startswith('Contents/section') and name.endswith('.xml'):
             body, plain = transform_section(zin.read(name).decode('utf-8'))
-            patched[name] = body.encode('utf-8')
+            patched[name] = strip_body_linesegs(body).encode('utf-8')
             plain_parts.extend(plain)
+        elif name == 'Contents/content.hpf':
+            hpf = zin.read(name).decode('utf-8')
+            hpf = re.sub(
+                r'(name="(?:creator|lastsaveby)" content="text">)[^<]*', r'\g<1>hwp-cli', hpf
+            )
+            patched[name] = hpf.encode('utf-8')
 
     zout = zipfile.ZipFile(dst, 'w', zipfile.ZIP_DEFLATED)
     for item in zin.infolist():
