@@ -1,7 +1,7 @@
 //! 표 편집 통합 테스트 — 커밋된 익명화 픽스처(fixtures/samples/report-tables.hwpx)에
 //! 하드 의존한다(스킵 없음). 표 지도(재귀 깊이 우선 인덱스):
 //!   #0 5x4(병합2, 깨끗한 행 0)  #1 9x6(병합6, 깨끗한 행 3~8)  #2 11x10(병합30, 깨끗한 행 없음)
-//!   #3~#8 중첩 2x1 단순표(표#2 셀 안)
+//!   #3~#8 중첩 2x1 단순표(표#2 셀 안)  #9 7x2 단순표([별표 1] 전문가 등급 기준, 병합 없음)
 
 use std::io::Read as _;
 use std::path::PathBuf;
@@ -261,4 +261,127 @@ fn add_col_success_synthetic() {
         );
         assert!(cat(&out2).contains("열3"), "{ext} 새 열 값 확인");
     }
+}
+
+/// 표#9([별표 1] 7x2 단순표): 행 추가 성공 → 새 행 채우기.
+#[test]
+fn tbl9_add_row_then_fill() {
+    let src = copy_fixture("tbl9_row.hwpx");
+    let out = tmp("tbl9_row_out.hwpx");
+    let r1 = hwp()
+        .arg("edit")
+        .arg(&src)
+        .arg("-o")
+        .arg(&out)
+        .args(["--add-row", "9"])
+        .output()
+        .unwrap();
+    assert!(
+        r1.status.success(),
+        "단순 표 add-row 성공해야: {}",
+        String::from_utf8_lossy(&r1.stderr)
+    );
+    let out2 = tmp("tbl9_row_out2.hwpx");
+    let r2 = hwp()
+        .arg("edit")
+        .arg(&out)
+        .arg("-o")
+        .arg(&out2)
+        .args(["--set-cell", "9:7:0=7급", "--set-cell", "9:7:1=신규 요건"])
+        .output()
+        .unwrap();
+    assert!(
+        r2.status.success(),
+        "set-cell: {}",
+        String::from_utf8_lossy(&r2.stderr)
+    );
+    let text = cat(&out2);
+    assert!(
+        text.contains("7급") && text.contains("신규 요건"),
+        "새 행 값 확인"
+    );
+}
+
+/// 표#9: 열 추가 성공 + 전체 표 폭이 정확히 보존(행별 총폭 동일).
+#[test]
+fn tbl9_add_col_width_preserved() {
+    let src = copy_fixture("tbl9_col.hwpx");
+    let out = tmp("tbl9_col_out.hwpx");
+    let r = hwp()
+        .arg("edit")
+        .arg(&src)
+        .arg("-o")
+        .arg(&out)
+        .args(["--add-col", "9"])
+        .output()
+        .unwrap();
+    assert!(
+        r.status.success(),
+        "단순 표 add-col 성공해야: {}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+
+    // IR JSON으로 행별 총폭 비교 (입력 vs 출력).
+    fn row_sums(path: &PathBuf, nth: usize) -> Vec<i64> {
+        let out = hwp()
+            .arg("cat")
+            .arg(path)
+            .args(["--format", "json"])
+            .output()
+            .unwrap();
+        let j: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let mut tables = Vec::new();
+        collect_tables(&j["sections"][0]["paragraphs"], &mut tables);
+        let t = &tables[nth];
+        let rows = t["rows"].as_u64().unwrap() as i64;
+        (0..rows)
+            .map(|r| {
+                t["cells"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|c| c["row"].as_i64() == Some(r))
+                    .map(|c| c["width"].as_i64().unwrap())
+                    .sum()
+            })
+            .collect()
+    }
+    fn collect_tables<'a>(paras: &'a serde_json::Value, out: &mut Vec<&'a serde_json::Value>) {
+        for p in paras.as_array().unwrap() {
+            for c in p["controls"].as_array().unwrap() {
+                if let Some(t) = c.get("Table") {
+                    out.push(t);
+                    for cell in t["cells"].as_array().unwrap() {
+                        collect_tables(&cell["paragraphs"], out);
+                    }
+                } else if let Some(g) = c.get("Generic") {
+                    for l in g["paragraph_lists"].as_array().unwrap() {
+                        collect_tables(&l["paragraphs"], out);
+                    }
+                }
+            }
+        }
+    }
+
+    let before = row_sums(&src, 9);
+    let after = row_sums(&out, 9);
+    assert_eq!(before.len(), after.len(), "행 수 유지");
+    assert_eq!(before, after, "행별 총폭 정확 보존");
+
+    // 새 열(인덱스 2) 채우기.
+    let out2 = tmp("tbl9_col_out2.hwpx");
+    let r2 = hwp()
+        .arg("edit")
+        .arg(&out)
+        .arg("-o")
+        .arg(&out2)
+        .args(["--set-cell", "9:0:2=비고", "--verify"])
+        .output()
+        .unwrap();
+    assert!(
+        r2.status.success(),
+        "set-cell: {}",
+        String::from_utf8_lossy(&r2.stderr)
+    );
+    assert!(cat(&out2).contains("비고"), "새 열 값 확인");
 }

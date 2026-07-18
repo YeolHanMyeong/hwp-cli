@@ -9,17 +9,17 @@
 
 ## samples/ (커밋)
 
-- `report-tables.hwpx` — RISE 사업계획서 스타일 보고서(한컴오피스 12.30 저장, A4 5쪽).
-  표 편집(행/열 추가·복합 표 거부)과 패키지 보존 치환의 기능 테스트 픽스처.
-  - 출처: 저장소 소유자 자작 문서(`inbox/drop/kakao/hwp-cli-test-sample.hwpx`, 로컬 전용).
-  - 익명화 레시피(재현용, `hwp edit` 패키지 보존 치환 + zip 수술):
-    1. `hwp edit <원본> -o <중간>.hwpx`에 아래 `--replace`를 **긴 이름 먼저** 순서대로 적용:
-       제주한라대학교→한빛대학교, 제주한라대→한빛대, 제주대학교→미륵대학교, 제주대→미륵대,
-       관광대→다온대, 한라대→한빛대, JOY→가온 (지역명 `제주` 등은 유지)
-    2. `Contents/content.hpf`의 creator/lastsaveby `yj.lee`→`hwp-cli` (zip 수준 치환)
-    3. `Preview/PrvImage.png` 엔트리 제거(원문이 보이는 렌더 이미지 — 정책상 미동봉,
-       한글이 열 때 재생성)
-    4. 검사: 전체 엔트리에서 `한라/제주대/관광대/JOY/yj.lee` 0건, `hwp validate` 유효
+- `report-tables.hwpx` — 표 편집(행/열 추가·복합 표 거부)과 패키지 보존 치환의 기능
+  테스트 픽스처(A4 5쪽, 표 10개: 톱레벨 병합 3종 + 중첩 단순 6종 + [별표] 단순 7x2).
+  **본문은 전부 가상의 예시 문구** — 실제 사업·기관 내용이 아니다.
+  - 출처: 저장소 소유자 자작 문서(로컬 전용)를 아래 과정으로 익명화.
+  - 익명화 파이프라인(재현용):
+    1. 대학명 가명 치환(`hwp edit --replace`, 패키지 보존 경로): 제주한라대학교→한빛대학교,
+       제주대학교→미륵대학교, 관광대→다온대 + 약칭, JOY→가온
+    2. `Contents/content.hpf`의 creator/lastsaveby→`hwp-cli` (zip 수준)
+    3. `tools/anonymize_fixture.py`로 본문 전체를 구조 보존 예시 문구로 재작성
+       (문서 번호·불릿 마커·가명 대학명은 유지, `Preview/PrvImage.png` 제거)
+    4. 검사: 전 엔트리에서 실명·실내용 키워드 0건, `hwp validate` 유효
 
 ## hwp5/
 
