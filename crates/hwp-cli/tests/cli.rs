@@ -666,43 +666,95 @@ fn 변환_완전_왕복_hwp_hwpx_hwp() {
     let _ = std::fs::remove_file(&dst);
 }
 
-/// markdown 변환 --media-dir: 이미지가 지정 디렉터리(figs/)에 추출되고 링크가 그 경로를 쓴다.
+/// markdown 변환 --media-dir: 합성 hwpx에 이미지를 삽입하고 안전한 링크·충돌 거부를 검증한다.
 #[test]
 fn convert_md_media_dir_figs() {
-    if skip_if_no_fixtures() {
-        return;
-    }
-    let src = fixture("hwp5/annual_report.hwp");
-    if !src.exists() {
-        eprintln!("스킵: annual_report.hwp 없음");
-        return;
-    }
-    let dir = std::env::temp_dir().join(format!("hwp_cli_figs_{}", std::process::id()));
+    let uniq = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("hwp_cli_figs_{}_{}", std::process::id(), uniq));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let out = dir.join("report.md");
+    let source_md = dir.join("source.md");
+    let base = dir.join("base.hwpx");
+    let image_doc = dir.join("image.hwpx");
+    let image = dir.join("tiny.png");
+    std::fs::write(&source_md, "이미지 앵커: 본문\n").unwrap();
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend([0, 0, 0, 13]);
+    png.extend(b"IHDR");
+    png.extend(32u32.to_be_bytes());
+    png.extend(24u32.to_be_bytes());
+    png.extend([0u8; 8]);
+    std::fs::write(&image, &png).unwrap();
+
+    let new = hwp()
+        .args(["new", "--from"])
+        .arg(&source_md)
+        .arg("-o")
+        .arg(&base)
+        .output()
+        .unwrap();
+    assert!(
+        new.status.success(),
+        "합성 문서 생성: {}",
+        String::from_utf8_lossy(&new.stderr)
+    );
+    let edit = hwp()
+        .arg("edit")
+        .arg(&base)
+        .arg("-o")
+        .arg(&image_doc)
+        .arg("--insert-image")
+        .arg(format!("이미지 앵커:=>{}", image.display()))
+        .output()
+        .unwrap();
+    assert!(
+        edit.status.success(),
+        "이미지 삽입: {}",
+        String::from_utf8_lossy(&edit.stderr)
+    );
+
+    let nested = dir.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let out = nested.join("report.md");
 
     let r = hwp()
         .arg("convert")
-        .arg(&src)
+        .arg(&image_doc)
         .arg("-o")
         .arg(&out)
-        .args(["--media-dir", "figs"])
+        .args(["--media-dir", "my figs"])
         .output()
         .unwrap();
     assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
 
     let md = std::fs::read_to_string(&out).unwrap();
     assert!(
-        md.contains("![image](figs/image"),
-        "figs 경로 링크: {}",
+        md.contains("![image](<my figs/image1.png>)"),
+        "공백 포함 media 경로 링크: {}",
         &md[..md.len().min(400)]
     );
-    let figs = dir.join("figs");
+    let figs = nested.join("my figs");
     assert!(figs.is_dir(), "figs 디렉터리가 출력 옆에 생성");
-    assert!(
-        std::fs::read_dir(&figs).unwrap().next().is_some(),
-        "추출된 이미지 파일 존재"
+    let extracted = figs.join("image1.png");
+    assert_eq!(std::fs::read(&extracted).unwrap(), png, "이미지 바이트");
+
+    std::fs::write(&extracted, b"do not overwrite").unwrap();
+    let collision = hwp()
+        .arg("convert")
+        .arg(&image_doc)
+        .arg("-o")
+        .arg(&out)
+        .args(["--media-dir", "my figs"])
+        .output()
+        .unwrap();
+    assert!(!collision.status.success(), "다른 기존 파일이면 실패");
+    assert_eq!(
+        std::fs::read(&extracted).unwrap(),
+        b"do not overwrite",
+        "기존 파일을 덮어쓰지 않음"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

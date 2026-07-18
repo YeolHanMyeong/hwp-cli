@@ -257,6 +257,44 @@ fn 문단_여백_2배_단위() {
     assert_eq!(ps.line_spacing, 160, "줄간격은 2배 아님");
 }
 
+#[test]
+fn 목록_정의_idref를_0기반_ir로_정규화() {
+    let xml = r#"<hh:head><hh:refList>
+      <hh:numberings itemCnt="2">
+        <hh:numbering id="7"><hh:paraHead level="1" numFormat="ROMAN_CAPITAL">^1.</hh:paraHead></hh:numbering>
+        <hh:numbering id="42"><hh:paraHead level="1" numFormat="HANGUL_SYLLABLE">^1.</hh:paraHead></hh:numbering>
+      </hh:numberings>
+      <hh:bullets itemCnt="2"><hh:bullet id="9" char="•"/><hh:bullet id="31" char="■"/></hh:bullets>
+      <hh:paraProperties itemCnt="4">
+        <hh:paraPr id="0"><hh:heading type="NUMBER" idRef="7" level="1"/></hh:paraPr>
+        <hh:paraPr id="1"><hh:heading type="NUMBER" idRef="42" level="1"/></hh:paraPr>
+        <hh:paraPr id="2"><hh:heading type="BULLET" idRef="9" level="1"/></hh:paraPr>
+        <hh:paraPr id="3"><hh:heading type="BULLET" idRef="31" level="1"/></hh:paraPr>
+      </hh:paraProperties>
+    </hh:refList></hh:head>"#;
+    let (header, _) = hwpx::read::header::parse_header(xml).unwrap();
+    assert_eq!(header.para_shapes[0].numbering_id, 0);
+    assert_eq!(header.para_shapes[1].numbering_id, 1);
+    assert_eq!(header.para_shapes[2].numbering_id, 0);
+    assert_eq!(header.para_shapes[3].numbering_id, 1);
+    assert_eq!(
+        header.numbering_levels[0][0].fmt,
+        hwp_model::NumFmt::RomanUpper
+    );
+    assert_eq!(
+        header.numbering_levels[1][0].fmt,
+        hwp_model::NumFmt::HangulSyllable
+    );
+    assert_eq!(header.bullet_chars, vec!['•', '■']);
+}
+
+#[test]
+fn 정의되지_않은_목록_idref는_오류() {
+    let xml = r#"<hh:head><hh:refList><hh:numberings><hh:numbering id="7"/></hh:numberings><hh:paraProperties><hh:paraPr id="0"><hh:heading type="NUMBER" idRef="42" level="1"/></hh:paraPr></hh:paraProperties></hh:refList></hh:head>"#;
+    let error = hwpx::read::header::parse_header(xml).unwrap_err();
+    assert!(error.to_string().contains("idRef: 42"), "{error}");
+}
+
 /// 쪽번호/감추기/새번호 컨트롤이 올바른 ctrl_id로 매핑·보존돼야 한다(드롭 방지).
 #[test]
 fn 쪽번호_감추기_컨트롤_매핑() {

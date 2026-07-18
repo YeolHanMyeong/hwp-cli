@@ -551,18 +551,14 @@ fn 왕복_charpr(inner: &str) -> (hwp_model::CharShape, hwp_model::CharShape) {
     let (h1, _) = hwpx::read::header::parse_header(&xml).unwrap();
     let out = hwpx::write::header::write_header(&h1, 1);
     let (h2, _) = hwpx::read::header::parse_header(&out).unwrap();
-    (
-        h1.char_shapes[0].clone(),
-        h2.char_shapes[0].clone(),
-    )
+    (h1.char_shapes[0].clone(), h2.char_shapes[0].clone())
 }
 
 /// GE-α1 글자 그림자: type/색/간격이 왕복에서 보존된다(이전엔 상수 NONE).
 #[test]
 fn ge_a1_글자_그림자_왕복() {
-    let (cs1, cs2) = 왕복_charpr(
-        r##"<hh:shadow type="DROP" color="#FF0000" offsetX="7" offsetY="9"/>"##,
-    );
+    let (cs1, cs2) =
+        왕복_charpr(r##"<hh:shadow type="DROP" color="#FF0000" offsetX="7" offsetY="9"/>"##);
     assert!(cs1.has_shadow(), "원본 그림자 파싱");
     assert!(cs2.has_shadow(), "재읽기 그림자 보존");
     assert_eq!(cs2.shadow_gap, cs1.shadow_gap, "그림자 간격 보존");
@@ -620,9 +616,8 @@ fn ge_a4_아래첨자_왕복() {
 /// GE-α5 밑줄 모양: SOLID가 아닌 모양(DASH)이 왕복에서 보존된다(이전엔 shape="SOLID" 고정).
 #[test]
 fn ge_a5_밑줄_모양_왕복() {
-    let (cs1, cs2) = 왕복_charpr(
-        r##"<hh:underline type="BOTTOM" shape="DASH" color="#000000"/>"##,
-    );
+    let (cs1, cs2) =
+        왕복_charpr(r##"<hh:underline type="BOTTOM" shape="DASH" color="#000000"/>"##);
     assert_ne!(cs1.underline_shape, 0, "원본 밑줄 모양 파싱");
     assert_eq!(cs2.underline_shape, cs1.underline_shape, "밑줄 모양 보존");
     assert_eq!(cs2.underline_kind(), 1, "밑줄 종류(아래)도 보존");
@@ -665,14 +660,14 @@ fn ge_a7_번호_형식_왕복() {
 /// write가 역방출하는지 단정한다.
 #[test]
 fn ge_a8_문단머리_heading_왕복() {
-    let xml = r#"<hh:head><hh:numberings itemCnt="1"><hh:numbering id="2" start="0"><hh:paraHead start="1" level="1" numFormat="DIGIT">^1.</hh:paraHead></hh:numbering></hh:numberings><hh:paraProperties itemCnt="1"><hh:paraPr id="0" tabPrIDRef="0"><hh:align horizontal="JUSTIFY" vertical="BASELINE"/><hh:heading type="NUMBER" idRef="2" level="3"/></hh:paraPr></hh:paraProperties></hh:head>"#;
+    let xml = r#"<hh:head><hh:numberings itemCnt="2"><hh:numbering id="7" start="0"><hh:paraHead start="1" level="1" numFormat="ROMAN_CAPITAL">^1.</hh:paraHead></hh:numbering><hh:numbering id="42" start="0"><hh:paraHead start="1" level="1" numFormat="DIGIT">^1.</hh:paraHead></hh:numbering></hh:numberings><hh:paraProperties itemCnt="1"><hh:paraPr id="0" tabPrIDRef="0"><hh:align horizontal="JUSTIFY" vertical="BASELINE"/><hh:heading type="NUMBER" idRef="42" level="3"/></hh:paraPr></hh:paraProperties></hh:head>"#;
     let (h1, _) = hwpx::read::header::parse_header(xml).unwrap();
 
-    // read 인코딩 확인: head_type=2(번호), level=3, numbering_id=2.
+    // 외부 idRef=42는 두 번째 정의인 IR index 1로 정규화된다.
     let ps1 = &h1.para_shapes[0];
     assert_eq!(ps1.head_type(), 2, "번호형 머리");
     assert_eq!(ps1.head_level(), 3, "수준 3");
-    assert_eq!(ps1.numbering_id, 2, "번호정의 링크");
+    assert_eq!(ps1.numbering_id, 1, "번호정의 링크");
 
     // write → re-read.
     let out = hwpx::write::header::write_header(&h1, 1);
@@ -686,10 +681,31 @@ fn ge_a8_문단머리_heading_왕복() {
     let ps2 = &h2.para_shapes[0];
     assert_eq!(ps2.head_type(), 2, "재읽기 번호형 머리 보존");
     assert_eq!(ps2.head_level(), 3, "재읽기 수준 보존");
-    assert_eq!(ps2.numbering_id, 2, "재읽기 번호정의 링크 보존");
+    assert_eq!(ps2.numbering_id, 1, "재읽기 번호정의 링크 보존");
 
     // 번호 정의도 함께 보존.
-    assert_eq!(h2.numbering_levels[0][0].fmt, hwp_model::NumFmt::Digit);
+    assert_eq!(h2.numbering_levels[1][0].fmt, hwp_model::NumFmt::Digit);
+}
+
+#[test]
+fn 글머리표_definition_id_왕복() {
+    let xml = r#"<hh:head><hh:bullets itemCnt="1"><hh:bullet id="9" char="■" useImage="0"/></hh:bullets><hh:paraProperties itemCnt="1"><hh:paraPr id="0"><hh:heading type="BULLET" idRef="9" level="1"/></hh:paraPr></hh:paraProperties></hh:head>"#;
+    let (header, _) = hwpx::read::header::parse_header(xml).unwrap();
+    assert_eq!(header.para_shapes[0].numbering_id, 0);
+    assert_eq!(header.bullet_chars, vec!['■']);
+
+    let out = hwpx::write::header::write_header(&header, 1);
+    assert!(
+        out.contains(r#"<hh:bullet id="1" char="■" useImage="0"/>"#),
+        "글머리표 정의 방출: {out}"
+    );
+    assert!(
+        out.contains(r#"<hh:heading type="BULLET" idRef="1" level="1"/>"#),
+        "글머리표 참조 방출: {out}"
+    );
+    let (reread, _) = hwpx::read::header::parse_header(&out).unwrap();
+    assert_eq!(reread.para_shapes[0].numbering_id, 0);
+    assert_eq!(reread.bullet_chars, vec!['■']);
 }
 
 /// GE-α8 보강: heading이 없는(기본) paraPr은 write에서 여전히 NONE으로 나가

@@ -64,6 +64,7 @@ pub fn write_header(header: &DocHeader, section_count: usize) -> String {
     write_char_properties(&mut out, header);
     write_tab_properties(&mut out, header);
     write_numberings(&mut out, header);
+    write_bullets(&mut out, header);
     write_para_properties(&mut out, header);
     write_styles(&mut out, header);
     out.push_str("</hh:refList>");
@@ -354,6 +355,24 @@ fn write_numberings(out: &mut String, header: &DocHeader) {
     out.push_str("</hh:numberings>");
 }
 
+fn write_bullets(out: &mut String, header: &DocHeader) {
+    let count = header.bullet_chars.len().max(header.bullets.len());
+    if count == 0 {
+        return;
+    }
+    let _ = write!(out, r##"<hh:bullets itemCnt="{count}">"##);
+    for i in 0..count {
+        let ch = header.bullet_chars.get(i).copied().unwrap_or('•');
+        let _ = write!(
+            out,
+            r##"<hh:bullet id="{}" char="{}" useImage="0"/>"##,
+            i + 1,
+            esc(&ch.to_string()),
+        );
+    }
+    out.push_str("</hh:bullets>");
+}
+
 fn write_para_properties(out: &mut String, header: &DocHeader) {
     let count = header.para_shapes.len().max(1);
     let _ = write!(out, r##"<hh:paraProperties itemCnt="{count}">"##);
@@ -396,10 +415,9 @@ fn write_para_properties(out: &mut String, header: &DocHeader) {
         } else {
             2
         };
-        // 문단 머리(목록) 링크 방출: read가 인코딩한 IR을 그대로 역방출한다.
-        // head_type() 비트(1=개요/2=번호/3=글머리표)가 서 있고 numbering_id>0일
-        // 때만 실제 heading을 낸다. 그 외에는 기본값(NONE/0/0) — 기존 출력 바이트 불변.
-        let heading = if ps.head_type() != 0 && ps.numbering_id > 0 {
+        // IR의 목록 정의 참조는 HWP5와 동일한 0-based 인덱스다. HWPX idRef는
+        // writer가 순서대로 내는 1-based 정의 id로 되돌린다(인덱스 0도 유효).
+        let heading = if ps.head_type() != 0 {
             let hty = match ps.head_type() {
                 1 => "OUTLINE",
                 2 => "NUMBER",
@@ -407,7 +425,7 @@ fn write_para_properties(out: &mut String, header: &DocHeader) {
             };
             format!(
                 r##"<hh:heading type="{hty}" idRef="{}" level="{}"/>"##,
-                ps.numbering_id,
+                u32::from(ps.numbering_id) + 1,
                 ps.head_level(),
             )
         } else {

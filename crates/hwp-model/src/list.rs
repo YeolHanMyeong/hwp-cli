@@ -4,12 +4,14 @@
 //! 원래 hwp-render 전용이었으나 markdown 내보내기(hwp-convert)도 같은 규칙이
 //! 필요해 hwp-model로 이동했다(허브-스포크: render·convert 모두 model만 의존).
 
+use std::collections::HashMap;
+
 use crate::{Document, NumFmt, Paragraph};
 
-/// 구역 단위 목록 카운터(수준 1~7 사용).
+/// 구역 단위 목록 카운터(번호 정의별, 수준 1~7 사용).
 #[derive(Default)]
 pub struct ListState {
-    counters: [u32; 8],
+    counters: HashMap<u16, [u32; 8]>,
 }
 
 impl ListState {
@@ -28,8 +30,9 @@ impl ListState {
         }
         // 번호: 수준 카운터 증가 + 더 깊은 수준 리셋.
         let level = ps.head_level() as usize; // 1..=7
-        self.counters[level] += 1;
-        for c in &mut self.counters[level + 1..] {
+        let counters = self.counters.entry(ps.numbering_id).or_default();
+        counters[level] += 1;
+        for c in &mut counters[level + 1..] {
             *c = 0;
         }
         let levels = numbering_levels(doc, id);
@@ -39,7 +42,7 @@ impl ListState {
             .map(|nl| nl.template.as_str())
             && !tmpl.is_empty()
         {
-            return Some(apply_template(tmpl, levels, &self.counters));
+            return Some(apply_template(tmpl, levels, counters));
         }
         // 템플릿 없음: 기존 "1.", "1.1." 폴백.
         let parts: Vec<String> = (1..=level)
@@ -48,7 +51,7 @@ impl ListState {
                     .and_then(|l| l.get(lv - 1))
                     .map_or(NumFmt::Digit, |nl| nl.fmt);
                 let start = levels.and_then(|l| l.get(lv - 1)).map_or(1, |nl| nl.start);
-                let n = self.counters[lv].max(1) + start.saturating_sub(1);
+                let n = counters[lv].max(1) + start.saturating_sub(1);
                 format_number(n, fmt)
             })
             .collect();
@@ -80,26 +83,11 @@ fn apply_template(tmpl: &str, levels: Option<&[crate::NumLevel]>, counters: &[u3
 }
 
 fn bullet_char(doc: &Document, id: usize) -> char {
-    doc.header
-        .bullet_chars
-        .get(id)
-        .or_else(|| {
-            id.checked_sub(1)
-                .and_then(|i| doc.header.bullet_chars.get(i))
-        })
-        .copied()
-        .unwrap_or('•')
+    doc.header.bullet_chars.get(id).copied().unwrap_or('•')
 }
 
 fn numbering_levels(doc: &Document, id: usize) -> Option<&[crate::NumLevel]> {
-    doc.header
-        .numbering_levels
-        .get(id)
-        .or_else(|| {
-            id.checked_sub(1)
-                .and_then(|i| doc.header.numbering_levels.get(i))
-        })
-        .map(Vec::as_slice)
+    doc.header.numbering_levels.get(id).map(Vec::as_slice)
 }
 
 /// 번호 n(1부터)을 형식에 맞게 표기.
@@ -232,6 +220,28 @@ mod tests {
         doc.header.numbering_levels = vec![vec![NumLevel::default(); 7]];
         let mut st2 = ListState::default();
         assert_eq!(st2.marker(&doc, &p(0)).as_deref(), Some("1."));
+    }
+
+    #[test]
+    fn 번호정의별_카운터_독립() {
+        use crate::{NumLevel, ParaShape, ParaShapeId};
+        let mut doc = Document::default();
+        let mk = |id: u16| ParaShape {
+            attr1: (2 << 23) | (1 << 25),
+            numbering_id: id,
+            ..ParaShape::default()
+        };
+        doc.header.para_shapes = vec![mk(0), mk(1)];
+        doc.header.numbering_levels =
+            vec![vec![NumLevel::default(); 7], vec![NumLevel::default(); 7]];
+        let p = |id| Paragraph {
+            para_shape: ParaShapeId(id),
+            ..Paragraph::default()
+        };
+        let mut st = ListState::default();
+        assert_eq!(st.marker(&doc, &p(0)).as_deref(), Some("1."));
+        assert_eq!(st.marker(&doc, &p(1)).as_deref(), Some("1."));
+        assert_eq!(st.marker(&doc, &p(0)).as_deref(), Some("2."));
     }
 
     #[test]

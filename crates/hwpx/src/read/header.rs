@@ -3,6 +3,8 @@
 //! M2 범위: 글꼴(fontfaces), 문자 모양(charPr), 문단 모양(paraPr — 정렬),
 //! 스타일(style). 테두리/번호 등은 추후 마일스톤에서 채운다.
 
+use std::collections::HashMap;
+
 use hwp_model::{
     BorderFill, BorderLine, CharShape, CharShapeId, DocHeader, FaceName, LANG_COUNT, ParaShape,
     ParaShapeId, Style,
@@ -107,6 +109,10 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
     let mut current_para: Option<ParaShape> = None;
     let mut current_border: Option<BorderFill> = None;
     let mut current_numbering: Option<Vec<hwp_model::NumLevel>> = None;
+    // HWPX 정의 id는 임의 값일 수 있다. IR에서는 HWP5와 동일하게 Vec의 0-based
+    // 인덱스로 정규화하므로 외부 id→내부 인덱스 맵을 별도로 유지한다.
+    let mut numbering_ids: HashMap<u16, u16> = HashMap::new();
+    let mut bullet_ids: HashMap<u16, u16> = HashMap::new();
     // paraHead 텍스트(형식 템플릿 "^1." 등)를 담을 현재 수준(1-기반).
     let mut current_para_head: Option<usize> = None;
     // hp:switch의 case/default 중복 — 첫 분기(신형 한글이 읽는 값)만 취한다
@@ -327,6 +333,19 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
                     }
                     // 번호 정의 시작 + 수준별 형식.
                     b"numbering" => {
+                        let index = u16::try_from(header.numbering_levels.len()).map_err(|_| {
+                            HwpxError::Xml {
+                                entry: "Contents/header.xml".to_string(),
+                                message: "번호 정의가 u16 범위를 초과합니다".to_string(),
+                            }
+                        })?;
+                        let external_id = attr_u16(e, "id").unwrap_or(index.saturating_add(1));
+                        if numbering_ids.insert(external_id, index).is_some() {
+                            return Err(HwpxError::Xml {
+                                entry: "Contents/header.xml".to_string(),
+                                message: format!("중복 번호 정의 id: {external_id}"),
+                            });
+                        }
                         current_numbering = Some(Vec::new());
                         if empty {
                             header.numbering_levels.push(Vec::new());
@@ -351,6 +370,19 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
                     }
                     // 글머리표 정의: char 속성(없으면 기본 •).
                     b"bullet" => {
+                        let index = u16::try_from(header.bullet_chars.len()).map_err(|_| {
+                            HwpxError::Xml {
+                                entry: "Contents/header.xml".to_string(),
+                                message: "글머리표 정의가 u16 범위를 초과합니다".to_string(),
+                            }
+                        })?;
+                        let external_id = attr_u16(e, "id").unwrap_or(index.saturating_add(1));
+                        if bullet_ids.insert(external_id, index).is_some() {
+                            return Err(HwpxError::Xml {
+                                entry: "Contents/header.xml".to_string(),
+                                message: format!("중복 글머리표 정의 id: {external_id}"),
+                            });
+                        }
                         let ch = attr(e, "char")
                             .and_then(|s| s.chars().next())
                             .unwrap_or('•');
@@ -556,6 +588,20 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
             Event::Eof => break,
             _ => {}
         }
+    }
+
+    // paraPr이 정의보다 먼저 등장해도 처리되도록 전체 파싱 뒤 idRef를 정규화한다.
+    for ps in &mut header.para_shapes {
+        let raw = ps.numbering_id;
+        let mapped = match ps.head_type() {
+            2 => numbering_ids.get(&raw),
+            3 => bullet_ids.get(&raw),
+            _ => continue,
+        };
+        ps.numbering_id = mapped.copied().ok_or_else(|| HwpxError::Xml {
+            entry: "Contents/header.xml".to_string(),
+            message: format!("정의되지 않은 문단 머리 idRef: {raw}"),
+        })?;
     }
 
     Ok((header, warnings))

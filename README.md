@@ -168,7 +168,7 @@ hwp mcp --font-dir ./fonts
 |---|---|---|
 | `info <file>` | `--json` | 포맷/버전/속성/스트림 진단 |
 | `cat <file>` | `--format plain\|markdown\|json` (기본 `plain`), `--preview`, `--with-header-footer`, `--with-hidden` | 본문 추출. `--preview`는 본문 파싱 없이 PrvText만 출력. `--with-*`는 머리말/꼬리말·숨은 설명 포함(기본 제외) |
-| `convert <input> -o <output>` | `--to hwp\|hwpx\|md\|json`(생략 시 확장자 추론), `--strict`(예약 — 현재 미동작), `--preserve-layout`, `--embed-bin`, `--media-dir <dir>`(md), `--with-header-footer`(md), `--with-hidden`(md) | 포맷 변환. 출력이 `.pdf`이면 렌더 경로로 위임(시스템 글꼴 사용 — 정밀 글꼴은 `render --font-dir` 권장). `--preserve-layout`는 무수정 왕복 전용 줄 배치 보존. `--embed-bin`은 JSON에 이미지 base64 임베드. md 출력은 `--media-dir figs`처럼 이미지 추출 디렉터리 지정 가능(기본 `<스템>.media`, 상대경로는 출력 파일 기준·링크는 입력 경로 그대로). `--strict`는 향후 보존 불가 데이터 발견 시 실패 처리 예정(현재는 동작하지 않음) |
+| `convert <input> -o <output>` | `--to hwp\|hwpx\|md\|json`(생략 시 확장자 추론), `--strict`(예약 — 현재 미동작), `--preserve-layout`, `--embed-bin`, `--media-dir <dir>`(md), `--with-header-footer`(md), `--with-hidden`(md) | 포맷 변환. 출력이 `.pdf`이면 렌더 경로로 위임(시스템 글꼴 사용 — 정밀 글꼴은 `render --font-dir` 권장). `--preserve-layout`는 무수정 왕복 전용 줄 배치 보존. `--embed-bin`은 JSON에 이미지 base64 임베드. md 출력은 `--media-dir figs`처럼 이미지 추출 디렉터리 지정 가능(기본 `<스템>.media`, 상대경로는 출력 파일 기준·링크는 Markdown에 안전하게 직렬화). `--strict`는 향후 보존 불가 데이터 발견 시 실패 처리 예정(현재는 동작하지 않음) |
 | `render <input> -o <output>` | `--pages "1"\|"1-3"\|"all"`(기본 `all`), `--dpi <f64>`(기본 96, 래스터 전용), `--format png\|svg\|pdf`(생략 시 확장자 추론), `--font-dir <dir>`(반복) | 페이지를 PNG/SVG(페이지별 파일)·PDF(단일 멀티페이지)로 렌더. 번호 목록은 형식 템플릿(`^1.`→"1.", `(^5)`→"(5)", `제^1조`→"제1조")을 적용 |
 | `new -o <output>` | `--from <md\|json>`(생략 시 빈 문서) | markdown/JSON IR에서 새 문서 생성 |
 | `edit <input> -o <output>` | `--replace "찾기=>바꾸기"`, `--set-cell "표:행:열=값"`(0-기반), `--set-field "이름=값"`, `--create-field "앵커=>이름"`(또는 `"앵커=>이름=값"`, %clk 누름틀 생성), `--insert-image "앵커=>경로"`(또는 `"앵커=>경로@너비x높이"`mm, png/jpg/bmp/gif 삽입), `--set-format "찾기:bold=on,size=16,color=#RRGGBB"`, `--set-align "찾기=left\|right\|center\|justify\|distribute\|divide"`, `--insert-para "앵커=>텍스트"`(앵커 문단 뒤), `--insert-para-before "앵커=>텍스트"`(앞), `--delete-para "텍스트"`, `--add-row "표"`, `--delete-row "표:행"`, `--verify` (모두 반복 가능) | 기존 문서 편집. 텍스트·서식·구조(문단/표 행) 편집. 삽입 문단·행은 앵커/템플릿 모양을 상속하고 합성 경로로 저장(불변식 적용). `--verify`는 쓰기 후 재읽기로 검증 |
@@ -192,7 +192,9 @@ hwp convert report.hwp -o full.md --with-header-footer --with-hidden
 ```
 
 `--media-dir`은 상대경로면 **출력 파일 기준**으로 해석하고(`-o docs/report.md --media-dir figs` →
-`docs/figs/`에 추출), 링크는 입력한 경로 문자열을 그대로 쓴다(`![image](figs/image1.png)`).
+`docs/figs/`에 추출), 링크는 경로 구분자를 `/`로 통일하고 공백·괄호를 Markdown에 안전하게
+직렬화한다. 같은 이름의 파일이 이미 있으면 바이트가 같을 때만 재사용하며, 내용이 다르면 기존
+파일을 덮어쓰지 않고 변환을 실패시킨다.
 
 HWP 요소 → markdown 매핑:
 
@@ -204,9 +206,9 @@ HWP 요소 → markdown 매핑:
 | 하이퍼링크(%hlk) | `[표시텍스트](URL)` |
 | 이미지 | `![image](<media>/imageN.png)` — 바이트는 추출, 확장자는 매직 바이트로 판별 |
 | 표(병합 없음) | GFM 파이프 표 (첫 행 헤더) |
-| 표(병합 셀·중첩 표 있음) | HTML `<table>` (colspan/rowspan, 셀 안은 `<b>`·`<img>` 등 인라인 HTML) |
-| 글머리표 / 번호 문단 | `- ` / `N. ` 목록 (수준별 2칸 들여쓰기, 번호 형식은 numbering 정의에서 합성 — `가.`·`제1조` 등 숫자 외 형식은 `- 가. `처럼 리터럴 마커로 보존) |
-| 각주 / 미주 | 본문 `[^N]` / `[^eN]` 마커 + 문서 끝 정의 (GFM 풋노트) |
+| 표(병합 셀·중첩 표·블록 수식 있음) | HTML `<table>` (colspan/rowspan, 셀 블록을 등장 순서대로 보존) |
+| 글머리표 / 번호 문단 | `- ` / `N. ` 목록 (부모 마커의 본문 시작 열에 맞춘 들여쓰기, 번호 형식은 numbering 정의에서 합성 — `가.`·`제1조` 등 숫자 외 형식은 `- 가. `처럼 리터럴 마커로 보존) |
+| 각주 / 미주 | 일반 본문은 `[^N]` / `[^eN]` GFM 풋노트, HTML 표 안은 대응하는 HTML 링크·정의 |
 | 수식(eqed) | 인라인 `$스크립트$`, 블록 `$$스크립트$$` — **HWP 수식 스크립트 원문**(LaTeX 아님) |
 | 머리말/꼬리말·숨은 설명 | 기본 제외, `--with-header-footer` / `--with-hidden`으로 포함 |
 
