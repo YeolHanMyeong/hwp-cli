@@ -586,7 +586,12 @@ fn render_fragments(doc: &Document, para: &Paragraph, ctx: &mut Ctx) -> Vec<Frag
         // 현재 위치의 문자 모양으로 효과 전환
         // (중첩 정합성을 위해 변경 시 전부 닫고 다시 연다)
         if let HwpChar::Text(_) = ch {
-            let want = Marks::from_shape(shape_at(doc, para, wchar_pos));
+            let mut want = Marks::from_shape(shape_at(doc, para, wchar_pos));
+            // 하이퍼링크 표시 텍스트의 밑줄은 링크 표기 자체가 함의한다 —
+            // `[<u>텍스트</u>](URL)` 같은 군더더기를 막는다.
+            if link_url.is_some() {
+                want.underline = false;
+            }
             if want != marks {
                 body.push_str(&marks.close(ctx.html_mode));
                 body.push_str(&want.open(ctx.html_mode));
@@ -1032,14 +1037,14 @@ mod tests {
     use crate::from_markdown::from_markdown;
     use hwp_model::{CharShapeId, HwpChar, ParagraphList};
 
-    /// 하이퍼링크가 md→IR→md 왕복에서 `[표시](URL)`로 보존한다.
-    /// (링크 표시 텍스트는 from_markdown이 밑줄 서식을 주므로 `<u>`가 붙는다.)
+    /// 하이퍼링크가 md→IR→md 왕복에서 `[표시](URL)`로 보존된다.
+    /// (링크 표시 텍스트의 밑줄 서식은 링크 표기가 함의하므로 `<u>`를 내지 않는다.)
     #[test]
     fn 하이퍼링크_왕복_보존() {
         let doc = from_markdown("자세히는 [여기](https://example.com/path)를 본다\n");
         let md = to_markdown(&doc);
         assert!(
-            md.contains("[<u>여기</u>](https://example.com/path)"),
+            md.contains("[여기](https://example.com/path)"),
             "링크 왕복: {md}"
         );
     }
@@ -1502,8 +1507,8 @@ mod tests {
             numbering_id: nid,
             ..ParaShape::default()
         };
-        // 숫자 번호 목록 — 카운터는 numbering id를 가리지 않고 공유(렌더와 같은 규칙)라
-        // 형식이 다른 목록은 문서를 나눠 검증한다.
+        // 숫자 번호 목록. 카운터는 번호 정의(numbering id)별 독립이며,
+        // 형식이 다른 목록은 문서를 나눠 따로 검증한다.
         let mut doc = from_markdown("불릿 하나\n\n번호 하나\n\n번호 둘\n");
         let base = doc.header.para_shapes.len() as u16;
         doc.header.para_shapes.push(ps(3, 1, 0)); // 불릿

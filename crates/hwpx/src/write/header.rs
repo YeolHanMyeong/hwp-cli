@@ -415,17 +415,17 @@ fn write_para_properties(out: &mut String, header: &DocHeader) {
         } else {
             2
         };
-        // IR의 목록 정의 참조는 HWP5와 동일한 0-based 인덱스다. HWPX idRef는
-        // writer가 순서대로 내는 1-based 정의 id로 되돌린다(인덱스 0도 유효).
+        // IR의 번호/글머리표 정의 참조는 HWP5와 동일한 0-based 인덱스다. HWPX
+        // idRef는 writer가 순서대로 내는 1-based 정의 id로 되돌린다(인덱스 0도 유효).
+        // 개요(OUTLINE)는 read가 정규화하지 않는 원시 idRef(정품 표본은 0)라 그대로 낸다.
         let heading = if ps.head_type() != 0 {
-            let hty = match ps.head_type() {
-                1 => "OUTLINE",
-                2 => "NUMBER",
-                _ => "BULLET",
+            let (hty, id_ref) = match ps.head_type() {
+                1 => ("OUTLINE", u32::from(ps.numbering_id)),
+                2 => ("NUMBER", u32::from(ps.numbering_id) + 1),
+                _ => ("BULLET", u32::from(ps.numbering_id) + 1),
             };
             format!(
-                r##"<hh:heading type="{hty}" idRef="{}" level="{}"/>"##,
-                u32::from(ps.numbering_id) + 1,
+                r##"<hh:heading type="{hty}" idRef="{id_ref}" level="{}"/>"##,
                 ps.head_level(),
             )
         } else {

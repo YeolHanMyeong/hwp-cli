@@ -340,11 +340,14 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
                             }
                         })?;
                         let external_id = attr_u16(e, "id").unwrap_or(index.saturating_add(1));
-                        if numbering_ids.insert(external_id, index).is_some() {
-                            return Err(HwpxError::Xml {
-                                entry: "Contents/header.xml".to_string(),
-                                message: format!("중복 번호 정의 id: {external_id}"),
-                            });
+                        // 중복 id는 첫 정의 우선(야생 파일 관용 — 하드 에러로 읽기를 막지 않는다).
+                        if let std::collections::hash_map::Entry::Vacant(slot) =
+                            numbering_ids.entry(external_id)
+                        {
+                            slot.insert(index);
+                        } else {
+                            warnings
+                                .push(format!("중복 번호 정의 id: {external_id} (첫 정의 유지)"));
                         }
                         current_numbering = Some(Vec::new());
                         if empty {
@@ -377,11 +380,15 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
                             }
                         })?;
                         let external_id = attr_u16(e, "id").unwrap_or(index.saturating_add(1));
-                        if bullet_ids.insert(external_id, index).is_some() {
-                            return Err(HwpxError::Xml {
-                                entry: "Contents/header.xml".to_string(),
-                                message: format!("중복 글머리표 정의 id: {external_id}"),
-                            });
+                        // 중복 id는 첫 정의 우선(야생 파일 관용).
+                        if let std::collections::hash_map::Entry::Vacant(slot) =
+                            bullet_ids.entry(external_id)
+                        {
+                            slot.insert(index);
+                        } else {
+                            warnings.push(format!(
+                                "중복 글머리표 정의 id: {external_id} (첫 정의 유지)"
+                            ));
                         }
                         let ch = attr(e, "char")
                             .and_then(|s| s.chars().next())
@@ -598,10 +605,17 @@ pub fn parse_header(xml: &str) -> Result<(DocHeader, Vec<String>)> {
             3 => bullet_ids.get(&raw),
             _ => continue,
         };
-        ps.numbering_id = mapped.copied().ok_or_else(|| HwpxError::Xml {
-            entry: "Contents/header.xml".to_string(),
-            message: format!("정의되지 않은 문단 머리 idRef: {raw}"),
-        })?;
+        // 미정의 idRef는 야생 파일에서 관찰될 수 있다 — 읽기를 막지 않고 첫 정의(0)로
+        // 폴백한다(렌더/마커는 기본 형식으로 근사, writer는 항상 정의 1개 이상 방출).
+        ps.numbering_id = match mapped {
+            Some(index) => *index,
+            None => {
+                warnings.push(format!(
+                    "정의되지 않은 문단 머리 idRef: {raw} (기본 정의로 폴백)"
+                ));
+                0
+            }
+        };
     }
 
     Ok((header, warnings))

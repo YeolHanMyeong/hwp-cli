@@ -288,11 +288,36 @@ fn 목록_정의_idref를_0기반_ir로_정규화() {
     assert_eq!(header.bullet_chars, vec!['•', '■']);
 }
 
+/// 미정의 idRef는 야생 파일 관용 — 읽기를 막지 않고 경고 + 첫 정의(0) 폴백.
 #[test]
-fn 정의되지_않은_목록_idref는_오류() {
+fn 정의되지_않은_목록_idref는_경고_후_폴백() {
     let xml = r#"<hh:head><hh:refList><hh:numberings><hh:numbering id="7"/></hh:numberings><hh:paraProperties><hh:paraPr id="0"><hh:heading type="NUMBER" idRef="42" level="1"/></hh:paraPr></hh:paraProperties></hh:refList></hh:head>"#;
-    let error = hwpx::read::header::parse_header(xml).unwrap_err();
-    assert!(error.to_string().contains("idRef: 42"), "{error}");
+    let (header, warnings) = hwpx::read::header::parse_header(xml).unwrap();
+    assert_eq!(header.para_shapes[0].numbering_id, 0, "기본 정의로 폴백");
+    assert!(
+        warnings.iter().any(|w| w.contains("idRef: 42")),
+        "{warnings:?}"
+    );
+}
+
+/// 개요(OUTLINE) heading은 정규화 없이 원시 idRef를 왕복 보존한다(정품 표본은 idRef=0).
+#[test]
+fn 개요_heading_idref_왕복_보존() {
+    let xml = r#"<hh:head><hh:refList><hh:paraProperties itemCnt="1"><hh:paraPr id="0"><hh:heading type="OUTLINE" idRef="0" level="1"/></hh:paraPr></hh:paraProperties></hh:refList></hh:head>"#;
+    let (h1, _) = hwpx::read::header::parse_header(xml).unwrap();
+    assert_eq!(h1.para_shapes[0].head_type(), 1, "개요형 머리");
+    assert_eq!(h1.para_shapes[0].numbering_id, 0, "원시 idRef 유지");
+
+    let out = hwpx::write::header::write_header(&h1, 1);
+    assert!(
+        out.contains(r#"<hh:heading type="OUTLINE" idRef="0" level="1"/>"#),
+        "개요 idRef 원시값 재방출: {out}"
+    );
+    let (h2, _) = hwpx::read::header::parse_header(&out).unwrap();
+    assert_eq!(
+        h2.para_shapes[0].numbering_id, 0,
+        "재읽기에도 드리프트 없음"
+    );
 }
 
 /// 쪽번호/감추기/새번호 컨트롤이 올바른 ctrl_id로 매핑·보존돼야 한다(드롭 방지).
