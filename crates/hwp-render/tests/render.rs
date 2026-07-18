@@ -314,7 +314,10 @@ fn 수식_정답지_렌더() {
     assert!(px > 300, "hwpx 수식이 조판돼야: {px}");
     // 같은 스크립트 → 두 포맷 잉크량이 2배 이내로 비슷해야 한다.
     let ratio = p5.max(px) as f32 / p5.min(px).max(1) as f32;
-    assert!(ratio < 2.0, "hwp5({p5})/hwpx({px}) 조판 불일치: 비 {ratio:.1}");
+    assert!(
+        ratio < 2.0,
+        "hwp5({p5})/hwpx({px}) 조판 불일치: 비 {ratio:.1}"
+    );
 }
 
 /// 연결 다단 글상자: annual_report "At a Glance"(5쪽)는 월 텍스트가 왼쪽→오른쪽 단으로

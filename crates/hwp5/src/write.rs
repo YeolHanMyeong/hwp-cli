@@ -1010,14 +1010,14 @@ pub(crate) fn hwp_summary_information(meta: &Metadata) -> Vec<u8> {
         Dictionary,
     }
     let props: [(u32, Val); 14] = [
-        (0x02, Val::Str(title)),          // 제목
-        (0x03, Val::Str(subject)),        // 주제
-        (0x04, Val::Str(author)),         // 지은이
-        (0x14, Val::Str(&date_str)),      // 날짜 문자열(작성일시 KST)
-        (0x05, Val::Str(keywords)),       // 키워드
-        (0x06, Val::Str(description)),    // 설명
-        (0x08, Val::Str(last_saved_by)),  // 마지막 저장자
-        (0x09, Val::Str("hwp-cli")),      // 프로그램
+        (0x02, Val::Str(title)),         // 제목
+        (0x03, Val::Str(subject)),       // 주제
+        (0x04, Val::Str(author)),        // 지은이
+        (0x14, Val::Str(&date_str)),     // 날짜 문자열(작성일시 KST)
+        (0x05, Val::Str(keywords)),      // 키워드
+        (0x06, Val::Str(description)),   // 설명
+        (0x08, Val::Str(last_saved_by)), // 마지막 저장자
+        (0x09, Val::Str("hwp-cli")),     // 프로그램
         (0x0C, Val::FileTime(create_time)),
         (0x0D, Val::FileTime(modify_time)),
         (0x0B, Val::FileTime(0)),

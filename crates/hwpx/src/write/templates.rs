@@ -78,8 +78,12 @@ pub fn content_hpf(
     let lastsaveby_el = meta_text_el("lastsaveby", meta.last_saved_by.as_deref());
     // 날짜: create_time/modify_time(FILETIME raw u64)에서 파생.
     // CreatedDate/ModifiedDate는 ISO-8601 UTC, date는 한국어 KST(create 기준).
-    let created_iso = meta.create_time.and_then(hwp_model::filetime_to_iso8601_utc);
-    let modified_iso = meta.modify_time.and_then(hwp_model::filetime_to_iso8601_utc);
+    let created_iso = meta
+        .create_time
+        .and_then(hwp_model::filetime_to_iso8601_utc);
+    let modified_iso = meta
+        .modify_time
+        .and_then(hwp_model::filetime_to_iso8601_utc);
     let date_kst = meta.create_time.and_then(hwp_model::filetime_to_korean_kst);
     let created_el = meta_text_el("CreatedDate", created_iso.as_deref());
     let modified_el = meta_text_el("ModifiedDate", modified_iso.as_deref());
@@ -94,7 +98,10 @@ pub fn content_hpf(
 /// 값이 비어 있으면 빈 요소(`.../>`)로 방출한다(정품 표본이 빈 요소를 유지).
 fn meta_text_el(name: &str, value: Option<&str>) -> String {
     match value.filter(|v| !v.is_empty()) {
-        Some(v) => format!("<opf:meta name=\"{name}\" content=\"text\">{}</opf:meta>", esc(v)),
+        Some(v) => format!(
+            "<opf:meta name=\"{name}\" content=\"text\">{}</opf:meta>",
+            esc(v)
+        ),
         None => format!("<opf:meta name=\"{name}\" content=\"text\"/>"),
     }
 }
