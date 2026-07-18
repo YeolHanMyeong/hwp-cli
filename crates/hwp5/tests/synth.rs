@@ -502,3 +502,27 @@ fn 글상자_hwpx출신_안전저하_텍스트보존() {
     // 손상 원인이던 "페이로드가 없는 컨트롤 드롭"은 없다(텍스트 hoist로 대체).
     assert!(!reread.plain_text().is_empty(), "유효 문서(빈 본문 아님)");
 }
+
+/// 스타일 사다리(from_markdown 목록/절번호)는 리터럴 마커 방식이라 BULLET 정의
+/// 레코드를 만들지 않아야 한다 — RawEntry 없는 정의 참조는 dangling ref(A10 손상
+/// 클래스)가 되므로, hwp5 출력의 BULLET 레코드 0건을 단언한다.
+#[test]
+fn 스타일_사다리_네이티브_정의_없음() {
+    let doc = hwp_convert::from_markdown("# 제목\n\n- 항목\n  - 하위\n\n1. 첫\n2. 둘\n");
+    let out = tmp("synth_ladder.hwp");
+    hwp5::write_document(&doc, &out, &hwp5::WriteOptions::default()).unwrap();
+    let mut c = hwp5::Hwp5Container::open(&out).unwrap();
+    let di = c.read_record_stream("/DocInfo").unwrap();
+    let scan = hwp5::record::scan_stream(&di, hwp5::record::ScanMode::Tolerant).unwrap();
+    let bullets = scan
+        .roots
+        .iter()
+        .filter(|r| r.tag == hwp5::record::tag::BULLET)
+        .count();
+    assert_eq!(bullets, 0, "BULLET 레코드 0건(리터럴 마커 방식)");
+
+    // 리터럴 마커 텍스트는 그대로 왕복된다.
+    let reread = hwp5::read_document(&out).unwrap().document;
+    assert!(reread.plain_text().contains("❍ 항목"));
+    assert!(reread.plain_text().contains("1. 제목"));
+}

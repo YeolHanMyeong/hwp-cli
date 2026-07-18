@@ -816,3 +816,29 @@ fn 쪽_컨트롤_hwpx_페이로드_왕복() {
         assert_eq!(got, want, "{} 페이로드 왕복", String::from_utf8_lossy(cid));
     }
 }
+
+/// 스타일 사다리(목록/절번호 전용 paraShape) hwpx 왕복: 리터럴 마커 텍스트와
+/// 전용 문단 모양(들여쓰기)이 보존되고, 네이티브 번호 정의는 없어야 한다.
+#[test]
+fn 왕복_스타일_사다리() {
+    let doc = hwp_convert::from_markdown("# 제목\n\n## 절\n\n- 항목\n  - 하위\n\n1. 첫\n");
+    let out = tmp("ladder.hwpx");
+    let warnings = hwpx::write_document(&doc, &out).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let reread = hwpx::read_document(&out).unwrap().document;
+
+    // 리터럴 마커 텍스트 보존.
+    assert_eq!(reread.plain_text(), doc.plain_text());
+    // 전용 문단 모양 5~8 왕복 (들여쓰기 값 포함).
+    assert!(reread.header.para_shapes.len() >= 9);
+    assert_eq!(reread.header.para_shapes[6].margin_left, 8000, "❍ 들여쓰기");
+    // 리터럴 방식 — head_type 비트는 전부 0, 네이티브 불릿 정의 없음.
+    assert!(reread.header.para_shapes.iter().all(|ps| ps.head_type() == 0));
+    assert!(reread.header.bullet_chars.is_empty(), "불릿 정의 0건");
+    // 번호 정의는 writer가 빈 경우 기본 1개를 방출한다(기존 동작) — 사용자 정의는 없어야.
+    assert!(
+        reread.header.numbering_levels.len() <= 1,
+        "번호 정의는 기본 안전망 최대 1개: {:?}",
+        reread.header.numbering_levels.len()
+    );
+}

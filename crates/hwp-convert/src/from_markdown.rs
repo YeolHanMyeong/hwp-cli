@@ -1,7 +1,12 @@
 //! Markdown → IR.
 //!
-//! 매핑: 헤딩 → "개요 N" 스타일, 굵게/기울임 → 문자 모양 변형,
-//! GFM 표 → Table 컨트롤, 목록 → "• " 접두 문단, 줄바꿈 → CharCtrl(10).
+//! 매핑: 헤딩 → "개요 N" 스타일 + 절 번호 접두(리터럴), 굵게/기울임 → 문자 모양 변형,
+//! GFM 표 → Table 컨트롤, 목록 → 표준 불릿/번호 접두 문단(❍/`- `/❶/`n) `, 들여쓰기는
+//! 전용 문단 모양), 줄바꿈 → CharCtrl(10).
+//!
+//! 스타일 사다리(GI-2 해소): RISE 보고서 표본(fixtures/samples/report-tables.hwpx)의
+//! 리터럴 마커 + 행잉 인덴트 방식을 따른다 — 네이티브 BULLET/NUMBERING 정의는 만들지
+//! 않는다(hwp5 writer는 RawEntry 없는 정의를 합성하지 못해 dangling ref가 되므로).
 
 use hwp_model::{
     BorderFill, BorderFillId, BorderLine, Cell, CharShape, CharShapeId, Control, DocMeta, Document,
@@ -20,6 +25,28 @@ mod shapes {
     pub const HEADING_BASE: u16 = 4;
     /// 하이퍼링크 표시 텍스트(파랑 + 밑줄)
     pub const HYPERLINK: u16 = 10;
+}
+
+/// 문단 모양 ID 배치 (default_header의 para_shapes와 일치해야 함).
+mod para {
+    /// 기본·표 셀(양쪽, 간격 없음)
+    pub const CELL: u16 = 0;
+    /// 제목(왼쪽 + 위/아래 간격) — H1, H4~H6
+    pub const HEADING: u16 = 1;
+    /// 본문(양쪽 + 아래 간격)
+    pub const BODY: u16 = 2;
+    /// 인용문(왼쪽 들여 + 좌측 막대)
+    pub const QUOTE: u16 = 3;
+    /// 코드블록(좌우 들여 + 회색 배경)
+    pub const CODE: u16 = 4;
+    /// 절 번호 제목 — H2/H3 (왼쪽 들여 2000)
+    pub const SECTION: u16 = 5;
+    /// 불릿 수준 1 — `❍ ` (왼쪽 8000 / 내어쓰기 −2400, 추정치)
+    pub const BULLET1: u16 = 6;
+    /// 불릿/번호 수준 2+ — `- `, `n) ` (왼쪽 6000 / 내어쓰기 −8548, 표본 paraPr43/44×2)
+    pub const BULLET2: u16 = 7;
+    /// 원형 번호 수준 1 — `❶ ` (왼쪽 9200 / 내어쓰기 −6076, 표본 paraPr46×2)
+    pub const NUMBERED: u16 = 8;
 }
 
 /// 테두리/배경 ID 배치: 1·2 = 무테두리(기본/참조용), 3 = 실선 0.12mm.
@@ -155,6 +182,33 @@ pub fn default_header() -> hwp_model::DocHeader {
             border_fill_id: 5,
             spacing_top: 300,
             spacing_bottom: 300,
+            ..base_para.clone()
+        },
+        // ── 스타일 사다리(RISE 보고서 표본, fixtures/samples/report-tables.hwpx) ──
+        // 전부 리터럴 마커 + 행잉 인덴트 — head_type 비트(attr1 bit23~27)는 건드리지
+        // 않는다(네이티브 BULLET/NUMBERING 정의를 만들지 않으므로 dangling ref 방지).
+        // 5 절 번호 제목(H2/H3): 왼쪽 들여 1000(HWPUNIT)×2. 표본 ps40 계열.
+        ParaShape {
+            margin_left: 2000,
+            ..base_para.clone()
+        },
+        // 6 불릿 수준 1 (`❍ `): 표본 ps34(left 4000×2). intent는 표본 부재 추정치.
+        // ponytail: intent −2400은 −1200×2 추정 — 실기에서 행잉 깊이 확인 필요.
+        ParaShape {
+            margin_left: 8000,
+            indent: -2400,
+            ..base_para.clone()
+        },
+        // 7 불릿/번호 수준 2+ (`- `, `n) `): 표본 ps43/44(left 3000, intent −4274)×2.
+        ParaShape {
+            margin_left: 6000,
+            indent: -8548,
+            ..base_para.clone()
+        },
+        // 8 원형 번호 수준 1 (`❶ `): 표본 ps46(left 4600, intent −3038)×2.
+        ParaShape {
+            margin_left: 9200,
+            indent: -6076,
             ..base_para
         },
     ];
@@ -278,10 +332,14 @@ struct Builder {
     in_blockquote: u32,        // 인용문 중첩 깊이(>0이면 인용 문단)
     in_codeblock: bool,        // 코드블록 구간(회색 배경 문단)
     heading: Option<u16>,      // 1..=6
+    /// H1~H3 절 번호 접두(헤딩 시작 시 계산, 텍스트가 숫자로 시작하면 폐기).
+    pending_heading_num: Option<String>,
+    /// 절 번호 카운터 [H1, H2, H3].
+    h_counters: [u32; 3],
     // 표 수집 상태
     table: Option<TableBuilder>,
-    list_depth: usize,
-    pending_bullet: bool,
+    /// 목록 스택: None=불릿, Some(다음 항목 번호)=번호 목록. 깊이 = len - 1.
+    list_stack: Vec<Option<u64>>,
 }
 
 #[derive(Default)]
@@ -358,17 +416,30 @@ impl Builder {
         if runs.is_empty() {
             runs.push((0, CharShapeId(self.current_shape())));
         }
-        // 코드블록→4(회색 배경), 인용→3(들여쓰기+막대), 제목→1, 표 셀→0(간격 없음), 본문→2.
+        // 코드블록→4(회색 배경), 인용→3(들여쓰기+막대), 제목→1(H2/H3은 5), 표 셀→0,
+        // 목록 항목→6/7/8(종류·깊이별), 본문→2.
         let para_shape = if self.in_codeblock {
-            4
+            para::CODE
         } else if self.in_blockquote > 0 {
-            3
-        } else if self.heading.is_some() {
-            1
+            para::QUOTE
+        } else if let Some(hn) = self.heading {
+            if (2..=3).contains(&hn) {
+                para::SECTION
+            } else {
+                para::HEADING
+            }
         } else if self.table.is_some() {
-            0
+            para::CELL
+        } else if let Some(kind) = self.list_stack.last() {
+            let depth = self.list_stack.len() - 1;
+            match (kind, depth) {
+                (None, 0) => para::BULLET1,
+                (None, _) => para::BULLET2,
+                (Some(_), 0) => para::NUMBERED,
+                (Some(_), _) => para::BULLET2,
+            }
         } else {
-            2
+            para::BODY
         };
         let mut para = Paragraph {
             para_shape: ParaShapeId(para_shape),
@@ -394,27 +465,42 @@ impl Builder {
                 let n = heading_level(level);
                 self.heading = Some(n);
                 self.style = n; // 개요 N 스타일
+                // H1~H3 절 번호 접두 (H4~H6은 번호 없음 — 사다리 외).
+                if (1..=3).contains(&n) {
+                    let i = (n - 1) as usize;
+                    self.h_counters[i] += 1;
+                    for c in &mut self.h_counters[i + 1..] {
+                        *c = 0;
+                    }
+                    self.pending_heading_num = Some(match n {
+                        1 => format!("{}. ", self.h_counters[0]),
+                        2 => format!("{}-{}. ", self.h_counters[0], self.h_counters[1]),
+                        _ => format!(
+                            "{}-{}-{}. ",
+                            self.h_counters[0], self.h_counters[1], self.h_counters[2]
+                        ),
+                    });
+                }
             }
             Event::End(TagEnd::Heading(_)) => {
                 self.flush_paragraph();
                 self.heading = None;
+                self.pending_heading_num = None;
                 self.style = 0;
             }
-            Event::Start(Tag::Paragraph) => {
-                if self.pending_bullet {
-                    self.push_text("• ");
-                    self.pending_bullet = false;
-                }
-            }
+            Event::Start(Tag::Paragraph) => {}
             Event::End(TagEnd::Paragraph) => self.flush_paragraph(),
             Event::Start(Tag::Strong) => self.bold = true,
             Event::End(TagEnd::Strong) => self.bold = false,
             Event::Start(Tag::Emphasis) => self.italic = true,
             Event::End(TagEnd::Emphasis) => self.italic = false,
             Event::Text(t) => {
-                if self.pending_bullet {
-                    self.push_text("• ");
-                    self.pending_bullet = false;
+                // 절 번호 접두는 첫 텍스트에서 확정한다 — 텍스트가 이미 숫자로
+                // 시작하면(예: "1. 기존 번호") 이중 번호가 되므로 붙이지 않는다.
+                if let Some(prefix) = self.pending_heading_num.take()
+                    && !t.starts_with(|c: char| c.is_ascii_digit())
+                {
+                    self.push_text(&prefix);
                 }
                 if self.in_codeblock {
                     self.push_code_text(&t); // 코드블록 텍스트의 \n → 줄바꿈
@@ -462,13 +548,38 @@ impl Builder {
                 self.flush_paragraph();
                 self.in_codeblock = false;
             }
-            Event::Start(Tag::List(_)) => self.list_depth += 1,
-            Event::End(TagEnd::List(_)) => self.list_depth -= 1,
-            Event::Start(Tag::Item) => self.pending_bullet = true,
-            Event::End(TagEnd::Item) => {
+            // ── 목록: 종류별 리터럴 마커 + 수준별 전용 문단 모양 (GI-2) ──
+            // Start(List)에서 flush — 중첩 타이트 리스트가 한 문단으로 뭉치는 것을 막는다.
+            Event::Start(Tag::List(start)) => {
                 self.flush_paragraph();
-                self.pending_bullet = false;
+                self.list_stack.push(start);
             }
+            Event::End(TagEnd::List(_)) => {
+                self.flush_paragraph();
+                self.list_stack.pop();
+            }
+            Event::Start(Tag::Item) => {
+                self.flush_paragraph();
+                // 마커는 항목 시작에서 즉시 방출한다(문단 시작 이벤트 유무와 무관).
+                let depth = self.list_stack.len().saturating_sub(1);
+                let marker = match self.list_stack.last_mut() {
+                    Some(Some(n)) => {
+                        let m = if depth == 0 {
+                            circled_marker(*n)
+                        } else {
+                            format!("{n}) ")
+                        };
+                        *n += 1;
+                        m
+                    }
+                    Some(None) => (if depth == 0 { "❍ " } else { "- " }).to_string(),
+                    None => String::new(),
+                };
+                if !marker.is_empty() {
+                    self.push_text(&marker);
+                }
+            }
+            Event::End(TagEnd::Item) => self.flush_paragraph(),
             // ── GFM 표 ──
             Event::Start(Tag::Table(_)) => {
                 self.flush_paragraph();
@@ -520,6 +631,16 @@ fn heading_level(level: HeadingLevel) -> u16 {
         HeadingLevel::H4 => 4,
         HeadingLevel::H5 => 5,
         HeadingLevel::H6 => 6,
+    }
+}
+
+/// 번호 목록 수준 1 마커: 1~9는 원형 숫자(❶~❾), 10 이상은 "N. ".
+fn circled_marker(n: u64) -> String {
+    if (1..=9).contains(&n) {
+        // ❶ = U+2776 (DINGBAT NEGATIVE CIRCLED DIGIT ONE, 세리프 계열 — 표본과 동일).
+        char::from_u32(0x2775 + n as u32).map_or_else(|| format!("{n}. "), |c| format!("{c} "))
+    } else {
+        format!("{n}. ")
     }
 }
 
@@ -689,10 +810,101 @@ fn table_paragraph(tb: TableBuilder) -> Paragraph {
 mod tests {
     use super::*;
 
+    fn para_text(p: &Paragraph) -> String {
+        p.chars
+            .iter()
+            .filter_map(|c| match c {
+                HwpChar::Text(ch) => Some(*ch),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn texts(doc: &Document) -> Vec<String> {
+        doc.sections[0].paragraphs.iter().map(para_text).collect()
+    }
+
     #[test]
     fn default_header_크기() {
         let h = default_header();
         assert_eq!(h.char_shapes[0].base_size, 1000); // 본문 10pt
         assert_eq!(h.char_shapes[4].base_size, 1800); // H1 = 본문 × 1.8
+        assert_eq!(h.para_shapes.len(), 9, "사다리 문단 모양 5~8 추가분");
+        // 네이티브 정의는 만들지 않는다(hwp5 dangling ref 방지).
+        assert!(h.bullets.is_empty() && h.bullet_chars.is_empty());
+        assert!(h.numberings.is_empty() && h.numbering_levels.is_empty());
+        // head_type 비트는 전부 0 (리터럴 마커 방식).
+        assert!(h.para_shapes.iter().all(|ps| ps.head_type() == 0));
+    }
+
+    #[test]
+    fn 목록_중첩_ul_ol_마커와_문단모양() {
+        let doc = from_markdown("- 상위\n  - 하위\n1. 첫\n2. 둘\n");
+        let t = texts(&doc);
+        // 첫 문단에는 secd/cold가 주입된다(텍스트는 첫 항목).
+        assert_eq!(t[0], "❍ 상위");
+        assert_eq!(t[1], "- 하위");
+        assert_eq!(t[2], "❶ 첫");
+        assert_eq!(t[3], "❷ 둘");
+        let ps = |i: usize| doc.sections[0].paragraphs[i].para_shape.0;
+        assert_eq!(ps(0), para::BULLET1, "UL 깊이 0");
+        assert_eq!(ps(1), para::BULLET2, "UL 깊이 1");
+        assert_eq!(ps(2), para::NUMBERED, "OL 깊이 0");
+    }
+
+    #[test]
+    fn 목록_ol_시작번호와_하위수준() {
+        let doc = from_markdown("3. 세\n4. 네\n   1) 하위\n");
+        let t = texts(&doc);
+        assert_eq!(t[0], "❸ 세");
+        assert_eq!(t[1], "❹ 네");
+        assert!(t[2].starts_with("1) "), "OL 깊이 1은 n) 마커: {:?}", t[2]);
+    }
+
+    #[test]
+    fn 헤딩_절번호_카운터() {
+        let doc = from_markdown("# 일\n# 이\n## 이일\n## 이이\n# 삼\n### 삼일일\n");
+        let t = texts(&doc);
+        assert_eq!(t[0], "1. 일");
+        assert_eq!(t[1], "2. 이");
+        assert_eq!(t[2], "2-1. 이일");
+        assert_eq!(t[3], "2-2. 이이");
+        assert_eq!(t[4], "3. 삼");
+        assert_eq!(t[5], "3-0-1. 삼일일");
+        // H2/H3는 절 번호 문단 모양.
+        let ps = |i: usize| doc.sections[0].paragraphs[i].para_shape.0;
+        assert_eq!(ps(0), para::HEADING);
+        assert_eq!(ps(2), para::SECTION);
+        assert_eq!(ps(5), para::SECTION);
+    }
+
+    #[test]
+    fn 헤딩_이중번호_방지() {
+        // 이미 숫자로 시작하는 제목에는 절 번호를 붙이지 않는다.
+        let doc = from_markdown("# 3-2-1. 기존 번호 제목\n");
+        let t = texts(&doc);
+        assert_eq!(t[0], "3-2-1. 기존 번호 제목");
+    }
+
+    #[test]
+    fn 목록_타이트_중첩_문단분리() {
+        // 중첩 타이트 리스트가 한 문단으로 뭉치지 않고 항목별 문단이 된다.
+        let doc = from_markdown("- a\n  - b\n  - c\n- d\n");
+        let t = texts(&doc);
+        assert_eq!(t.len(), 4);
+        assert_eq!(t[0], "❍ a");
+        assert_eq!(t[1], "- b");
+        assert_eq!(t[2], "- c");
+        assert_eq!(t[3], "❍ d");
+    }
+
+    #[test]
+    fn 목록_숫자10이상_평문마커() {
+        let items: String = (1..=11).map(|i| format!("{i}. 항{i}\n")).collect();
+        let doc = from_markdown(&items);
+        let t = texts(&doc);
+        assert_eq!(t[8], "❾ 항9");
+        assert_eq!(t[9], "10. 항10");
+        assert_eq!(t[10], "11. 항11");
     }
 }
