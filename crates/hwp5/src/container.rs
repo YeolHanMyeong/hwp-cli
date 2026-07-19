@@ -50,7 +50,10 @@ impl Hwp5Container {
             .walk()
             .filter(|e| e.is_stream())
             .map(|e| StreamInfo {
-                path: e.path().to_string_lossy().into_owned(),
+                // cfb의 Entry::path()는 Path::join으로 만드므로 Windows에서는 구분자가
+                // `\`로 렌더된다 — 스트림 경로 필터(`/BodyText/Section`)와 open_stream이
+                // `/`를 전제하므로 항상 `/`로 정규화한다(CFB 항목명 자체엔 구분자가 못 옴).
+                path: e.path().to_string_lossy().replace('\\', "/"),
                 size: e.len(),
             })
             .collect();

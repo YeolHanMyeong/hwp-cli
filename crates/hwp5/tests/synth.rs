@@ -779,3 +779,26 @@ fn 스타일_사다리_hwp5_정의_왕복() {
     assert!(text.contains("항목"), "{text}");
     assert!(!text.contains("❍"), "리터럴 마커는 더 쓰지 않는다: {text}");
 }
+
+/// 스트림 경로 구분자 회귀: cfb 열거가 플랫폼 구분자(Windows `\`)를 섞어도
+/// list_streams/body_sections는 항상 `/` 정규 경로를 돌려줘야 한다 — 아니면
+/// Windows에서 `/BodyText/Section` 필터가 전부 빗나가 본문이 빈 문서로 읽힌다
+/// (CI windows-latest의 "표 #0 없음"/빈 cat 3건의 근본 원인).
+#[test]
+fn 스트림_경로_구분자_정규화() {
+    let doc = hwp_convert::from_markdown("본문\n");
+    let out = tmp("path_sep.hwp");
+    hwp5::write_document(&doc, &out, &hwp5::WriteOptions::default()).unwrap();
+    let mut c = hwp5::Hwp5Container::open(&out).unwrap();
+    let streams = c.list_streams();
+    assert!(!streams.is_empty());
+    for s in &streams {
+        assert!(s.path.starts_with('/'), "절대 경로: {}", s.path);
+        assert!(!s.path.contains('\\'), "백슬래시 금지: {}", s.path);
+    }
+    let sections = c.body_sections();
+    assert_eq!(sections, vec!["/BodyText/Section0".to_string()]);
+    // 열거 경로로 바로 읽기가 돼야 한다.
+    let body = c.read_record_stream(&sections[0]).unwrap();
+    assert!(!body.is_empty(), "본문 스트림 읽기");
+}
