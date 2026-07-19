@@ -7,11 +7,13 @@ HWP 5.0(바이너리)·HWPX(OWPML)를 외부 HWP 라이브러리 없이 **직접
 
 ```bash
 cargo build                    # 디버그 빌드 (bin: hwp)
-cargo test --workspace         # 전체 테스트 (fixture 없으면 통합 테스트는 자동 skip)
-cargo clippy --workspace       # 린트
+scripts/check.sh               # 로컬 CI 미러 = CI 3종 게이트 (fmt+clippy+test, PR 전 필수)
 HWP_FONT_DIR=$PWD/fonts python3 tools/diagnostic_corpus.py   # 진단 코퍼스 + 자체 검증 하네스
 ```
 
+- CI 게이트(`.github/workflows/ci.yml`)와 로컬은 **반드시 같은 커맨드**를 쓴다:
+  `cargo fmt --all --check` → `cargo clippy --workspace --all-targets -- -D warnings` → `cargo test --workspace`.
+  부분 실행(clippy만, test만)은 `scripts/check.sh` 대신 직접 항을 골라 실행한다.
 - Rust edition 2024, rust-version 1.93.
 - 렌더 테스트는 저장소 동봉 폰트(`fonts/` HCR바탕·돋움)를 쓴다.
 - `HWP_GOLDEN=1` — 한글 기준 PNG와의 골든 렌더 대조(옵트인). `HWP_CORPUS_DIR` — 대형 야생 corpus 소크 테스트.
