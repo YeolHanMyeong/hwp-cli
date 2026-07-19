@@ -33,10 +33,17 @@ pub struct FieldInfo {
     pub value: String,
 }
 
-/// 필드 종류 컨트롤 ID인지(누름틀·계산식·하이퍼링크 등).
+/// 필드 종류 컨트롤 ID인지(누름틀·계산식·하이퍼링크 등). 스펙 표 128의 34종 중
+/// **메모(`%%me`)를 제외한 33종**을 인식한다. 인식하지 못하면 hwpx write가 필드를
+/// **통째 드롭**(catch-all)하므로, 종류 라벨을 몰라도 최소한 fieldBegin/End·내용
+/// 텍스트는 보존하도록 목록에 담는다(OWPML type은 [`owpml_field_type`]의 UNKNOWN
+/// 폴백 — GF-1과 동일 손실 등급). `%%me`는 메모 리스트(GB-7)와 짝을 이뤄야 하는데
+/// 그 본문은 아직 미방출이라, 근거 없이 dangling 메모 필드를 내보내면 한글에서
+/// 문서가 깨질 수 있어 **의도적으로 보류**한다(정답지 필요).
 pub fn is_field_ctrl_id(ctrl_id: &[u8; 4]) -> bool {
     matches!(
         ctrl_id,
+        // 기존 12종(표 128).
         b"%clk"
             | b"%fmu"
             | b"%hlk"
@@ -49,6 +56,29 @@ pub fn is_field_ctrl_id(ctrl_id: &[u8; 4]) -> bool {
             | b"%smr"
             | b"%usr"
             | b"%unk"
+            // 변경추적 필드 19종(FIELD_REVISION_*, 표 128).
+            | b"%sig"
+            | b"%spl"
+            | b"%%mr"
+            | b"%%*d"
+            | b"%%*a"
+            | b"%%*C"
+            | b"%%*S"
+            | b"%%*T"
+            | b"%%*P"
+            | b"%%*L"
+            | b"%%*c"
+            | b"%%*h"
+            | b"%%*A"
+            | b"%%*i"
+            | b"%%*t"
+            | b"%%*r"
+            | b"%%*l"
+            | b"%%*n"
+            | b"%%*e"
+            // 개인정보 보안·차례(표 128). 메모(%%me)는 GB-7 연동 우려로 보류.
+            | b"%cpr"
+            | b"%toc"
     )
 }
 
@@ -66,6 +96,10 @@ pub fn owpml_field_type(ctrl_id: &[u8; 4]) -> &'static str {
         b"%pat" => "PATH",
         b"%smr" => "SUMMARY",
         b"%usr" => "USER_INFO",
+        // 차례 — 정답지 코퍼스 실측(과업지시서 hwpx `type="TABLEOFCONTENTS"`).
+        b"%toc" => "TABLEOFCONTENTS",
+        // 변경추적 19종·개인정보(%cpr)는 OWPML type 이름 근거가 없어 UNKNOWN 폴백
+        // (fieldBegin/End·내용은 보존, 종류 라벨만 상실 — GF-1 등급).
         _ => "UNKNOWN",
     }
 }
@@ -84,6 +118,7 @@ pub fn field_ctrl_id_from_owpml(t: &str) -> [u8; 4] {
         "PATH" | "FILE_PATH" => *b"%pat",
         "SUMMARY" => *b"%smr",
         "USER_INFO" => *b"%usr",
+        "TABLEOFCONTENTS" => *b"%toc",
         _ => *b"%unk",
     }
 }
@@ -101,8 +136,10 @@ fn kind_of(ctrl_id: &[u8; 4]) -> &'static str {
         b"%pat" => "파일경로",
         b"%smr" => "문서요약",
         b"%usr" => "사용자정보",
+        b"%cpr" => "개인정보보호",
+        b"%toc" => "차례",
         b"%unk" => "알수없음",
-        _ => "필드",
+        _ => "필드", // 변경추적(FIELD_REVISION_*) 등은 일반 라벨
     }
 }
 

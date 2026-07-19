@@ -464,6 +464,115 @@ fn 필드_생성_hwpx_왕복() {
     assert_eq!(fields[0].value, "홍길동");
 }
 
+/// GF-4: 표 128의 확장 필드(변경추적·차례·개인정보)가 hwpx write에서 DROP되지
+/// 않고 fieldBegin/End·내용 텍스트로 방출된다. OWPML type은 근거 없어 UNKNOWN 폴백
+/// (라벨은 잃어도 필드·내용 보존 — GF-1 등급). 재읽기 시 %unk로 되살아나 왕복 성립.
+#[test]
+fn 확장필드_hwp5출신_hwpx_방출() {
+    use hwp_model::{Control, GenericControl, HwpChar};
+
+    // 대표 3종: 변경추적(삭제, %%*d)·차례(%toc)·개인정보(%cpr). 각 필드를 한
+    // 문단에 FIELD_START(코드3)+내용+FIELD_END(코드4)로 배치.
+    let fields: [(&[u8; 4], &str); 3] = [
+        (b"%%*d", "삭제된 문장"),
+        (b"%toc", "제1장 서론"),
+        (b"%cpr", "홍**"),
+    ];
+    let mut doc = hwp_convert::from_markdown("본문");
+    let para = &mut doc.sections[0].paragraphs[0];
+    para.chars.clear();
+    para.controls.clear();
+    for (i, (id, text)) in fields.iter().enumerate() {
+        para.chars.push(HwpChar::ExtCtrl {
+            code: 3, // FIELD_START
+            ctrl_id: **id,
+            payload: hwp_convert::field::rev_payload(id),
+            ctrl_index: Some(i as u32),
+        });
+        para.chars.extend(text.chars().map(HwpChar::Text));
+        para.chars.push(HwpChar::InlineCtrl {
+            code: 4, // FIELD_END
+            payload: hwp_convert::field::field_end_payload(id),
+        });
+        para.controls.push(Control::Generic(GenericControl {
+            ctrl_id: **id,
+            data: vec![0u8; 11], // 속성4 기타1 len2=0 id4
+            paragraph_lists: Vec::new(),
+            extras: Vec::new(),
+            raw_children: Vec::new(),
+            gso_shapes: Vec::new(),
+            equation: None,
+            column_def: None,
+        }));
+    }
+    para.header.ctrl_mask = 0;
+
+    let out = tmp("ext_fields.hwpx");
+    let warnings = hwpx::write_document(&doc, &out).unwrap();
+    // 확장 필드는 DROP 경고 없이 방출돼야 한다.
+    assert!(
+        !warnings.iter().any(|w| w.contains("DROP")),
+        "DROP 경고: {warnings:?}"
+    );
+
+    let bytes = std::fs::read(&out).unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut raw = Vec::new();
+    zip.by_name("Contents/section0.xml")
+        .unwrap()
+        .read_to_end(&mut raw)
+        .unwrap();
+    let xml = String::from_utf8(raw).unwrap();
+    assert_eq!(
+        xml.matches("<hp:fieldBegin").count(),
+        3,
+        "fieldBegin 3개: {xml}"
+    );
+    assert_eq!(
+        xml.matches("<hp:fieldEnd").count(),
+        3,
+        "fieldEnd 3개: {xml}"
+    );
+    for (_, text) in &fields {
+        assert!(xml.contains(text), "내용 텍스트 보존({text}): {xml}");
+    }
+    // 차례(%toc)는 코퍼스 실측 OWPML type으로, 변경추적·개인정보는 UNKNOWN 폴백으로.
+    assert!(
+        xml.contains(r#"type="TABLEOFCONTENTS""#),
+        "%toc→TABLEOFCONTENTS: {xml}"
+    );
+    assert_eq!(
+        xml.matches(r#"type="UNKNOWN""#).count(),
+        2,
+        "%%*d·%cpr→UNKNOWN 2개: {xml}"
+    );
+
+    // 재읽기: 필드가 되살아나고 내용 텍스트가 보존된다(왕복 성립). %toc는 종류까지
+    // 왕복(%toc), 변경추적·개인정보는 %unk로 하향(내용은 보존).
+    let reread = hwpx::read_document(&out).unwrap().document;
+    let got = hwp_convert::list_fields(&reread);
+    assert_eq!(got.len(), 3, "필드 3개 왕복: {got:?}");
+    let by_value: std::collections::HashMap<&str, &str> = got
+        .iter()
+        .map(|f| (f.value.as_str(), f.ctrl_id.as_str()))
+        .collect();
+    assert_eq!(
+        by_value.get("제1장 서론"),
+        Some(&"%toc"),
+        "%toc 종류 왕복: {got:?}"
+    );
+    assert_eq!(
+        by_value.get("삭제된 문장"),
+        Some(&"%unk"),
+        "변경추적→%unk: {got:?}"
+    );
+    assert_eq!(
+        by_value.get("홍**"),
+        Some(&"%unk"),
+        "개인정보→%unk: {got:?}"
+    );
+}
+
 /// 책갈피(bokm) hwpx 왕복: create_bookmark → write → `<hp:bookmark name>` → read → list_bookmarks.
 #[test]
 fn 책갈피_생성_hwpx_왕복() {
