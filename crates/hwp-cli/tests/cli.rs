@@ -103,6 +103,16 @@ fn tmp(name: &str) -> PathBuf {
     dir.join(name)
 }
 
+/// 실패 진단용: 파일의 cat 출력(본문+stderr)을 덤프한다 (Windows CI 전용 결함 추적).
+fn dump_file(path: &PathBuf) -> String {
+    let out = hwp().arg("cat").arg(path).output().unwrap();
+    format!(
+        "stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
 #[test]
 fn cat_with_header_footer_hidden_flags() {
     // 합성 문서로 cat 텍스트 추출 옵션 플래그가 파싱되고 본문을 출력하는지(스모크).
@@ -387,8 +397,9 @@ fn edit_add_row_then_fill() {
         .unwrap();
     assert!(
         r1.status.success(),
-        "edit --add-row: {}",
-        String::from_utf8_lossy(&r1.stderr)
+        "edit --add-row: {} | form.hwp: {}",
+        String::from_utf8_lossy(&r1.stderr),
+        dump_file(&form)
     );
     // pass 2: 추가된 행 셀 채움
     let out = tmp("hwp_cli_addrow_out.hwp");
@@ -457,8 +468,9 @@ fn fill_data_tables_grows() {
         .unwrap();
     assert!(
         r.status.success(),
-        "fill --data tables: {}",
-        String::from_utf8_lossy(&r.stderr)
+        "fill --data tables: {} | form.hwp: {}",
+        String::from_utf8_lossy(&r.stderr),
+        dump_file(&form)
     );
     let j = String::from_utf8_lossy(&r.stdout);
     assert!(j.contains("\"rows_added\""), "rows_added 키: {j}");
@@ -863,7 +875,8 @@ fn edit_seal_floating_image_roundtrip() {
     assert!(ct5.status.success(), "hwp5 재읽기 성공");
     assert!(
         String::from_utf8_lossy(&ct5.stdout).contains("(인)"),
-        "hwp5 왕복 후 앵커 유지"
+        "hwp5 왕복 후 앵커 유지 | out.hwp: {}",
+        dump_file(&out_hwp)
     );
 
     for f in [&md, &src, &png, &out_hwpx, &out_hwp] {
