@@ -394,6 +394,7 @@ IR엔 값이 있으나(hwp5로는 나감) hwpx write가 상수/근사로 눌러 
 | `hp:textart` | read fallback(텍스트만)→write DROP | 동일 |
 | `hp:formObject`(양식 개체) | read fallback→write DROP | 동일 |
 | `hp:compose`/`hp:dutmal`(겹침·덧말) | read fallback→write DROP | 동일 |
+| 찾아보기 표식(idxm)·홀짝 조정(pgct)·숨은설명(tcmt) — hwp5 유입 Generic | read fallback(4B ctrl_id 합성, `read/section.rs:704-710`)→write DROP | 2026-07-19 감사 보완 — tcmt는 문단 리스트째 드롭이라 콘텐츠 손실([12](12-feature-gaps.md) GF-5), pgct는 hwpx 대응 요소명 자체 미확인 |
 | 바탕쪽(`hm:` master-page) | read·write 모두 없음 | 네임스페이스 선언만 |
 | 편집 이력(`hhs:`) | read·write 모두 없음 | 네임스페이스 선언만 |
 
