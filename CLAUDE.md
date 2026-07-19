@@ -18,8 +18,16 @@ HWP_FONT_DIR=$PWD/fonts python3 tools/diagnostic_corpus.py   # 진단 코퍼스 
 - 렌더 테스트는 저장소 동봉 폰트(`fonts/` HCR바탕·돋움)를 쓴다.
 - `HWP_GOLDEN=1` — 한글 기준 PNG와의 골든 렌더 대조(옵트인). `HWP_CORPUS_DIR` — 대형 야생 corpus 소크 테스트.
 
-## 데이터 정책 (중요)
+## 브랜치 · PR 정책
 
+- 기능추가·수정·문서 등 **모든 작업은 별도 브랜치**에서 한다: `feat/<주제>`·`fix/<주제>`·`docs/<주제>`.
+  main 직접 push 금지.
+- PR로 제출하고, **CI green(ubuntu+macOS 필수)을 확인한 뒤 squash 머지**한다(머지 커밋 제목의
+  `(#N)` 관례 유지). Windows 잡은 참고용(비차단).
+- PR 전 로컬 게이트는 `scripts/check.sh` — CI와 동일 3커맨드(fmt → clippy --all-targets
+  -D warnings → test). 이걸 통과 못 하면 PR하지 않는다(머지 후 CI 실패의 원천 차단).
+
+## 데이터 정책 (중요)
 - `fixtures/hwp5/*.hwp`·`fixtures/hwpx/*.hwpx`는 gitignore(로컬 전용). 없으면 테스트가 skip될 뿐 실패하지 않는다. 출처는 `fixtures/README.md`.
 - `fixtures/samples/`는 **예외적으로 커밋한다** — 소유자 자작 문서를 대학명 가명 치환한 테스트 샘플만 둔다(익명화 레시피는 `fixtures/README.md`). 원본은 커밋 금지.
 - **정답지 코퍼스(`~/Documents/hwp_samples` 등 정품 한글 파일)는 절대 커밋 금지.**

@@ -306,15 +306,21 @@ cargo fmt --check
 HWP 5.0 포맷 스펙은 한컴 공식 [한글 문서 파일 형식 5.0](https://store.hancom.com/etc/hwpDownload.do)
 문서를 참고한다 — 저작권상 저장소에 동봉하지 않고 공식 배포처 링크만 둔다(`docs/README.md` 참고).
 
-**CI** (`.github/workflows/ci.yml`, GitHub Actions, Ubuntu): `fonts-noto-cjk` 설치 후
-`cargo fmt --check` → `cargo clippy --all-targets -- -D warnings` → `cargo test`를 실행한다.
+**CI** (`.github/workflows/ci.yml`, GitHub Actions): `fonts-noto-cjk` 설치 후
+`cargo fmt --check` → `cargo clippy --all-targets -- -D warnings` → `cargo test --workspace`를
+**ubuntu + macOS**(필수)와 **windows**(참고용, 비차단)에서 실행한다. 로컬 미러는
+`scripts/check.sh`(동일 3커맨드, PR 전 필수).
 
 ## 기여
 
 버그 리포트와 PR을 환영한다. 이슈는 GitHub Issues에, 변경은 PR로 제출한다.
 
-- PR 전 로컬에서 CI와 동일한 게이트를 통과시킨다: `cargo fmt --check`,
-  `cargo clippy --all-targets -- -D warnings`, `cargo test`.
+- **브랜치·PR 정책**: 기능추가·수정·문서 등 모든 작업은 `feat/`·`fix/`·`docs/` 브랜치에서
+  하고, PR로 제출한다. main 직접 push는 하지 않는다. CI green을 확인한 뒤 squash
+  머지한다(머지 커밋 제목의 `(#N)` 관례 유지).
+- PR 전 로컬 게이트는 `scripts/check.sh` 한 방으로 통과시킨다(CI와 동일 3커맨드:
+  `cargo fmt --all --check` → `cargo clippy --workspace --all-targets -- -D warnings` →
+  `cargo test --workspace`).
 - 새 포맷 기능은 가능하면 왕복/골든 테스트를 함께 추가한다.
 - 스펙 참고 자료는 한컴 공식 [한글 문서 파일 형식 5.0](https://store.hancom.com/etc/hwpDownload.do)
   문서를 본다(저장소에 동봉하지 않는다).
