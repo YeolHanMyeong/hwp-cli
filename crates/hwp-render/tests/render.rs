@@ -541,7 +541,10 @@ fn 페이지_걸친_문단배경_조각() {
             .iter()
             .any(|it| matches!(it, Item::Rect { fill, .. } if *fill == fill_color))
     };
-    assert!(has_bg(&list.pages[0]), "1쪽에 배경 조각(Rect)이 있어야 한다");
+    assert!(
+        has_bg(&list.pages[0]),
+        "1쪽에 배경 조각(Rect)이 있어야 한다"
+    );
     assert!(
         has_bg(&list.pages[1]),
         "2쪽에도 배경 조각(Rect)이 있어야 한다 — 페이지 걸친 배경 통째 생략 금지"

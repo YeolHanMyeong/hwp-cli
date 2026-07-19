@@ -166,7 +166,12 @@ fn build_page_border_edges(
     } else {
         // 쪽(본문) 기준: 본문 영역 가장자리에서 gap만큼 바깥(여백 쪽). 정품 표본
         // 부재 — 근사 구현(EVEN/ODD와 함께 후속 실측으로 정밀화).
-        (body_left - gl, body_top - gt, body_right + gr, body_bottom + gb)
+        (
+            body_left - gl,
+            body_top - gt,
+            body_right + gr,
+            body_bottom + gb,
+        )
     };
     // sides: [왼, 오른, 위, 아래]. 각 변을 해당 line_type≠0일 때만 긋는다.
     let seg = [
@@ -1757,9 +1762,17 @@ fn draw_para_bg_slice(
     // 테두리: 좌/우변은 항상, 상/하변은 페이지 경계에 걸치지 않은 쪽만(가장자리라 위에 얹어도 무해).
     let edges = [
         (&bf.sides[0], (left, top, left, bottom), true),
-        (&bf.sides[1], (left + width, top, left + width, bottom), true),
+        (
+            &bf.sides[1],
+            (left + width, top, left + width, bottom),
+            true,
+        ),
         (&bf.sides[2], (left, top, left + width, top), draw_top),
-        (&bf.sides[3], (left, bottom, left + width, bottom), draw_bottom),
+        (
+            &bf.sides[3],
+            (left, bottom, left + width, bottom),
+            draw_bottom,
+        ),
     ];
     for (side, (x1, y1, x2, y2), enabled) in edges {
         if enabled && side.is_visible() {

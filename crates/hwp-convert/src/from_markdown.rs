@@ -754,7 +754,9 @@ impl Builder {
     fn load_image(&self, dest_url: &str) -> Result<(Vec<u8>, String, i32, i32), String> {
         let lower = dest_url.to_ascii_lowercase();
         if lower.starts_with("http://") || lower.starts_with("https://") {
-            return Err(format!("원격 이미지 URL은 지원하지 않습니다(alt 보존): {dest_url}"));
+            return Err(format!(
+                "원격 이미지 URL은 지원하지 않습니다(alt 보존): {dest_url}"
+            ));
         }
         // file: 스킴 접두는 벗겨서 로컬 경로로 다룬다.
         let raw = dest_url.strip_prefix("file://").unwrap_or(dest_url);
@@ -784,7 +786,8 @@ impl Builder {
                 resolved.display()
             ));
         }
-        let (w, h) = crate::image::display_size(&data, &crate::image::ImageSize::Natural, BODY_WIDTH);
+        let (w, h) =
+            crate::image::display_size(&data, &crate::image::ImageSize::Natural, BODY_WIDTH);
         let name = format!("md_image{}.{ext}", self.bin_streams.len() + 1);
         Ok((data, name, w, h))
     }
@@ -1232,8 +1235,10 @@ mod tests {
                 if *code == hwp_model::ctrl_char::FOOTNOTE_ENDNOTE && ctrl_id == b"fn  ")
         });
         assert!(has_anchor, "각주 앵커 존재");
-        let has_ctrl = para.controls.iter().any(|c| matches!(c,
-            Control::Generic(g) if g.ctrl_id == *b"fn  " && !g.paragraph_lists.is_empty()));
+        let has_ctrl = para.controls.iter().any(|c| {
+            matches!(c,
+            Control::Generic(g) if g.ctrl_id == *b"fn  " && !g.paragraph_lists.is_empty())
+        });
         assert!(has_ctrl, "각주 컨트롤+본문 존재");
     }
 
@@ -1354,7 +1359,7 @@ mod tests {
     fn push_text_탭_인라인컨트롤_제어문자_드롭() {
         let mut b = Builder::default();
         b.push_text("A\tB\u{0001}C");
-        let kinds: Vec<_> = b.chars.iter().cloned().collect();
+        let kinds: Vec<_> = b.chars.to_vec();
         assert_eq!(kinds.len(), 4, "A, 탭, B, C (0x01 드롭): {kinds:?}");
         assert!(matches!(kinds[0], HwpChar::Text('A')));
         assert!(matches!(kinds[1], HwpChar::InlineCtrl { code: 9, .. }));
@@ -1369,7 +1374,13 @@ mod tests {
     fn 헤딩_절번호_카운터() {
         let doc = from_markdown("# 서론\n## 배경\n## 목적\n# 본론\n### 세부\n");
         let text = doc.plain_text();
-        for want in ["1. 서론", "1-1. 배경", "1-2. 목적", "2. 본론", "2-1-1. 세부"] {
+        for want in [
+            "1. 서론",
+            "1-1. 배경",
+            "1-2. 목적",
+            "2. 본론",
+            "2-1-1. 세부",
+        ] {
             assert!(text.contains(want), "{want} 없음: {text}");
         }
         // H2/H3 문단은 SECTION 문단모양(margin_left 2000)을 쓴다.

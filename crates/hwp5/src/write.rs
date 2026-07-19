@@ -2219,11 +2219,7 @@ mod tests {
 
         // 2) md 출신 경로(placement=None, common_data 비어 있음).
         let node = emit_table(&synth_table(None), true, false, false);
-        assert_eq!(
-            node.data.len(),
-            46,
-            "md 경로: 46B (스펙 표 69 최소)"
-        );
+        assert_eq!(node.data.len(), 46, "md 경로: 46B (스펙 표 69 최소)");
         assert_eq!(
             i32::from_le_bytes(node.data[40..44].try_into().unwrap()),
             0,

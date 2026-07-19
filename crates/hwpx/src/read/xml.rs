@@ -56,5 +56,4 @@ mod tests {
         assert_eq!(parse_color("#000000"), 0);
         assert_eq!(parse_color("none"), 0xFFFF_FFFF);
     }
-
 }

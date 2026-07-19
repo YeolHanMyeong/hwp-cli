@@ -184,7 +184,11 @@ fn 정품_중첩탭_hp_t안_인라인컨트롤9() {
         .iter()
         .filter(|c| matches!(c, HwpChar::InlineCtrl { code: 9, .. }))
         .count();
-    assert_eq!(tabs, 1, "중첩 탭이 InlineCtrl(9) 1개로 읽혀야: {:?}", para.chars);
+    assert_eq!(
+        tabs, 1,
+        "중첩 탭이 InlineCtrl(9) 1개로 읽혀야: {:?}",
+        para.chars
+    );
     // 탭 앞에 텍스트 문자(Text), 뒤에도 텍스트가 오는 순서.
     let tab_at = para
         .chars

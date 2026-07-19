@@ -813,7 +813,12 @@ fn edit_seal_floating_image_roundtrip() {
 
     // validate 통과(구조 유효).
     assert!(
-        hwp().arg("validate").arg(&out_hwpx).status().unwrap().success(),
+        hwp()
+            .arg("validate")
+            .arg(&out_hwpx)
+            .status()
+            .unwrap()
+            .success(),
         "도장 삽입 hwpx는 validate 통과"
     );
 

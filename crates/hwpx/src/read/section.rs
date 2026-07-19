@@ -434,7 +434,11 @@ fn parse_page_pr_children(reader: &mut XmlReader<'_>, page: &mut PageDef) -> Res
 
 /// 시작(또는 빈) 요소 하나의 서브트리를 quick-xml 이벤트 재직렬화로 원문 XML 문자열로
 /// 캡처한다. Empty면 단일 요소, Start면 짝 닫는 태그까지 포함한다(중첩 임의 깊이).
-fn capture_element(reader: &mut XmlReader<'_>, start: &BytesStart<'_>, empty: bool) -> Result<String> {
+fn capture_element(
+    reader: &mut XmlReader<'_>,
+    start: &BytesStart<'_>,
+    empty: bool,
+) -> Result<String> {
     let mut writer = Writer::new(Vec::new());
     let to_xml_err = |e: std::io::Error| HwpxError::Xml {
         entry: "secPr".to_string(),

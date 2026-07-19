@@ -84,7 +84,7 @@ fn regen() -> &'static (PathBuf, PathBuf) {
 #[test]
 fn regen_validate_and_cat_identical() {
     let regen = &regen().1;
-    let v = hwp().arg("validate").arg(&regen).output().unwrap();
+    let v = hwp().arg("validate").arg(regen).output().unwrap();
     assert!(
         v.status.success(),
         "regen validate: {}",
@@ -92,7 +92,7 @@ fn regen_validate_and_cat_identical() {
     );
     assert_eq!(
         cat(&fixture()),
-        cat(&regen),
+        cat(regen),
         "hwp cat stdout은 원본과 전문 동일해야"
     );
 }
@@ -100,6 +100,8 @@ fn regen_validate_and_cat_identical() {
 /// 표 하나의 지도 항목 — 구조·배치의 동등성 대상 필드 전부.
 /// 셀은 (row,col) 키로 정렬해 위치별 span·크기·여백·테두리까지 비교한다
 /// (멀티셋 비교는 배치가 뒤바뀌어도 통과하는 사각지대가 있었다).
+type CellEntry = (u16, u16, u16, u16, i32, i32, [u16; 4], u16);
+
 #[derive(Debug, PartialEq)]
 struct TableMapEntry {
     rows: u16,
@@ -111,7 +113,7 @@ struct TableMapEntry {
     border_fill: u16,
     placement: Option<hwp_model::GsoPlacement>,
     /// (row, col, col_span, row_span, width, height, margins, borderFill)
-    cells: Vec<(u16, u16, u16, u16, i32, i32, [u16; 4], u16)>,
+    cells: Vec<CellEntry>,
 }
 
 /// 표 지도: 재귀 순서로 TableMapEntry가 동일해야 한다.
@@ -177,7 +179,7 @@ fn regen_table_map_identical() {
             .collect()
     }
     let src_map = table_map(&fixture());
-    let regen_map = table_map(&regen);
+    let regen_map = table_map(regen);
     assert_eq!(src_map.len(), regen_map.len(), "표 개수 동일");
     assert_eq!(
         src_map, regen_map,
@@ -196,7 +198,7 @@ fn regen_secpr_and_tabpr_byte_identical() {
             "<hp:secPr",
             "</hp:secPr>"
         ),
-        zip_slice(&regen, "Contents/section0.xml", "<hp:secPr", "</hp:secPr>"),
+        zip_slice(regen, "Contents/section0.xml", "<hp:secPr", "</hp:secPr>"),
         "secPr 바이트 동일"
     );
     // Gap C 게이트: tabProperties 슬라이스 바이트 동일.
@@ -208,7 +210,7 @@ fn regen_secpr_and_tabpr_byte_identical() {
             "</hh:tabProperties>"
         ),
         zip_slice(
-            &regen,
+            regen,
             "Contents/header.xml",
             "<hh:tabProperties",
             "</hh:tabProperties>"
@@ -265,7 +267,7 @@ fn regen_pagedef_edit_overrides_raw() {
 #[test]
 fn regen_footnotes_reference_shape() {
     let regen = &regen().1;
-    let mut zip = zip::ZipArchive::new(std::fs::File::open(&regen).unwrap()).unwrap();
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(regen).unwrap()).unwrap();
     let mut xml = String::new();
     zip.by_name("Contents/section0.xml")
         .unwrap()
@@ -282,7 +284,7 @@ fn regen_footnotes_reference_shape() {
         assert!(xml.contains(needle), "각주/미주 정품 형태: {needle}");
     }
     // 노트 본문 텍스트 왕복.
-    let text = cat(&regen);
+    let text = cat(regen);
     for t in ["각주 예시 1", "각주 예시 2", "미주 예시 1"] {
         assert!(text.contains(t), "노트 본문: {t}");
     }

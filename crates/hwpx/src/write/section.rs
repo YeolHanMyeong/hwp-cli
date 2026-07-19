@@ -1445,7 +1445,10 @@ fn write_table(
     // sz도 원본 개체 폭/높이를 유지한다(행높이 합산 재계산은 페이지 걸침 표에서 과다).
     // 합성 표(md/synth — placement=None)만 인라인 기본값·재계산으로 폴백한다.
     let pl = table.placement.as_ref();
-    let sz_w = pl.map(|p| p.width).filter(|&w| w > 0).map_or(total_w, i64::from);
+    let sz_w = pl
+        .map(|p| p.width)
+        .filter(|&w| w > 0)
+        .map_or(total_w, i64::from);
     let sz_h = pl
         .map(|p| p.height)
         .filter(|&h| h > 0)

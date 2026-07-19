@@ -263,7 +263,8 @@ fn insert_seal_in_para(
         .count() as i32;
     let anchor_glyphs = anchor.chars().count() as i32;
     // 앵커 문구 중앙에 도장 중심을 맞춘 문단 기준 오프셋(대략적).
-    let horz = visible_before * AVG_CHAR_ADVANCE + anchor_glyphs * AVG_CHAR_ADVANCE / 2 - seal_w / 2;
+    let horz =
+        visible_before * AVG_CHAR_ADVANCE + anchor_glyphs * AVG_CHAR_ADVANCE / 2 - seal_w / 2;
     // 줄 높이보다 큰 도장은 위로 밀어 줄 중앙에 오게 한다(음수=위로).
     let vert = (SEAL_LINE_HEIGHT - seal_h) / 2;
     let pic = Picture {
@@ -303,7 +304,13 @@ fn insert_seal_in_para(
 }
 
 /// 본문/표 셀/글상자 문단을 재귀로 훑어 첫 매칭에 도장을 부유 배치한다.
-fn insert_seal_rec(para: &mut Paragraph, anchor: &str, seal_w: i32, seal_h: i32, name: &str) -> bool {
+fn insert_seal_rec(
+    para: &mut Paragraph,
+    anchor: &str,
+    seal_w: i32,
+    seal_h: i32,
+    name: &str,
+) -> bool {
     if insert_seal_in_para(para, anchor, seal_w, seal_h, name) {
         return true;
     }
@@ -475,10 +482,16 @@ mod tests {
         // textWrap=IN_FRONT_OF_TEXT + flowWithText=0 + allowOverlap=1 + PARA 기준으로
         // 이 오프셋/z-order를 방출하고, hwp5 writer는 attr=0x04aa4310(PARA·글앞·제한해제)로 합성한다.
         assert!(!pic.treat_as_char, "도장은 부유(글 앞) 배치여야 한다");
-        assert!(pic.extras.is_empty(), "writer가 floating 속성 합성하도록 빈 extras");
+        assert!(
+            pic.extras.is_empty(),
+            "writer가 floating 속성 합성하도록 빈 extras"
+        );
         assert_eq!(pic.z_order, SEAL_Z_ORDER, "앞(위) 배치용 z-order 상수");
         // 도장이 줄 높이보다 크면 세로 오프셋이 음수(위로 올려 줄 중앙 정렬).
-        assert!(pic.vert_offset < 0, "큰 도장은 줄 위로 올려 겹친다(음수 세로 오프셋)");
+        assert!(
+            pic.vert_offset < 0,
+            "큰 도장은 줄 위로 올려 겹친다(음수 세로 오프셋)"
+        );
         assert!(doc.resolve_bin(&pic.bin_ref).is_some(), "bin_ref 해석");
         // 기본 20mm·정사각(96x96)이므로 너비=높이.
         assert_eq!(pic.width.0, (20.0 * MM_TO_HWPUNIT).round() as i32);
