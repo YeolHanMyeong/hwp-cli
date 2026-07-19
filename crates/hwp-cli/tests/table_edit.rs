@@ -94,9 +94,9 @@ fn tbl0_add_row_then_fill() {
     assert!(cat(&out2).contains("신규행값"), "새 행 값 확인");
 }
 
-/// 표#0: 열 추가는 병합 표라 거부.
+/// 표#0(5x4, 병합2): 열 추가는 이제 **지원**(GK-2 통합 — 병합 표도 열 조작 가능).
 #[test]
-fn tbl0_add_col_refused() {
+fn tbl0_add_col_supported() {
     let src = copy_fixture("tbl0_col.hwpx");
     let out = tmp("tbl0_col_out.hwpx");
     let r = hwp()
@@ -107,35 +107,64 @@ fn tbl0_add_col_refused() {
         .args(["--add-col", "0"])
         .output()
         .unwrap();
-    assert!(!r.status.success(), "병합 표 열 추가는 거부돼야");
     assert!(
-        String::from_utf8_lossy(&r.stderr).contains("병합"),
-        "병합 안내: {}",
+        r.status.success(),
+        "병합 표 열 추가 지원: {}",
         String::from_utf8_lossy(&r.stderr)
+    );
+    // 구조 유효(한글 규격).
+    assert!(
+        hwp()
+            .arg("validate")
+            .arg(&out)
+            .output()
+            .unwrap()
+            .status
+            .success(),
+        "열 추가 후 validate 통과"
     );
 }
 
-/// 표#2(11x10, 병합 30): 행·열 추가 모두 거부.
+/// 표#2(11x10, 병합 30): 행 추가는 깨끗한 행이 없어 거부, 열 추가는 병합 표도 지원.
 #[test]
-fn tbl2_add_row_col_refused() {
+fn tbl2_add_row_refused_col_supported() {
     let src = copy_fixture("tbl2.hwpx");
     let out = tmp("tbl2_out.hwpx");
-    for args in [["--add-row", "2"].as_slice(), ["--add-col", "2"].as_slice()] {
-        let r = hwp()
-            .arg("edit")
-            .arg(&src)
-            .arg("-o")
-            .arg(&out)
-            .args(args)
+    // 행 추가: 병합 없는 템플릿 행이 없어 거부(add_rows 규칙, 변경 없음).
+    let r_row = hwp()
+        .arg("edit")
+        .arg(&src)
+        .arg("-o")
+        .arg(&out)
+        .args(["--add-row", "2"])
+        .output()
+        .unwrap();
+    assert!(!r_row.status.success(), "add-row는 깨끗한 행 없어 거부돼야");
+    // 열 추가: 병합 표도 지원(전체 폭 유지, 열 정렬 보존) + validate.
+    let out2 = tmp("tbl2_col_out.hwpx");
+    let r_col = hwp()
+        .arg("edit")
+        .arg(&src)
+        .arg("-o")
+        .arg(&out2)
+        .args(["--add-col", "2"])
+        .output()
+        .unwrap();
+    assert!(
+        r_col.status.success(),
+        "병합 표 열 추가 지원: {}",
+        String::from_utf8_lossy(&r_col.stderr)
+    );
+    assert!(
+        hwp()
+            .arg("validate")
+            .arg(&out2)
             .output()
-            .unwrap();
-        assert!(!r.status.success(), "{args:?} 거부돼야");
-        assert!(
-            String::from_utf8_lossy(&r.stderr).contains("병합"),
-            "{args:?} 병합 안내: {}",
-            String::from_utf8_lossy(&r.stderr)
-        );
-    }
+            .unwrap()
+            .status
+            .success(),
+        "병합 표 열 추가 후 validate 통과"
+    );
 }
 
 /// 중첩 표(재귀 인덱스 3~8): set-cell/add-row가 재귀 로케이터로 걸린다.

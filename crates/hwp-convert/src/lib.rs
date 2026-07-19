@@ -19,7 +19,8 @@ pub use bookmark::{
     BookmarkInfo, bookmark_name, create_bookmark, list_bookmarks, make_bokm_ctrl_data,
 };
 pub use edit::{
-    add_col, add_rows, apply_meta, delete_table_row, replace_text, set_cell, table_dims,
+    add_col, add_rows, add_table_column, apply_meta, delete_table_column, delete_table_row,
+    merge_cells, replace_text, set_cell, split_cell, table_dims,
 };
 pub use field::{
     FieldInfo, PlaceholderInfo, create_field, create_hyperlink, hyperlink_url, list_fields,
