@@ -226,6 +226,21 @@ pub fn write_document(doc: &Document, path: &Path, opts: &WriteOptions) -> Resul
     if let Some(img) = &opts.prv_image {
         cfb.create_new_stream("/PrvImage")?.write_all(img)?;
     }
+    // XMLTemplate·DocHistory 스토리지 원문 재방출(§3.2.10·§3.2.11 — 내용 미해석
+    // pass-through). read가 압축 미해제로 포착했으므로 그대로 쓴다(compress 금지 —
+    // 바이트 동일 보존). 스트림의 상위 스토리지는 mkdir -p로 확보한다.
+    for (path, bytes) in doc
+        .hwp5_xml_template
+        .iter()
+        .chain(doc.hwp5_doc_history.iter())
+    {
+        if let Some((parent, _)) = path.rsplit_once('/')
+            && !parent.is_empty()
+        {
+            cfb.create_storage_all(parent)?;
+        }
+        cfb.create_new_stream(path.as_str())?.write_all(bytes)?;
+    }
     cfb.flush()?;
     Ok(warnings)
 }

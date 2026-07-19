@@ -307,13 +307,16 @@ fn find_picture_record(children: &[RecordNode]) -> Option<&RecordNode> {
 /// + 꼭지점 4점(32) + 자르기(16) + 안쪽 여백(8) + 밝기(1)+명암(1)+효과(1)
 /// + **BinItem ID(2)** — 오프셋 71.
 fn parse_picture_gso(common: &[u8], children: &[RecordNode]) -> Result<hwp_model::Picture> {
-    // 개체 공통 속성: 속성(4) 세로(4) 가로(4) 폭(4) 높이(4)
+    // 개체 공통 속성(표 69): 속성(4) 세로offset(4) 가로offset(4) 폭(4) 높이(4) z-order(4)
     let mut r = ByteReader::new(common);
     let attr = r.read_u32()?;
-    let _v_offset = r.read_u32()?;
-    let _h_offset = r.read_u32()?;
+    let vert_offset = r.read_i32()?;
+    let horz_offset = r.read_i32()?;
     let width = HwpUnit(r.read_i32()?);
     let height = HwpUnit(r.read_i32()?);
+    // z-order는 폭/높이 뒤(@20) — GsoPlacement(표 69)와 동일 레이아웃. 손상·짧은
+    // 데이터면 0 폴백.
+    let z_order = r.read_i32().unwrap_or(0).max(0) as u32;
 
     let pic_node = find_picture_record(children)
         .ok_or_else(|| crate::error::Hwp5Error::MalformedRecord("그림 레코드 없음".into()))?;
@@ -326,10 +329,13 @@ fn parse_picture_gso(common: &[u8], children: &[RecordNode]) -> Result<hwp_model
         width,
         height,
         treat_as_char: attr & 1 != 0,
-        // hwp5 원본은 배치를 common_data로 보존하므로 합성용 필드는 0.
-        z_order: 0,
-        vert_offset: 0,
-        horz_offset: 0,
+        // 부유(글 앞) 그림 배치 승계(GE-9): 세로/가로 오프셋·z-order를 실값으로
+        // 올린다. GE-8이 TABLE에 쓴 GsoPlacement와 동일 표 69 레이아웃. hwpx write가
+        // floating `<hp:pos>`/zOrder에 그대로 방출한다. common_data raw는 그대로
+        // 두므로 hwp5→hwp5 identity 재직렬화는 무손실.
+        z_order,
+        vert_offset,
+        horz_offset,
         bin_ref: hwp_model::BinRef::Id(hwp_model::BinDataId(bin_id)),
         extras: children.iter().map(to_opaque).collect(),
     })
@@ -679,4 +685,41 @@ fn subtree_has_paragraphs(node: &RecordNode) -> bool {
     node.children.iter().any(|c| {
         c.tag == tag::PARA_HEADER || c.tag == tag::LIST_HEADER || subtree_has_paragraphs(c)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// GE-9: 부유 그림의 세로/가로 오프셋·z-order를 개체 공통 속성(표 69)에서
+    /// 실값으로 승계한다(이전엔 전부 0 하드코딩 → 좌상단 뭉침).
+    #[test]
+    fn 부유_그림_배치_승계() {
+        let mut common = Vec::new();
+        common.extend_from_slice(&0u32.to_le_bytes()); // attr: 글자처럼=0(부유)
+        common.extend_from_slice(&5000i32.to_le_bytes()); // 세로 offset
+        common.extend_from_slice(&3000i32.to_le_bytes()); // 가로 offset
+        common.extend_from_slice(&10000i32.to_le_bytes()); // 폭
+        common.extend_from_slice(&8000i32.to_le_bytes()); // 높이
+        common.extend_from_slice(&7i32.to_le_bytes()); // z-order
+        common.extend_from_slice(&[0u8; 8]); // 바깥 여백 4×u16
+
+        // 그림 레코드: 71B 스킵 후 bin_id(u16).
+        let mut pic_data = vec![0u8; 71];
+        pic_data.extend_from_slice(&3u16.to_le_bytes());
+        let pic_node = RecordNode {
+            tag: tag::SHAPE_COMPONENT_PICTURE,
+            data: pic_data,
+            children: Vec::new(),
+        };
+
+        let p = parse_picture_gso(&common, &[pic_node]).unwrap();
+        assert!(!p.treat_as_char, "부유(글자처럼=false)");
+        assert_eq!(p.vert_offset, 5000, "세로 offset 승계");
+        assert_eq!(p.horz_offset, 3000, "가로 offset 승계");
+        assert_eq!(p.z_order, 7, "z-order 승계");
+        assert_eq!(p.width.0, 10000);
+        assert_eq!(p.height.0, 8000);
+        assert_eq!(p.bin_ref, hwp_model::BinRef::Id(hwp_model::BinDataId(3)));
+    }
 }

@@ -27,6 +27,17 @@ pub struct Document {
     /// 통과시키기 위한 슬롯. hwp5 출신 문서는 `None`(쓰기 시 기본 상수).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hwpx_version_xml: Option<String>,
+    /// hwp5 `/XMLTemplate` 스토리지의 스트림 원문(스트림 CFB 경로 + 압축 미해제
+    /// 바이트). XML 스키마 바인딩 문서(전자정부 서식 등, §3.2.10)의 부속 파트를 IR
+    /// 경유 되쓰기에서 그대로 통과시키는 슬롯. 내용은 해석하지 않는다. hwpx 출신·해당
+    /// 스토리지가 없는 hwp5 문서는 빈 벡터.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hwp5_xml_template: Vec<(String, Vec<u8>)>,
+    /// hwp5 `/DocHistory` 스토리지의 스트림 원문(스트림 CFB 경로 + 압축 미해제
+    /// 바이트). 문서 이력(§3.2.11·§4.4)을 되쓰기에서 그대로 통과시키는 슬롯. 내용은
+    /// 해석하지 않는다(§4.4 파서는 범위 밖). hwpx 출신·이력이 없는 문서는 빈 벡터.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hwp5_doc_history: Vec<(String, Vec<u8>)>,
 }
 
 /// 문서 수준 메타데이터 (요약 정보 / OPF 메타).

@@ -363,6 +363,8 @@ pub fn from_markdown_with(md: &str, opts: &MarkdownImportOptions) -> Document {
         bin_streams: b.bin_streams,
         hwpx_settings_xml: None,
         hwpx_version_xml: None,
+        hwp5_xml_template: Vec::new(),
+        hwp5_doc_history: Vec::new(),
     }
 }
 

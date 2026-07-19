@@ -87,6 +87,9 @@ pub fn read_document(path: &Path) -> Result<ReadResult> {
             bin_streams,
             hwpx_settings_xml,
             hwpx_version_xml,
+            // hwpx 출신은 hwp5 전용 스토리지가 없다(GE-β7/β8 경로 무관).
+            hwp5_xml_template: Vec::new(),
+            hwp5_doc_history: Vec::new(),
         },
         warnings,
     })

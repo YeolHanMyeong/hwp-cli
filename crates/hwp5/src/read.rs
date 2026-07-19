@@ -67,6 +67,21 @@ pub fn read_document(path: &Path) -> Result<ReadResult> {
         .map(|raw| crate::summary::parse_summary(&raw))
         .unwrap_or_default();
 
+    // XMLTemplate·DocHistory 스토리지: 내용 해석 없이 원문 바이트 그대로 포착
+    // (§3.2.10·§3.2.11·§4.4). IR 경유 되쓰기에서 writer가 재방출한다. 스토리지별
+    // 압축 규칙이 스펙에 미기재라 **해제하지 않고** 바이트 그대로가 무손실이다.
+    let mut hwp5_xml_template = Vec::new();
+    let mut hwp5_doc_history = Vec::new();
+    for info in container.list_streams() {
+        if info.path.starts_with("/XMLTemplate/") {
+            let raw = container.read_stream_raw(&info.path)?;
+            hwp5_xml_template.push((info.path.clone(), raw));
+        } else if info.path.starts_with("/DocHistory/") {
+            let raw = container.read_stream_raw(&info.path)?;
+            hwp5_doc_history.push((info.path.clone(), raw));
+        }
+    }
+
     let document = Document {
         meta: DocMeta {
             source_format: "hwp5".to_string(),
@@ -79,6 +94,8 @@ pub fn read_document(path: &Path) -> Result<ReadResult> {
         // hwp5 출신 문서는 hwpx 부속 파트가 없다 → None(쓰기 시 기본 상수).
         hwpx_settings_xml: None,
         hwpx_version_xml: None,
+        hwp5_xml_template,
+        hwp5_doc_history,
     };
     Ok(ReadResult { document, warnings })
 }

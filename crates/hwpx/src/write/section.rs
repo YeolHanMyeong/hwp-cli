@@ -859,6 +859,23 @@ fn write_col_ctrl(out: &mut String, col: Option<&hwp_model::ColumnDef>) {
     );
 }
 
+/// 머리말/꼬리말 적용쪽(applyPageType) 역매핑. `g.data` 선두 UINT32의 bits0-1이
+/// 적용될 페이지 종류다(0=양쪽·1=짝수·2=홀수). hwp5-origin은 CTRL_HEADER 속성(표
+/// 141), hwpx-origin은 read 측 `head_foot_data`가 만든 8B 페이로드(apply@0)로, 두
+/// 경로 모두 선두 u32에 적용쪽이 실린다 — read의 정매핑을 그대로 뒤집는다.
+fn header_footer_apply_page(data: &[u8]) -> &'static str {
+    let apply = if data.len() >= 4 {
+        u32::from_le_bytes([data[0], data[1], data[2], data[3]]) & 0x3
+    } else {
+        0
+    };
+    match apply {
+        1 => "EVEN",
+        2 => "ODD",
+        _ => "BOTH",
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn write_header_footer(
     out: &mut String,
@@ -874,9 +891,10 @@ fn write_header_footer(
     } else {
         "footer"
     };
+    let apply = header_footer_apply_page(&g.data);
     let _ = write!(
         out,
-        r##"<hp:ctrl><hp:{el} id="{}" applyPageType="BOTH">"##,
+        r##"<hp:ctrl><hp:{el} id="{}" applyPageType="{apply}">"##,
         ids.next()
     );
     for list in &g.paragraph_lists {

@@ -175,6 +175,71 @@ fn md_이미지_코드_hwpx_왕복() {
     );
 }
 
+/// GE-9: 부유(글 앞) 그림의 세로/가로 오프셋·z-order가 hwpx `<hp:pos>`/zOrder에
+/// 방출된다. hwp5 read가 실값을 승계하면(parse_picture_gso) writer가 그대로 쓴다 —
+/// 이전엔 0 하드코딩이라 떠 있는 그림이 좌상단(offset 0)에 뭉쳤다.
+#[test]
+fn 부유_그림_배치_hwpx_방출() {
+    use std::io::Write as _;
+    let dir = std::env::temp_dir().join("hwpx-ge9-float");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend([0, 0, 0, 13]);
+    png.extend(b"IHDR");
+    png.extend(16u32.to_be_bytes());
+    png.extend(16u32.to_be_bytes());
+    png.extend([0u8; 8]);
+    let fig = dir.join("g.png");
+    std::fs::File::create(&fig)
+        .unwrap()
+        .write_all(&png)
+        .unwrap();
+
+    let mut doc = hwp_convert::from_markdown_with(
+        "이미지.\n\n![alt](g.png)\n",
+        &hwp_convert::MarkdownImportOptions {
+            base_dir: Some(&dir),
+        },
+    );
+    // 그림을 부유(글 앞) + 오프셋·z-order로 바꾼다(hwp5 read가 승계했을 값을 모사).
+    for para in &mut doc.sections[0].paragraphs {
+        for c in &mut para.controls {
+            if let hwp_model::Control::Picture(p) = c {
+                p.treat_as_char = false;
+                p.vert_offset = 5000;
+                p.horz_offset = 3000;
+                p.z_order = 7;
+            }
+        }
+    }
+    let out = tmp("ge9_float.hwpx");
+    let warnings = hwpx::write_document(&doc, &out).unwrap();
+    assert!(!warnings.iter().any(|w| w.contains("DROP")), "{warnings:?}");
+
+    let bytes = std::fs::read(&out).unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut raw = Vec::new();
+    zip.by_name("Contents/section0.xml")
+        .unwrap()
+        .read_to_end(&mut raw)
+        .unwrap();
+    let xml = String::from_utf8(raw).unwrap();
+    // 부유 <hp:pic zOrder="7"> + <hp:pos ... vertOffset="5000" horzOffset="3000">.
+    assert!(xml.contains(r#"zOrder="7""#), "z-order 방출: {xml}");
+    assert!(
+        xml.contains(r#"vertOffset="5000""#),
+        "세로 오프셋 방출: {xml}"
+    );
+    assert!(
+        xml.contains(r#"horzOffset="3000""#),
+        "가로 오프셋 방출: {xml}"
+    );
+    assert!(
+        xml.contains(r#"treatAsChar="0""#),
+        "부유(treatAsChar=0) 방출: {xml}"
+    );
+}
+
 /// GI-1/GI-2 왕복 (b): md(각주·취소선·순서목록·중첩) → hwpx 저장 → 재읽기 → md.
 #[test]
 fn markdown_각주_취소선_목록_hwpx_완전왕복() {
@@ -218,6 +283,75 @@ fn markdown_각주_취소선_목록_hwpx_완전왕복() {
     assert!(md_out.contains("1. 첫째"), "순서1: {md_out}");
     assert!(md_out.contains("3. 셋째"), "순서3: {md_out}");
     assert!(md_out.contains("- 안쪽 가"), "중첩 불릿: {md_out}");
+}
+
+/// 머리말/꼬리말 적용쪽(applyPageType)이 hwpx write→read 왕복에서 보존된다(GE-α9).
+/// 이전엔 writer가 `applyPageType="BOTH"` 상수라 짝수/홀수 구분 머리말이 항상
+/// "양쪽"으로 뭉개졌다. `g.data` 선두 u32(적용쪽)를 read의 역매핑으로 방출한다.
+#[test]
+fn 머리말_적용쪽_hwpx_왕복() {
+    use hwp_model::{Control, GenericControl, HwpChar, Paragraph, ParagraphList};
+
+    for (apply, want, tag) in [(1u32, "EVEN", 1u8), (2u32, "ODD", 2u8)] {
+        let mut doc = hwp_convert::from_markdown("본문");
+        // head_foot_data 레이아웃: apply(u32)@0 + id(u32)@4.
+        let mut data = Vec::with_capacity(8);
+        data.extend_from_slice(&apply.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        let g = GenericControl {
+            ctrl_id: *b"head",
+            data,
+            paragraph_lists: vec![ParagraphList {
+                header_data: Vec::new(),
+                paragraphs: vec![Paragraph::default()],
+            }],
+            extras: Vec::new(),
+            raw_children: Vec::new(),
+            gso_shapes: Vec::new(),
+            equation: None,
+            column_def: None,
+        };
+        // 머리말 컨트롤을 문단에 ExtCtrl(코드 16)로 부착.
+        let para = &mut doc.sections[0].paragraphs[0];
+        let idx = para.controls.len() as u32;
+        para.chars.push(HwpChar::ExtCtrl {
+            code: 16,
+            ctrl_id: *b"head",
+            payload: hwp_convert::field::rev_payload(b"head"),
+            ctrl_index: Some(idx),
+        });
+        para.controls.push(Control::Generic(g));
+
+        let out = tmp(&format!("hf_{apply}.hwpx"));
+        let warnings = hwpx::write_document(&doc, &out).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        // 방출 XML에 상수 BOTH가 아니라 실제 적용쪽이 들어간다.
+        let bytes = std::fs::read(&out).unwrap();
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut raw = Vec::new();
+        zip.by_name("Contents/section0.xml")
+            .unwrap()
+            .read_to_end(&mut raw)
+            .unwrap();
+        let xml = String::from_utf8(raw).unwrap();
+        assert!(
+            xml.contains(&format!(r#"applyPageType="{want}""#)),
+            "applyPageType={want} 방출: {xml}"
+        );
+
+        // 되읽은 head 컨트롤의 g.data 선두 u32가 적용쪽을 보존.
+        let reread = hwpx::read_document(&out).unwrap().document;
+        let apply_byte = reread.sections[0]
+            .paragraphs
+            .iter()
+            .flat_map(|p| &p.controls)
+            .find_map(|c| match c {
+                Control::Generic(g) if g.ctrl_id == *b"head" => Some(g.data.first().copied()),
+                _ => None,
+            });
+        assert_eq!(apply_byte, Some(Some(tag)), "적용쪽 왕복 (apply={apply})");
+    }
 }
 
 /// 본문 탭이 hwpx에서 `<hp:t>` **안**의 중첩 `<hp:tab width leader type/>`(정품 mixed
@@ -328,6 +462,115 @@ fn 필드_생성_hwpx_왕복() {
     assert_eq!(fields[0].ctrl_id, "%clk");
     assert_eq!(fields[0].name.as_deref(), Some("수신처"));
     assert_eq!(fields[0].value, "홍길동");
+}
+
+/// GF-4: 표 128의 확장 필드(변경추적·차례·개인정보)가 hwpx write에서 DROP되지
+/// 않고 fieldBegin/End·내용 텍스트로 방출된다. OWPML type은 근거 없어 UNKNOWN 폴백
+/// (라벨은 잃어도 필드·내용 보존 — GF-1 등급). 재읽기 시 %unk로 되살아나 왕복 성립.
+#[test]
+fn 확장필드_hwp5출신_hwpx_방출() {
+    use hwp_model::{Control, GenericControl, HwpChar};
+
+    // 대표 3종: 변경추적(삭제, %%*d)·차례(%toc)·개인정보(%cpr). 각 필드를 한
+    // 문단에 FIELD_START(코드3)+내용+FIELD_END(코드4)로 배치.
+    let fields: [(&[u8; 4], &str); 3] = [
+        (b"%%*d", "삭제된 문장"),
+        (b"%toc", "제1장 서론"),
+        (b"%cpr", "홍**"),
+    ];
+    let mut doc = hwp_convert::from_markdown("본문");
+    let para = &mut doc.sections[0].paragraphs[0];
+    para.chars.clear();
+    para.controls.clear();
+    for (i, (id, text)) in fields.iter().enumerate() {
+        para.chars.push(HwpChar::ExtCtrl {
+            code: 3, // FIELD_START
+            ctrl_id: **id,
+            payload: hwp_convert::field::rev_payload(id),
+            ctrl_index: Some(i as u32),
+        });
+        para.chars.extend(text.chars().map(HwpChar::Text));
+        para.chars.push(HwpChar::InlineCtrl {
+            code: 4, // FIELD_END
+            payload: hwp_convert::field::field_end_payload(id),
+        });
+        para.controls.push(Control::Generic(GenericControl {
+            ctrl_id: **id,
+            data: vec![0u8; 11], // 속성4 기타1 len2=0 id4
+            paragraph_lists: Vec::new(),
+            extras: Vec::new(),
+            raw_children: Vec::new(),
+            gso_shapes: Vec::new(),
+            equation: None,
+            column_def: None,
+        }));
+    }
+    para.header.ctrl_mask = 0;
+
+    let out = tmp("ext_fields.hwpx");
+    let warnings = hwpx::write_document(&doc, &out).unwrap();
+    // 확장 필드는 DROP 경고 없이 방출돼야 한다.
+    assert!(
+        !warnings.iter().any(|w| w.contains("DROP")),
+        "DROP 경고: {warnings:?}"
+    );
+
+    let bytes = std::fs::read(&out).unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut raw = Vec::new();
+    zip.by_name("Contents/section0.xml")
+        .unwrap()
+        .read_to_end(&mut raw)
+        .unwrap();
+    let xml = String::from_utf8(raw).unwrap();
+    assert_eq!(
+        xml.matches("<hp:fieldBegin").count(),
+        3,
+        "fieldBegin 3개: {xml}"
+    );
+    assert_eq!(
+        xml.matches("<hp:fieldEnd").count(),
+        3,
+        "fieldEnd 3개: {xml}"
+    );
+    for (_, text) in &fields {
+        assert!(xml.contains(text), "내용 텍스트 보존({text}): {xml}");
+    }
+    // 차례(%toc)는 코퍼스 실측 OWPML type으로, 변경추적·개인정보는 UNKNOWN 폴백으로.
+    assert!(
+        xml.contains(r#"type="TABLEOFCONTENTS""#),
+        "%toc→TABLEOFCONTENTS: {xml}"
+    );
+    assert_eq!(
+        xml.matches(r#"type="UNKNOWN""#).count(),
+        2,
+        "%%*d·%cpr→UNKNOWN 2개: {xml}"
+    );
+
+    // 재읽기: 필드가 되살아나고 내용 텍스트가 보존된다(왕복 성립). %toc는 종류까지
+    // 왕복(%toc), 변경추적·개인정보는 %unk로 하향(내용은 보존).
+    let reread = hwpx::read_document(&out).unwrap().document;
+    let got = hwp_convert::list_fields(&reread);
+    assert_eq!(got.len(), 3, "필드 3개 왕복: {got:?}");
+    let by_value: std::collections::HashMap<&str, &str> = got
+        .iter()
+        .map(|f| (f.value.as_str(), f.ctrl_id.as_str()))
+        .collect();
+    assert_eq!(
+        by_value.get("제1장 서론"),
+        Some(&"%toc"),
+        "%toc 종류 왕복: {got:?}"
+    );
+    assert_eq!(
+        by_value.get("삭제된 문장"),
+        Some(&"%unk"),
+        "변경추적→%unk: {got:?}"
+    );
+    assert_eq!(
+        by_value.get("홍**"),
+        Some(&"%unk"),
+        "개인정보→%unk: {got:?}"
+    );
 }
 
 /// 책갈피(bokm) hwpx 왕복: create_bookmark → write → `<hp:bookmark name>` → read → list_bookmarks.

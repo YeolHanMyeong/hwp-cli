@@ -802,3 +802,69 @@ fn 스트림_경로_구분자_정규화() {
     let body = c.read_record_stream(&sections[0]).unwrap();
     assert!(!body.is_empty(), "본문 스트림 읽기");
 }
+
+/// GE-β7/β8: XMLTemplate·DocHistory 스토리지가 read→write 되쓰기에서 원문 바이트
+/// 그대로 통과한다(내용 미해석 pass-through). 합성 .hwp에 두 스토리지를 주입한 뒤
+/// read_document→write_document 후 스트림 존재·바이트 동일을 확인한다.
+#[test]
+fn xmltemplate_dochistory_스토리지_왕복() {
+    use std::io::{Read as _, Write as _};
+
+    // 1. 기본 문서를 저장하고 CFB에 두 스토리지를 주입한다(한글 저장본 모사).
+    let doc = hwp_convert::from_markdown("본문");
+    let a = tmp("storage_a.hwp");
+    hwp5::write_document(&doc, &a, &hwp5::WriteOptions::default()).unwrap();
+
+    let tmpl_bytes: Vec<u8> = (0u8..=255).collect(); // 압축 안 된 임의 바이트
+    let hist_bytes: Vec<u8> = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02];
+    {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&a)
+            .unwrap();
+        let mut cfb = cfb::CompoundFile::open(file).unwrap();
+        cfb.create_storage("/XMLTemplate").unwrap();
+        cfb.create_new_stream("/XMLTemplate/Schema")
+            .unwrap()
+            .write_all(&tmpl_bytes)
+            .unwrap();
+        cfb.create_storage("/DocHistory").unwrap();
+        cfb.create_new_stream("/DocHistory/VersionLog0")
+            .unwrap()
+            .write_all(&hist_bytes)
+            .unwrap();
+        cfb.flush().unwrap();
+    }
+
+    // 2. read_document이 두 스토리지를 원문 그대로 IR에 올린다.
+    let reread = hwp5::read_document(&a).unwrap().document;
+    assert_eq!(
+        reread.hwp5_xml_template,
+        vec![("/XMLTemplate/Schema".to_string(), tmpl_bytes.clone())],
+        "XMLTemplate 포착"
+    );
+    assert_eq!(
+        reread.hwp5_doc_history,
+        vec![("/DocHistory/VersionLog0".to_string(), hist_bytes.clone())],
+        "DocHistory 포착"
+    );
+
+    // 3. write_document이 두 스토리지를 바이트 동일하게 재방출한다.
+    let b = tmp("storage_b.hwp");
+    hwp5::write_document(&reread, &b, &hwp5::WriteOptions::default()).unwrap();
+    let file = std::fs::File::open(&b).unwrap();
+    let mut cfb = cfb::CompoundFile::open(file).unwrap();
+    let mut got_tmpl = Vec::new();
+    cfb.open_stream("/XMLTemplate/Schema")
+        .unwrap()
+        .read_to_end(&mut got_tmpl)
+        .unwrap();
+    assert_eq!(got_tmpl, tmpl_bytes, "XMLTemplate 바이트 동일");
+    let mut got_hist = Vec::new();
+    cfb.open_stream("/DocHistory/VersionLog0")
+        .unwrap()
+        .read_to_end(&mut got_hist)
+        .unwrap();
+    assert_eq!(got_hist, hist_bytes, "DocHistory 바이트 동일");
+}
