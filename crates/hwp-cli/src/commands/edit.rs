@@ -32,6 +32,9 @@ pub fn run(
     add_rows: &[String],
     add_cols: &[String],
     delete_rows: &[String],
+    delete_cols: &[String],
+    merge_cells: &[String],
+    split_cells: &[String],
     verify: bool,
 ) -> anyhow::Result<()> {
     // 고속 경로: hwpx→hwpx이고 --replace뿐이면 패키지 보존 패치로 처리한다(IR 재작성 시
@@ -53,6 +56,9 @@ pub fn run(
         && add_rows.is_empty()
         && add_cols.is_empty()
         && delete_rows.is_empty()
+        && delete_cols.is_empty()
+        && merge_cells.is_empty()
+        && split_cells.is_empty()
         && output
             .extension()
             .and_then(|e| e.to_str())
@@ -93,6 +99,9 @@ pub fn run(
         || !add_rows.is_empty()
         || !add_cols.is_empty()
         || !delete_rows.is_empty()
+        || !delete_cols.is_empty()
+        || !merge_cells.is_empty()
+        || !split_cells.is_empty()
         || !insert_images.is_empty()
         || !seals.is_empty();
 
@@ -279,12 +288,19 @@ pub fn run(
     }
 
     for spec in add_cols {
-        let ti: usize = spec
-            .trim()
-            .parse()
-            .with_context(|| format!("--add-col 형식은 표 인덱스(예: \"0\") 입니다: {spec:?}"))?;
-        hwp_convert::add_col(&mut doc, ti).map_err(|e| anyhow::anyhow!(e))?;
-        eprintln!("표 열 추가: 표{ti} (전체 폭 유지)");
+        // "표"(끝에 추가) 또는 "표:위치"(위치에 삽입).
+        if let Some((t, at)) = spec.split_once(':') {
+            let ti: usize = t.trim().parse().context("표 인덱스")?;
+            let at_col: u16 = at.trim().parse().context("열 위치")?;
+            hwp_convert::add_table_column(&mut doc, ti, at_col).map_err(|e| anyhow::anyhow!(e))?;
+            eprintln!("표 열 추가: 표{ti} 위치{at_col} (전체 폭 유지)");
+        } else {
+            let ti: usize = spec.trim().parse().with_context(|| {
+                format!("--add-col 형식은 \"표\" 또는 \"표:위치\" 입니다: {spec:?}")
+            })?;
+            hwp_convert::add_col(&mut doc, ti).map_err(|e| anyhow::anyhow!(e))?;
+            eprintln!("표 열 추가: 표{ti} 끝 (전체 폭 유지)");
+        }
         edits += 1;
     }
 
@@ -299,9 +315,48 @@ pub fn run(
         edits += 1;
     }
 
+    for spec in delete_cols {
+        let (t, c) = spec
+            .split_once(':')
+            .with_context(|| format!("--delete-col 형식은 \"표:열\" 입니다: {spec:?}"))?;
+        let ti: usize = t.trim().parse().context("표 인덱스")?;
+        let col: u16 = c.trim().parse().context("열 번호")?;
+        hwp_convert::delete_table_column(&mut doc, ti, col).map_err(|e| anyhow::anyhow!(e))?;
+        eprintln!("표 열 삭제: 표{ti} 열{col} (전체 폭 유지)");
+        edits += 1;
+    }
+
+    for spec in merge_cells {
+        let parts: Vec<&str> = spec.split(':').collect();
+        if parts.len() != 5 {
+            anyhow::bail!("--merge-cells 형식은 \"표:r1:c1:r2:c2\" 입니다: {spec:?}");
+        }
+        let ti: usize = parts[0].trim().parse().context("표 인덱스")?;
+        let r1: u16 = parts[1].trim().parse().context("r1")?;
+        let c1: u16 = parts[2].trim().parse().context("c1")?;
+        let r2: u16 = parts[3].trim().parse().context("r2")?;
+        let c2: u16 = parts[4].trim().parse().context("c2")?;
+        hwp_convert::merge_cells(&mut doc, ti, r1, c1, r2, c2).map_err(|e| anyhow::anyhow!(e))?;
+        eprintln!("셀 병합: 표{ti} ({r1},{c1})-({r2},{c2})");
+        edits += 1;
+    }
+
+    for spec in split_cells {
+        let parts: Vec<&str> = spec.split(':').collect();
+        if parts.len() != 3 {
+            anyhow::bail!("--split-cell 형식은 \"표:행:열\" 입니다: {spec:?}");
+        }
+        let ti: usize = parts[0].trim().parse().context("표 인덱스")?;
+        let r: u16 = parts[1].trim().parse().context("행 번호")?;
+        let c: u16 = parts[2].trim().parse().context("열 번호")?;
+        hwp_convert::split_cell(&mut doc, ti, r, c).map_err(|e| anyhow::anyhow!(e))?;
+        eprintln!("셀 분할: 표{ti} ({r},{c})");
+        edits += 1;
+    }
+
     if edits == 0 {
         eprintln!(
-            "경고: 적용된 편집이 없습니다 (--replace/--set-cell/--set-field/--set-meta/--create-field/--create-bookmark/--create-hyperlink/--insert-image/--seal/--set-format/--set-align/--insert-para/--delete-para/--add-row/--add-col/--delete-row 확인)"
+            "경고: 적용된 편집이 없습니다 (--replace/--set-cell/--set-field/--set-meta/--create-field/--create-bookmark/--create-hyperlink/--insert-image/--seal/--set-format/--set-align/--insert-para/--delete-para/--add-row/--add-col/--delete-row/--delete-col/--merge-cells/--split-cell 확인)"
         );
     }
 

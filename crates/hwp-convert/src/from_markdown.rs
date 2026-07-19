@@ -58,6 +58,12 @@ const FONT_DOTUM: u16 = 1;
 /// 테두리/배경 ID 배치: 1·2 = 무테두리(기본/참조용), 3 = 실선 0.12mm.
 const TABLE_BORDER_FILL: u16 = 3;
 
+/// 셀 LIST_HEADER 속성의 세로 정렬 = 가운데(bits5-6=1 → 0x20). 정품 한글 표 셀은
+/// 거의 전수(work_report·color_fill·코퍼스 실측)가 이 비트를 세운다. 0(위)으로 두면
+/// hwp5 writer가 그대로 방출해 셀 내용이 상단에 붙는다(위 여백<아래 여백). hwpx writer는
+/// vertAlign="CENTER"를 상수로 방출하므로 hwpx 산출물에는 영향 없다.
+const CELL_VALIGN_CENTER: u32 = 0x20;
+
 /// 본문 영역 폭 (A4 기본 여백 기준, HWPUNIT).
 const BODY_WIDTH: i32 = 42520;
 
@@ -1099,7 +1105,7 @@ fn table_paragraph(tb: TableBuilder) -> Paragraph {
     for (r, row) in tb.rows.iter().enumerate() {
         for c in 0..cols {
             cells.push(Cell {
-                list_attr: 0,
+                list_attr: CELL_VALIGN_CENTER,
                 col: c as u16,
                 row: r as u16,
                 col_span: 1,
@@ -1167,6 +1173,32 @@ mod tests {
         let h = default_header();
         assert_eq!(h.char_shapes[0].base_size, 1000); // 본문 10pt
         assert_eq!(h.char_shapes[4].base_size, 1800); // H1 = 본문 × 1.8
+    }
+
+    #[test]
+    fn 표_셀_세로정렬_가운데() {
+        // 정품 한글 표 셀 기본 = 세로 정렬 가운데(list_attr bits5-6=1=0x20). 0(위)이면
+        // hwp5 writer가 그대로 방출해 셀 내용이 상단에 붙는다(위 여백<아래 여백).
+        use hwp_model::Control;
+        let doc = from_markdown("| 가 | 나 |\n|----|----|\n| 1 | 2 |\n");
+        let table = doc.sections[0]
+            .paragraphs
+            .iter()
+            .flat_map(|p| &p.controls)
+            .find_map(|c| match c {
+                Control::Table(t) => Some(t),
+                _ => None,
+            })
+            .expect("표 없음");
+        assert!(!table.cells.is_empty());
+        for c in &table.cells {
+            assert_eq!(
+                (c.list_attr >> 5) & 3,
+                1,
+                "셀 세로정렬 가운데(0x20): {:#x}",
+                c.list_attr
+            );
+        }
     }
 
     /// GI-1/GI-2 왕복 (a): md → IR → md 에서 각주·취소선·순서목록(start)·중첩이 보존.

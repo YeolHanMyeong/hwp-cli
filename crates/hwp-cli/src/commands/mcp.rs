@@ -703,7 +703,7 @@ fn tool_defs() -> Vec<Value> {
                     "required": ["table"]}, "description": "N번째 표 끝에 빈 행 추가(0-기반, 병합 표는 거부)"},
                 "add_col": {"type": "array", "items": {"type": "object", "properties": {
                     "table": {"type": "integer"}},
-                    "required": ["table"]}, "description": "N번째 표 끝에 열 추가(0-기반, 전체 폭 유지, 병합 표는 거부)"},
+                    "required": ["table"]}, "description": "N번째 표 끝에 열 추가(0-기반, 전체 폭 유지, 병합 표도 지원)"},
                 "delete_row": {"type": "array", "items": {"type": "object", "properties": {
                     "table": {"type": "integer"}, "row": {"type": "integer"}},
                     "required": ["table", "row"]}, "description": "N번째 표의 R행 삭제(0-기반, 병합 행은 거부)"}

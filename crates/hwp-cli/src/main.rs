@@ -175,12 +175,21 @@ enum Cmd {
         /// 표 행 추가 "표" — N번째 표 끝에 빈 행 (반복 가능, 0-기반; 병합 셀이 있는 표는 거부)
         #[arg(long = "add-row")]
         add_row: Vec<String>,
-        /// 표 열 추가 "표" — N번째 표 끝에 새 열. 전체 폭은 유지(기존 열 균등 축소, 반복 가능, 0-기반; 병합 셀이 있는 표는 거부)
+        /// 표 열 추가 "표"(끝에) 또는 "표:위치"(삽입) — 전체 폭 유지(기존 열 균등 축소). 병합 셀 표도 지원 (반복 가능, 0-기반)
         #[arg(long = "add-col")]
         add_col: Vec<String>,
         /// 표 행 삭제 "표:행" — N번째 표의 R행 (반복 가능, 0-기반; 병합 행은 거부)
         #[arg(long = "delete-row")]
         delete_row: Vec<String>,
+        /// 표 열 삭제 "표:열" — N번째 표의 열 삭제. 전체 폭 유지(남은 열에 재분배). 병합 셀은 축소 (반복 가능, 0-기반)
+        #[arg(long = "delete-col")]
+        delete_col: Vec<String>,
+        /// 셀 병합 "표:r1:c1:r2:c2" — 사각 영역을 좌상단 앵커로 병합 (반복 가능, 0-기반)
+        #[arg(long = "merge-cells")]
+        merge_cells: Vec<String>,
+        /// 셀 분할 "표:행:열" — 병합 셀을 1×1로 분해 (반복 가능, 0-기반)
+        #[arg(long = "split-cell")]
+        split_cell: Vec<String>,
         /// 쓰기 후 재읽기로 검증
         #[arg(long)]
         verify: bool,
@@ -378,6 +387,9 @@ fn main() -> anyhow::Result<()> {
             add_row,
             add_col,
             delete_row,
+            delete_col,
+            merge_cells,
+            split_cell,
             verify,
         } => commands::edit::run(
             &input,
@@ -399,6 +411,9 @@ fn main() -> anyhow::Result<()> {
             &add_row,
             &add_col,
             &delete_row,
+            &delete_col,
+            &merge_cells,
+            &split_cell,
             verify,
         ),
         Cmd::Fields { file, json } => commands::fields::run(&file, json),

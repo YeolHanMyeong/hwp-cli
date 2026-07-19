@@ -440,6 +440,56 @@ fn edit_add_row_then_fill() {
 }
 
 #[test]
+fn edit_merge_and_column_ops() {
+    // 3열 표 → 셀 병합(상단 3칸)·열 추가·열 삭제를 한 번에 → hwpx. validate + 재읽기로 확인.
+    let md = tmp("hwp_cli_merge.md");
+    std::fs::write(&md, "| 가 | 나 | 다 |\n|----|----|----|\n| 1 | 2 | 3 |\n").unwrap();
+    let form = tmp("hwp_cli_merge_form.hwpx");
+    assert!(
+        hwp()
+            .args(["new", "--from"])
+            .arg(&md)
+            .arg("-o")
+            .arg(&form)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let out = tmp("hwp_cli_merge_out.hwpx");
+    // 병합(0,0)-(0,2), 열 추가(위치1), 열 삭제(열3). 편집 순서: 병합→분할→추가→삭제.
+    let r = hwp()
+        .arg("edit")
+        .arg(&form)
+        .arg("-o")
+        .arg(&out)
+        .args([
+            "--merge-cells",
+            "0:0:0:0:2",
+            "--add-col",
+            "0:1",
+            "--delete-col",
+            "0:3",
+            "--verify",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        r.status.success(),
+        "edit 병합/열조작: {}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    let val = hwp().arg("validate").arg(&out).output().unwrap();
+    assert!(
+        String::from_utf8_lossy(&val.stdout).contains("유효"),
+        "validate: {}",
+        String::from_utf8_lossy(&val.stdout)
+    );
+    for f in [&md, &form, &out] {
+        let _ = std::fs::remove_file(f);
+    }
+}
+
+#[test]
 fn fill_data_tables_grows() {
     // 데이터 구동: --data tables 로 표를 데이터 수만큼 자동 증식 + 채움.
     let md = tmp("hwp_cli_filltab.md");

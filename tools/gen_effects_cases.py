@@ -1108,6 +1108,123 @@ def j1_page_border(dest):
                  f"페이지 걸침 표 2개 정답지 정합(treatAsChar=0·sz·CELL·줄배치, GE-8)")
 
 
+# ── K 시리즈: 표 셀 병합/분할·열 조작 (GK-1·GK-2) ──────────────────────────
+# base 표를 markdown으로 만든 뒤 `hwp edit` 구조 편집을 적용하고, 재읽기 구조 단언 +
+# validate(hwpx)로 자체 검증한다. 병합 표 생성은 새 조합이라 한글 실기가 차단성이다.
+
+def _first_table(ir):
+    """본문(및 셀 중첩) 첫 표 dict를 재귀로 찾는다."""
+    def walk(node):
+        if isinstance(node, dict):
+            t = node.get("Table")
+            if isinstance(t, dict) and "cells" in t:
+                return t
+            for v in node.values():
+                r = walk(v)
+                if r:
+                    return r
+        elif isinstance(node, list):
+            for x in node:
+                r = walk(x)
+                if r:
+                    return r
+        return None
+    t = walk(ir.get("sections", []))
+    if not t:
+        raise RuntimeError("표 없음")
+    return t
+
+
+def _assert_table_invariants(t):
+    """정답지 실측 불변식: Σ(col_span×row_span)=rows×cols, row_cell_counts 정합."""
+    area = sum(c.get("col_span", 1) * c.get("row_span", 1) for c in t["cells"])
+    full = t["rows"] * t["cols"]
+    assert area == full, f"면적 합 {area} != rows×cols {full}"
+    counts = [0] * t["rows"]
+    for c in t["cells"]:
+        counts[c["row"]] += 1
+    assert counts == t["row_cell_counts"], \
+        f"row_cell_counts {t['row_cell_counts']} != 계산 {counts}"
+
+
+def _new_table(tag, ext, rows_cells):
+    """rows_cells(첫 행=헤더) → GFM 표 markdown → `hwp new` → base 표 파일."""
+    lines = ["| " + " | ".join(rows_cells[0]) + " |",
+             "|" + "|".join(["---"] * len(rows_cells[0])) + "|"]
+    for row in rows_cells[1:]:
+        lines.append("| " + " | ".join(row) + " |")
+    md = os.path.join(WORK, f"{tag}.md")
+    with open(md, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    base = os.path.join(WORK, f"{tag}_base.{ext}")
+    p = subprocess.run([HWP, "new", "--from", md, "-o", base],
+                       capture_output=True, text=True)
+    if not os.path.exists(base):
+        raise RuntimeError(f"base 표 생성 실패: {p.stderr.strip()}")
+    return base
+
+
+def _edit(base, out, *ops):
+    p = subprocess.run([HWP, "edit", base, "-o", out, *ops],
+                       capture_output=True, text=True)
+    if not os.path.exists(out):
+        raise RuntimeError(f"edit 실패({' '.join(ops)}): {p.stderr.strip()}")
+    return p
+
+
+def k1_merge_hwpx(dest):
+    base = _new_table("k1", "hwpx", [["A", "B"], ["C", "D"]])
+    out = os.path.join(dest, "K1_셀병합.hwpx")
+    _edit(base, out, "--merge-cells", "0:0:0:0:1")
+    t = _first_table(reread(out))
+    a = next(c for c in t["cells"] if c["row"] == 0 and c["col"] == 0)
+    assert a["col_span"] == 2, f"col_span={a['col_span']}"
+    assert len(t["cells"]) == 3, f"셀 {len(t['cells'])}개(3 기대)"
+    _assert_table_invariants(t)
+    ok, msg = validate_ok(out)
+    if not ok:
+        raise RuntimeError(f"validate 실패: {msg}")
+    return out, "2×2 상단 병합 → 앵커 col_span=2, 셀 3개, validate ✅"
+
+
+def k2_merge_hwp(dest):
+    base = _new_table("k2", "hwp", [["A", "B"], ["C", "D"]])
+    out = os.path.join(dest, "K2_셀병합.hwp")
+    _edit(base, out, "--merge-cells", "0:0:0:0:1")
+    ir = reread(out)
+    t = _first_table(ir)
+    a = next(c for c in t["cells"] if c["row"] == 0 and c["col"] == 0)
+    assert a["col_span"] == 2, f"col_span={a['col_span']}"
+    assert len(t["cells"]) == 3, f"셀 {len(t['cells'])}개(3 기대)"
+    _assert_table_invariants(t)
+    # hwp5 합성 게이트: 재읽기 후 병합 앵커 셀에 두 셀 내용(A·B)이 보존돼야.
+    anchor_text = "".join(para_text(p) for p in a["paragraphs"])
+    if "A" not in anchor_text or "B" not in anchor_text:
+        raise RuntimeError(f"병합 내용(A·B) 보존 실패: 앵커 텍스트 {anchor_text!r}")
+    # 정품 패턴: 셀 세로 정렬 = 가운데(list_attr bits5-6 == 1). hwp5 writer가 그대로
+    # 방출하므로, 0(위)이면 셀 내용이 상단에 붙는다(위 여백<아래 여백).
+    bad = [c for c in t["cells"] if (c["list_attr"] >> 5) & 3 != 1]
+    if bad:
+        raise RuntimeError(f"셀 세로 정렬이 가운데(0x20)가 아님: {[hex(c['list_attr']) for c in bad]}")
+    return out, "2×2 상단 병합(hwp5 합성 경로) → col_span=2, 내용 보존, 셀 세로정렬=가운데(0x20), 재읽기 ✅"
+
+
+def k3_cols_hwpx(dest):
+    base = _new_table("k3", "hwpx", [["A", "B", "C"], ["D", "E", "F"]])
+    out = os.path.join(dest, "K3_열조작.hwpx")
+    # 위치1에 열 추가(3→4열) 후 열3 삭제(4→3열, 원래 C열 제거).
+    _edit(base, out, "--add-col", "0:1", "--delete-col", "0:3")
+    t = _first_table(reread(out))
+    assert t["cols"] == 3, f"cols={t['cols']}(3 기대)"
+    assert len(t["cells"]) == 6, f"셀 {len(t['cells'])}개(6 기대)"
+    assert all(c["col_span"] == 1 and c["row_span"] == 1 for c in t["cells"]), "병합 없음"
+    _assert_table_invariants(t)
+    ok, msg = validate_ok(out)
+    if not ok:
+        raise RuntimeError(f"validate 실패: {msg}")
+    return out, "3열 표 열 추가+삭제 → 순 3열·6셀, validate ✅"
+
+
 CASES = [
     ("C1_그림자.hwpx", c1_shadow),
     ("C2_외곽선.hwpx", c2_outline),
@@ -1125,6 +1242,9 @@ CASES = [
     ("H2_md왕복.hwp", h2_md_hwp),
     ("I1_md이미지코드.hwpx", i1_md_image_code),
     ("J1_쪽테두리.hwpx", j1_page_border),
+    ("K1_셀병합.hwpx", k1_merge_hwpx),
+    ("K2_셀병합.hwp", k2_merge_hwp),
+    ("K3_열조작.hwpx", k3_cols_hwpx),
 ]
 
 
