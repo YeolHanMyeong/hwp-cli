@@ -19,7 +19,9 @@ fn fixture() -> PathBuf {
 }
 
 fn tmp(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join("hwp-cli-table-edit");
+    // PID 포함 — 같은 머신에서 cargo test가 동시에 돌면(다른 세션·CI 병렬) 고정 경로가
+    // 서로 산출물을 덮어써 플레이크가 난다(실측).
+    let dir = std::env::temp_dir().join(format!("hwp-cli-table-edit-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     dir.join(name)
 }

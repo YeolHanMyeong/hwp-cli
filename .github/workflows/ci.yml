@@ -10,12 +10,31 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# 같은 브랜치에 새 push가 오면 이전 실행은 취소한다(낭비·지연 감소).
+# 단 main은 취소하지 않는다 — 연속 머지 시 커밋별 CI 신호(이등분 근거)를 보존.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }})
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 필수: ubuntu(CI 기준선) + macOS(소유자 주 사용 플랫폼)
+          - { os: ubuntu-latest }
+          - { os: macos-latest }
+          # 참고용: Windows는 실패 허용(비차단) — 잡은 빨간색으로 보이되 워크플로는 통과.
+          - { os: windows-latest, experimental: true }
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental == true }}
     steps:
       - uses: actions/checkout@v4
       - name: 한국어 폰트 설치 (렌더링 테스트용)
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
       # MSRV(Cargo.toml rust-version)로 고정 — rustfmt/clippy 결과를 결정적으로
       # 만들고(stable 부동 시 버전 드리프트로 통과하던 코드가 갑자기 실패), 선언한
@@ -26,11 +45,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # 세 검사는 서로 독립이므로 앞 단계가 실패해도 모두 실행해 한 번에 보고한다
       # (fmt 실패가 clippy/test 실패를 가리지 않게 — 디버깅 왕복 감소).
+      # 아래 3개 커맨드는 scripts/check.sh(로컬 미러)와 **문자 그대로 동일**해야 한다.
+      # 한쪽만 바꾸면 "로컬 green, CI red" 드리프트가 재발한다.
       - name: 포맷 검사
-        run: cargo fmt --check
+        run: cargo fmt --all --check
       - name: Clippy
         if: ${{ !cancelled() }}
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: 테스트
         if: ${{ !cancelled() }}
-        run: cargo test
+        run: cargo test --workspace

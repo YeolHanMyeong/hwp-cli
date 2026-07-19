@@ -97,7 +97,10 @@ fn slots_json_shape() {
 }
 
 fn tmp(name: &str) -> PathBuf {
-    std::env::temp_dir().join(name)
+    // PID 포함 — 동시 cargo test 실행 간 산출물 충돌(플레이크) 방지.
+    let dir = std::env::temp_dir().join(format!("hwp-cli-cli-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join(name)
 }
 
 #[test]

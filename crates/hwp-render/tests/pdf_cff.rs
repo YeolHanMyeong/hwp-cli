@@ -100,10 +100,14 @@ fn cff_otf_pdf_임베드_구조() {
     assert!(has(b"Identity-H"), "합성 폰트 Identity-H 인코딩");
     assert!(has(b"ToUnicode"), "검색/복사용 ToUnicode CMap");
     // 서브셋되어 원본(보통 수백 KB~MB)보다 훨씬 작아야 한다.
-    assert!(
-        pdf.len() < data.len(),
-        "PDF({})가 원본 폰트({})보다 작아야(서브셋)",
-        pdf.len(),
-        data.len()
-    );
+    // 단, 원본이 소형 특수 폰트(macOS 시스템의 수 KB CFF)면 PDF 구조 오버헤드가
+    // 원본보다 커져 성립하지 않으므로, 크기 단언은 의미 있는 크기에서만 수행한다.
+    if data.len() > 64 * 1024 {
+        assert!(
+            pdf.len() < data.len(),
+            "PDF({})가 원본 폰트({})보다 작아야(서브셋)",
+            pdf.len(),
+            data.len()
+        );
+    }
 }
