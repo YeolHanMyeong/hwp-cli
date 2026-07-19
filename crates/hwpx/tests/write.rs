@@ -175,6 +175,71 @@ fn md_이미지_코드_hwpx_왕복() {
     );
 }
 
+/// GE-9: 부유(글 앞) 그림의 세로/가로 오프셋·z-order가 hwpx `<hp:pos>`/zOrder에
+/// 방출된다. hwp5 read가 실값을 승계하면(parse_picture_gso) writer가 그대로 쓴다 —
+/// 이전엔 0 하드코딩이라 떠 있는 그림이 좌상단(offset 0)에 뭉쳤다.
+#[test]
+fn 부유_그림_배치_hwpx_방출() {
+    use std::io::Write as _;
+    let dir = std::env::temp_dir().join("hwpx-ge9-float");
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend([0, 0, 0, 13]);
+    png.extend(b"IHDR");
+    png.extend(16u32.to_be_bytes());
+    png.extend(16u32.to_be_bytes());
+    png.extend([0u8; 8]);
+    let fig = dir.join("g.png");
+    std::fs::File::create(&fig)
+        .unwrap()
+        .write_all(&png)
+        .unwrap();
+
+    let mut doc = hwp_convert::from_markdown_with(
+        "이미지.\n\n![alt](g.png)\n",
+        &hwp_convert::MarkdownImportOptions {
+            base_dir: Some(&dir),
+        },
+    );
+    // 그림을 부유(글 앞) + 오프셋·z-order로 바꾼다(hwp5 read가 승계했을 값을 모사).
+    for para in &mut doc.sections[0].paragraphs {
+        for c in &mut para.controls {
+            if let hwp_model::Control::Picture(p) = c {
+                p.treat_as_char = false;
+                p.vert_offset = 5000;
+                p.horz_offset = 3000;
+                p.z_order = 7;
+            }
+        }
+    }
+    let out = tmp("ge9_float.hwpx");
+    let warnings = hwpx::write_document(&doc, &out).unwrap();
+    assert!(!warnings.iter().any(|w| w.contains("DROP")), "{warnings:?}");
+
+    let bytes = std::fs::read(&out).unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut raw = Vec::new();
+    zip.by_name("Contents/section0.xml")
+        .unwrap()
+        .read_to_end(&mut raw)
+        .unwrap();
+    let xml = String::from_utf8(raw).unwrap();
+    // 부유 <hp:pic zOrder="7"> + <hp:pos ... vertOffset="5000" horzOffset="3000">.
+    assert!(xml.contains(r#"zOrder="7""#), "z-order 방출: {xml}");
+    assert!(
+        xml.contains(r#"vertOffset="5000""#),
+        "세로 오프셋 방출: {xml}"
+    );
+    assert!(
+        xml.contains(r#"horzOffset="3000""#),
+        "가로 오프셋 방출: {xml}"
+    );
+    assert!(
+        xml.contains(r#"treatAsChar="0""#),
+        "부유(treatAsChar=0) 방출: {xml}"
+    );
+}
+
 /// GI-1/GI-2 왕복 (b): md(각주·취소선·순서목록·중첩) → hwpx 저장 → 재읽기 → md.
 #[test]
 fn markdown_각주_취소선_목록_hwpx_완전왕복() {
