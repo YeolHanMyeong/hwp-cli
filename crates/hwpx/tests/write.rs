@@ -220,6 +220,75 @@ fn markdown_각주_취소선_목록_hwpx_완전왕복() {
     assert!(md_out.contains("- 안쪽 가"), "중첩 불릿: {md_out}");
 }
 
+/// 머리말/꼬리말 적용쪽(applyPageType)이 hwpx write→read 왕복에서 보존된다(GE-α9).
+/// 이전엔 writer가 `applyPageType="BOTH"` 상수라 짝수/홀수 구분 머리말이 항상
+/// "양쪽"으로 뭉개졌다. `g.data` 선두 u32(적용쪽)를 read의 역매핑으로 방출한다.
+#[test]
+fn 머리말_적용쪽_hwpx_왕복() {
+    use hwp_model::{Control, GenericControl, HwpChar, Paragraph, ParagraphList};
+
+    for (apply, want, tag) in [(1u32, "EVEN", 1u8), (2u32, "ODD", 2u8)] {
+        let mut doc = hwp_convert::from_markdown("본문");
+        // head_foot_data 레이아웃: apply(u32)@0 + id(u32)@4.
+        let mut data = Vec::with_capacity(8);
+        data.extend_from_slice(&apply.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        let g = GenericControl {
+            ctrl_id: *b"head",
+            data,
+            paragraph_lists: vec![ParagraphList {
+                header_data: Vec::new(),
+                paragraphs: vec![Paragraph::default()],
+            }],
+            extras: Vec::new(),
+            raw_children: Vec::new(),
+            gso_shapes: Vec::new(),
+            equation: None,
+            column_def: None,
+        };
+        // 머리말 컨트롤을 문단에 ExtCtrl(코드 16)로 부착.
+        let para = &mut doc.sections[0].paragraphs[0];
+        let idx = para.controls.len() as u32;
+        para.chars.push(HwpChar::ExtCtrl {
+            code: 16,
+            ctrl_id: *b"head",
+            payload: hwp_convert::field::rev_payload(b"head"),
+            ctrl_index: Some(idx),
+        });
+        para.controls.push(Control::Generic(g));
+
+        let out = tmp(&format!("hf_{apply}.hwpx"));
+        let warnings = hwpx::write_document(&doc, &out).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        // 방출 XML에 상수 BOTH가 아니라 실제 적용쪽이 들어간다.
+        let bytes = std::fs::read(&out).unwrap();
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut raw = Vec::new();
+        zip.by_name("Contents/section0.xml")
+            .unwrap()
+            .read_to_end(&mut raw)
+            .unwrap();
+        let xml = String::from_utf8(raw).unwrap();
+        assert!(
+            xml.contains(&format!(r#"applyPageType="{want}""#)),
+            "applyPageType={want} 방출: {xml}"
+        );
+
+        // 되읽은 head 컨트롤의 g.data 선두 u32가 적용쪽을 보존.
+        let reread = hwpx::read_document(&out).unwrap().document;
+        let apply_byte = reread.sections[0]
+            .paragraphs
+            .iter()
+            .flat_map(|p| &p.controls)
+            .find_map(|c| match c {
+                Control::Generic(g) if g.ctrl_id == *b"head" => Some(g.data.first().copied()),
+                _ => None,
+            });
+        assert_eq!(apply_byte, Some(Some(tag)), "적용쪽 왕복 (apply={apply})");
+    }
+}
+
 /// 본문 탭이 hwpx에서 `<hp:t>` **안**의 중첩 `<hp:tab width leader type/>`(정품 mixed
 /// content)로 방출되고 raw 0x09가 절대 없어야 한다. t 밖 형제 bare 탭은 한글이 폭 0으로
 /// 무시하고(D3 밀착), raw 0x09를 t 안에 그대로 두면 한글이 파일을 열지 못한다(D3 먹통).
