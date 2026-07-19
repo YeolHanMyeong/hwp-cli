@@ -338,10 +338,58 @@ impl Marks {
     }
 }
 
+/// 열린 강조 스팬의 body 인덱스. `open_at`은 여는 마커의 시작, `content_at`은 여는
+/// 마커 직후(= 내용 시작). 두 값은 스팬을 열 때만 갱신하며 닫을 때 공백 재배치에 쓴다.
+#[derive(Default, Clone, Copy)]
+struct Span {
+    open_at: usize,
+    content_at: usize,
+}
+
+/// 강조 스팬을 닫되 GFM 파싱 규칙을 지킨다.
+///
+/// GFM에서 `**`/`*`/`~~`는 닫는 구분자 **앞**이나 여는 구분자 **뒤**에 공백이 있으면
+/// 강조로 파싱되지 않아 마커가 문자 그대로 노출된다(`**(목적) **` → 리터럴 `**`).
+/// 그래서 굵게/기울임/취소선 스팬은 내용의 선두·후행 공백을 마커 **밖**으로 옮기고,
+/// 내용이 공백뿐이면 마커를 아예 내지 않는다(`** **` 방지).
+/// HTML 모드(`<b>` 등)나 밑줄/첨자처럼 HTML 태그로 방출하는 효과만의 스팬은 공백에
+/// 무관하므로 그대로 닫는다. `marks`가 비었으면(리셋 후) 아무것도 하지 않는다.
+fn close_span(body: &mut String, marks: Marks, span: Span, html: bool) {
+    if marks == Marks::default() {
+        return;
+    }
+    // GFM 구분자가 없으면(HTML 모드이거나 밑줄/첨자뿐) 공백 재배치가 필요 없다.
+    let needs_fix = !html && (marks.bold || marks.italic || marks.strike);
+    if !needs_fix {
+        body.push_str(&marks.close(html));
+        return;
+    }
+    // 공백 판정은 char 단위 trim(멀티바이트 공백 U+3000 등 char 경계 안전).
+    let content = &body[span.content_at..];
+    let lead_len = content.len() - content.trim_start().len();
+    let kept_len = content.trim_end().len();
+    if kept_len == 0 {
+        // 내용이 공백뿐 — 여는 마커를 제거하고 공백만 남긴다.
+        body.replace_range(span.open_at..span.content_at, "");
+        return;
+    }
+    // 후행 공백을 떼어 두고, 다듬은 내용 뒤에 닫는 마커를 붙인 다음 공백을 복원한다.
+    let trail = body[span.content_at + kept_len..].to_string();
+    body.truncate(span.content_at + kept_len);
+    body.push_str(&marks.close(html));
+    body.push_str(&trail);
+    // 선두 공백은 여는 마커 앞으로 옮긴다.
+    if lead_len > 0 {
+        let lead = body[span.content_at..span.content_at + lead_len].to_string();
+        body.replace_range(span.content_at..span.content_at + lead_len, "");
+        body.insert_str(span.open_at, &lead);
+    }
+}
+
 /// 열린 마크를 전부 닫고 상태를 리셋한다(링크 경계·줄바꿈 등 강제 경계).
 /// 이후 Text 문자가 오면 모양 전환 로직이 다시 연다.
-fn close_marks(body: &mut String, marks: &mut Marks, html: bool) {
-    body.push_str(&marks.close(html));
+fn close_marks(body: &mut String, marks: &mut Marks, span: Span, html: bool) {
+    close_span(body, *marks, span, html);
     *marks = Marks::default();
 }
 
@@ -579,6 +627,8 @@ fn render_fragments(doc: &Document, para: &Paragraph, ctx: &mut Ctx) -> Vec<Frag
     let mut body = String::new();
     let mut wchar_pos = 0u32;
     let mut marks = Marks::default();
+    // 현재 열린 강조 스팬의 body 인덱스. 스팬을 열 때만 갱신한다.
+    let mut span = Span::default();
     // 하이퍼링크 필드 열림 상태(대상 URL). FIELD_START에서 채우고 FIELD_END에서 닫는다.
     let mut link_url: Option<String> = None;
 
@@ -593,8 +643,10 @@ fn render_fragments(doc: &Document, para: &Paragraph, ctx: &mut Ctx) -> Vec<Frag
                 want.underline = false;
             }
             if want != marks {
-                body.push_str(&marks.close(ctx.html_mode));
+                close_span(&mut body, marks, span, ctx.html_mode);
+                span.open_at = body.len();
                 body.push_str(&want.open(ctx.html_mode));
+                span.content_at = body.len();
                 marks = want;
             }
         }
@@ -608,7 +660,7 @@ fn render_fragments(doc: &Document, para: &Paragraph, ctx: &mut Ctx) -> Vec<Frag
             }
             HwpChar::CharCtrl(code) => match *code {
                 ctrl_char::LINE_BREAK => {
-                    close_marks(&mut body, &mut marks, ctx.html_mode);
+                    close_marks(&mut body, &mut marks, span, ctx.html_mode);
                     body.push_str(if ctx.html_mode { "<br>" } else { "  \n" });
                 }
                 ctrl_char::HYPHEN => body.push('-'),
@@ -619,7 +671,7 @@ fn render_fragments(doc: &Document, para: &Paragraph, ctx: &mut Ctx) -> Vec<Frag
                 if *code == ctrl_char::FIELD_END {
                     // 하이퍼링크 표시 텍스트 종료 → `](URL)`/`</a>`로 닫는다.
                     if let Some(url) = link_url.take() {
-                        close_marks(&mut body, &mut marks, ctx.html_mode);
+                        close_marks(&mut body, &mut marks, span, ctx.html_mode);
                         if ctx.html_mode {
                             body.push_str("</a>");
                         } else {
@@ -642,7 +694,7 @@ fn render_fragments(doc: &Document, para: &Paragraph, ctx: &mut Ctx) -> Vec<Frag
                         && let Some(url) = crate::field::hyperlink_url(control)
                     {
                         // 하이퍼링크 필드 시작 → `[`/`<a href>` 방출, 이후 표시 텍스트를 링크로 묶는다.
-                        close_marks(&mut body, &mut marks, ctx.html_mode);
+                        close_marks(&mut body, &mut marks, span, ctx.html_mode);
                         if ctx.html_mode {
                             body.push_str("<a href=\"");
                             for c in url.chars() {
@@ -667,6 +719,7 @@ fn render_fragments(doc: &Document, para: &Paragraph, ctx: &mut Ctx) -> Vec<Frag
                             &mut body,
                             &mut marks,
                             &mut fragments,
+                            span,
                         );
                     }
                 }
@@ -674,7 +727,7 @@ fn render_fragments(doc: &Document, para: &Paragraph, ctx: &mut Ctx) -> Vec<Frag
         }
         wchar_pos += ch.wchar_width();
     }
-    body.push_str(&marks.close(ctx.html_mode));
+    close_span(&mut body, marks, span, ctx.html_mode);
     flush_inline(&mut body, &mut fragments);
     fragments
 }
@@ -691,8 +744,9 @@ fn push_block(
     html: bool,
     fragments: &mut Vec<Fragment>,
     block: String,
+    span: Span,
 ) {
-    close_marks(body, marks, html);
+    close_marks(body, marks, span, html);
     flush_inline(body, fragments);
     fragments.push(Fragment::Block(block));
 }
@@ -709,6 +763,7 @@ fn md_link_dest(url: &str) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_control(
     doc: &Document,
     control: &Control,
@@ -717,6 +772,7 @@ fn render_control(
     body: &mut String,
     marks: &mut Marks,
     fragments: &mut Vec<Fragment>,
+    span: Span,
 ) {
     match control {
         Control::SectionDef(_) => {}
@@ -739,12 +795,12 @@ fn render_control(
             } else {
                 render_gfm_table(doc, table, ctx, &mut block);
             }
-            push_block(body, marks, ctx.html_mode, fragments, block);
+            push_block(body, marks, ctx.html_mode, fragments, block, span);
         }
         Control::Generic(g) => {
             // 수식 → $스크립트$ (원문 보존).
             if let Some(eq) = &g.equation {
-                render_equation(eq, ctx, body, marks, fragments);
+                render_equation(eq, ctx, body, marks, fragments, span);
                 return;
             }
             // 각주/미주 → 본문 `[^N]` 마커 + 문서 끝 정의 (본문 인라인 흡수 대체).
@@ -792,7 +848,7 @@ fn render_control(
                                 }
                             }
                             Fragment::Block(block) => {
-                                push_block(body, marks, ctx.html_mode, fragments, block);
+                                push_block(body, marks, ctx.html_mode, fragments, block, span);
                             }
                         }
                     }
@@ -809,6 +865,7 @@ fn render_equation(
     body: &mut String,
     marks: &mut Marks,
     fragments: &mut Vec<Fragment>,
+    span: Span,
 ) {
     if ctx.html_mode && eq.inline {
         body.push_str("<code>");
@@ -826,7 +883,7 @@ fn render_equation(
             push_html_escaped(&mut block, c);
         }
         block.push_str("</code></div>");
-        push_block(body, marks, true, fragments, block);
+        push_block(body, marks, true, fragments, block, span);
     } else {
         push_block(
             body,
@@ -834,6 +891,7 @@ fn render_equation(
             false,
             fragments,
             format!("$$\n{}\n$$", eq.script),
+            span,
         );
     }
 }
@@ -1745,6 +1803,106 @@ mod tests {
             md.contains("<u>A</u>~~B~~<sup>C</sup><sub>D</sub>"),
             "효과 스팬: {md}"
         );
+    }
+
+    /// 문단 하나짜리 문서에 텍스트와 문자모양 run을 심는다. run은 (WCHAR 시작, 셰이프 인덱스).
+    fn doc_with_runs(text: &str, shapes: &[CharShape], runs: &[(u32, usize)]) -> Document {
+        let mut doc = from_markdown("x\n");
+        let base = doc.header.char_shapes.len() as u16;
+        doc.header.char_shapes.extend_from_slice(shapes);
+        let para = &mut doc.sections[0].paragraphs[0];
+        para.chars = text.chars().map(HwpChar::Text).collect();
+        para.char_shape_runs = runs
+            .iter()
+            .map(|(pos, idx)| (*pos, CharShapeId(base + *idx as u16)))
+            .collect();
+        doc
+    }
+
+    fn bold_shape() -> CharShape {
+        CharShape {
+            attr: 1 << 1,
+            ..CharShape::default()
+        }
+    }
+
+    /// 볼드 run의 후행 공백은 닫는 `**` 뒤로 옮긴다(닫는 구분자 앞 공백 → 강조 파싱 실패 해소).
+    #[test]
+    fn 강조_후행공백_마커밖으로() {
+        // "(목적) "가 볼드, "예시"가 보통.
+        let doc = doc_with_runs(
+            "(목적) 예시",
+            &[bold_shape(), CharShape::default()],
+            &[(0, 0), (5, 1)],
+        );
+        let md = to_markdown(&doc);
+        assert!(md.contains("**(목적)** 예시"), "후행 공백 재배치: {md}");
+        assert!(!md.contains("(목적) **"), "닫는 마커 앞 공백 없어야: {md}");
+    }
+
+    /// 볼드 run의 선두 공백은 여는 `**` 앞으로 옮긴다(여는 구분자 뒤 공백 → 강조 파싱 실패 해소).
+    #[test]
+    fn 강조_선두공백_마커밖으로() {
+        // "앞"이 보통, " 강조"가 볼드(선두 공백 포함).
+        let doc = doc_with_runs(
+            "앞 강조",
+            &[CharShape::default(), bold_shape()],
+            &[(0, 0), (1, 1)],
+        );
+        let md = to_markdown(&doc);
+        assert!(md.contains("앞 **강조**"), "선두 공백 재배치: {md}");
+        assert!(!md.contains("** 강조"), "여는 마커 뒤 공백 없어야: {md}");
+    }
+
+    /// 내용이 공백뿐인 볼드 run은 마커를 아예 내지 않는다(`** **` 방지).
+    #[test]
+    fn 강조_공백뿐이면_마커미방출() {
+        // "앞"·"뒤"는 보통, 가운데 " "만 볼드.
+        let doc = doc_with_runs(
+            "앞 뒤",
+            &[CharShape::default(), bold_shape()],
+            &[(0, 0), (1, 1), (2, 0)],
+        );
+        let md = to_markdown(&doc);
+        assert!(md.contains("앞 뒤"), "공백만 남아야: {md}");
+        assert!(!md.contains("**"), "마커 미방출: {md}");
+    }
+
+    /// 취소선도 동일하게 후행 공백을 닫는 `~~` 뒤로 옮긴다.
+    #[test]
+    fn 취소선_후행공백_마커밖으로() {
+        let strike = CharShape {
+            strike: true,
+            ..CharShape::default()
+        };
+        // "지운 "이 취소선, "글"이 보통.
+        let doc = doc_with_runs(
+            "지운 글",
+            &[strike, CharShape::default()],
+            &[(0, 0), (3, 1)],
+        );
+        let md = to_markdown(&doc);
+        assert!(md.contains("~~지운~~ 글"), "취소선 후행 공백 재배치: {md}");
+        assert!(!md.contains("지운 ~~"), "닫는 마커 앞 공백 없어야: {md}");
+    }
+
+    /// HTML 모드(`<b>`)는 태그가 공백에 무관하므로 후행 공백을 그대로 둔다.
+    #[test]
+    fn html_모드_볼드는_공백유지() {
+        // 병합 셀 표 → HTML 폴백 → 셀 내용 html_mode. 셀에 "가 "(볼드) + "나"(보통).
+        let cell_para = Paragraph {
+            chars: "가 나".chars().map(HwpChar::Text).collect(),
+            char_shape_runs: vec![(0, CharShapeId(0)), (2, CharShapeId(1))],
+            ..Paragraph::default()
+        };
+        let mut doc = from_markdown("표\n");
+        doc.header.char_shapes = vec![bold_shape(), CharShape::default()];
+        insert_table(
+            &mut doc.sections[0].paragraphs[0],
+            one_cell_table(cell_para, 2, 2),
+        );
+        let md = to_markdown(&doc);
+        assert!(md.contains("<b>가 </b>나"), "HTML 볼드 공백 유지: {md}");
     }
 
     fn equation_control(script: &str, inline: bool) -> Control {
