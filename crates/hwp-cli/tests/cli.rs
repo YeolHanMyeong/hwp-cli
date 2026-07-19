@@ -103,13 +103,19 @@ fn tmp(name: &str) -> PathBuf {
     dir.join(name)
 }
 
-/// 실패 진단용: 파일의 cat 출력(본문+stderr)을 덤프한다 (Windows CI 전용 결함 추적).
+/// 실패 진단용: 파일의 cat 출력(본문+stderr)과 info(스트림 크기)를 덤프한다
+/// (Windows CI 전용 결함 추적 — write 측 산출물이 비었는지, read 측이 잃는지 구분).
 fn dump_file(path: &PathBuf) -> String {
-    let out = hwp().arg("cat").arg(path).output().unwrap();
+    let cat = hwp().arg("cat").arg(path).output().unwrap();
+    let info = hwp().args(["info", "--json"]).arg(path).output().unwrap();
     format!(
-        "stdout={:?} stderr={:?}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
+        "cat_stdout={:?} cat_stderr={:?} info={}",
+        String::from_utf8_lossy(&cat.stdout),
+        String::from_utf8_lossy(&cat.stderr),
+        String::from_utf8_lossy(&info.stdout)
+            .chars()
+            .take(400)
+            .collect::<String>()
     )
 }
 
