@@ -167,7 +167,7 @@ hwp mcp --font-dir ./fonts
 | 명령 | 인자 / 플래그 | 설명 |
 |---|---|---|
 | `info <file>` | `--json` | 포맷/버전/속성/스트림 진단 |
-| `cat <file>` | `--format plain\|markdown\|json` (기본 `plain`), `--preview`, `--with-header-footer`, `--with-hidden` | 본문 추출. `--preview`는 본문 파싱 없이 PrvText만 출력. `--with-*`는 머리말/꼬리말·숨은 설명 포함(기본 제외) |
+| `cat <file>` | `--format plain\|markdown\|json` (기본 `plain`), `--preview`, `--with-header-footer`, `--with-hidden`, `--with-segments`(md 전용) | 본문 추출. `--preview`는 본문 파싱 없이 PrvText만 출력. `--with-*`는 머리말/꼬리말·숨은 설명 포함(기본 제외). `--with-segments`는 markdown과 함께 각 출력 문자 범위의 원본 좌표를 한 줄 JSON 봉투로 낸다(아래 [`--with-segments`](#--with-segments-추출-근거-좌표) 참고) |
 | `convert <input> -o <output>` | `--to hwp\|hwpx\|md\|json`(생략 시 확장자 추론), `--strict`(예약 — 현재 미동작), `--preserve-layout`, `--embed-bin`, `--media-dir <dir>`(md), `--with-header-footer`(md), `--with-hidden`(md) | 포맷 변환. 출력이 `.pdf`이면 렌더 경로로 위임(시스템 글꼴 사용 — 정밀 글꼴은 `render --font-dir` 권장). `--preserve-layout`는 무수정 왕복 전용 줄 배치 보존. `--embed-bin`은 JSON에 이미지 base64 임베드. md 출력은 `--media-dir figs`처럼 이미지 추출 디렉터리 지정 가능(기본 `<스템>.media`, 상대경로는 출력 파일 기준·링크는 Markdown에 안전하게 직렬화). `--strict`는 향후 보존 불가 데이터 발견 시 실패 처리 예정(현재는 동작하지 않음) |
 | `render <input> -o <output>` | `--pages "1"\|"1-3"\|"all"`(기본 `all`), `--dpi <f64>`(기본 96, 래스터 전용), `--format png\|svg\|pdf`(생략 시 확장자 추론), `--font-dir <dir>`(반복) | 페이지를 PNG/SVG(페이지별 파일)·PDF(단일 멀티페이지)로 렌더. 번호 목록은 형식 템플릿(`^1.`→"1.", `(^5)`→"(5)", `제^1조`→"제1조")을 적용 |
 | `new -o <output>` | `--from <md\|json>`(생략 시 빈 문서) | markdown/JSON IR에서 새 문서 생성. markdown 목록은 진짜 번호(NUMBER)/글머리(BULLET) 머리 문단으로 들여오고(중첩=수준), H1~H3 제목엔 절 번호(`1.`/`1-1.`/`1-1-1.`, 숫자 시작 제목은 생략)를 접두한다 |
@@ -212,8 +212,43 @@ HWP 요소 → markdown 매핑:
 | 수식(eqed) | 인라인 `$스크립트$`, 블록 `$$스크립트$$` — **HWP 수식 스크립트 원문**(LaTeX 아님) |
 | 머리말/꼬리말·숨은 설명 | 기본 제외, `--with-header-footer` / `--with-hidden`으로 포함 |
 
+**표 직렬화 보장**: HTML 표의 각 `<tr>…</tr>` 행과 GFM 파이프 표의 각 행은 항상 한 줄로
+직렬화된다(행 = 연속된 한 줄 — 셀 안 중첩 표도 그 줄에 인라인으로 얹힌다). 소비자가 행 단위로
+안정적으로 인용·파싱할 수 있도록 테스트로 고정돼 있다.
+
 한계: 헤딩 인식은 `개요 N` 스타일뿐이고(사용자 정의 제목 스타일은 본문 취급), 떠 있는(floating)
 개체의 위치·z-order는 반영하지 않으며, 역방향(md → hwp)은 표·굵게 등 기본 구문만 복원된다.
+
+### `--with-segments` (추출 근거 좌표)
+
+`hwp cat <file> --format markdown --with-segments`는 markdown과 함께 **각 출력 문자 범위가
+어느 원본 문단에서 왔는지**를 한 줄 컴팩트 JSON 봉투로 낸다. 외부 소비자가 추출 근거를
+"verbatim 인용 + 원본 좌표(섹션/문단)"로 기록할 때 쓴다.
+
+```json
+{"markdown": "...", "segments": [
+  {"kind": "para", "section": 0, "para": 12, "start": 345, "end": 512},
+  {"kind": "para", "section": 0, "para": 13, "start": 514, "end": 590}
+]}
+```
+
+계약 사항:
+
+- **오프셋은 유니코드 스칼라(문자) 단위** — Python `str` 인덱싱과 동일하다(바이트 아님).
+  `markdown[start:end]`로 그대로 슬라이스하면 그 문단의 출력 조각을 얻는다.
+- **좌표는 IR 인덱스** — `section`/`para`는 `--format json`으로 얻는 `sections[]`/`paragraphs[]`
+  (최상위 문단) 인덱스라 재디코드에도 안정적이다.
+- **정렬·비중첩** — 세그먼트는 `start` 오름차순이며 서로 겹치지 않는다.
+- **간극 허용** — 어느 문단에도 귀속되지 않는 출력(빈 줄, 구역 구분 주석 등)은 세그먼트 사이
+  간극으로 남는다.
+- **표가 만든 줄은 표를 담은 문단 인덱스를 상속**한다(표 블록 전체가 그 문단 범위 안).
+- **각주/미주 정의는 참조 문단에 귀속**된다(문서 끝의 정의 줄도 참조한 문단 좌표를 갖는다).
+- **머리말/꼬리말은 기본 제외** — `--with-header-footer`(및 `--with-hidden`)를 함께 주면 포함되고,
+  그 범위도 세그먼트로 잡힌다.
+- `markdown` 필드는 `--with-segments` 없이 실행한 markdown 출력과 **바이트 단위로 동일**하다.
+- `kind`는 현재 항상 `"para"`(미래 확장용 필드).
+
+`--with-segments`는 markdown 전용이라 다른 `--format`이나 `--preview`와 함께 쓰면 에러가 난다.
 
 ## JSON IR로 문서 재생성 (regen)
 

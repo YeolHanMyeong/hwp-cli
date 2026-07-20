@@ -39,6 +39,23 @@ pub struct MarkdownOptions<'a> {
     pub text: TextOptions,
 }
 
+/// markdown 출력의 문자 범위 `[start, end)`가 유래한 원본 IR 좌표.
+///
+/// 오프셋은 바이트가 아니라 **유니코드 스칼라(문자)** 단위다 — Python `str` 인덱싱과
+/// 동일하므로 소비자가 `md[start:end]`로 그대로 슬라이스할 수 있다. 좌표는 IR
+/// (`--format json`)의 `sections[]`/`paragraphs[]` 인덱스라 재디코드에도 안정적이다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarkdownSegment {
+    /// `doc.sections[]` 인덱스.
+    pub section: usize,
+    /// `sections[section].paragraphs[]` 인덱스 (최상위 문단).
+    pub para: usize,
+    /// 문자 오프셋(포함).
+    pub start: usize,
+    /// 문자 오프셋(제외).
+    pub end: usize,
+}
+
 /// IR 전체를 GFM markdown으로 직렬화한다(기존 시그니처 유지 — 이미지 미추출).
 pub fn to_markdown(doc: &Document) -> String {
     // media_dir 미지정 → IO가 없어 실패할 수 없다.
@@ -47,7 +64,37 @@ pub fn to_markdown(doc: &Document) -> String {
 }
 
 /// 옵션을 받는 변형. `media_dir` 지정 시 이미지를 추출하며, 추출 IO 실패는 `Err`.
+///
+/// 세그먼트 맵을 버리는 래퍼다 — 방출 코어([`emit_markdown`])를
+/// [`to_markdown_with_segments`]와 공유하므로 markdown 문자열은 세그먼트 유무와
+/// 무관하게 바이트 단위로 동일함이 구조적으로 보장된다.
 pub fn to_markdown_with(doc: &Document, opts: &MarkdownOptions) -> std::io::Result<String> {
+    Ok(emit_markdown(doc, opts)?.0)
+}
+
+/// [`to_markdown_with`]와 같은 markdown을 내면서, 각 출력 문자 범위가 어느 원본 문단에서
+/// 왔는지를 [`MarkdownSegment`] 목록으로 함께 돌려준다.
+///
+/// 세그먼트는 `start` 오름차순·비중첩이며, 미귀속 출력(빈 줄·구역 구분 등)에 해당하는
+/// 간극은 허용한다. 표가 만든 줄은 표를 담은 문단 인덱스를 상속하고, 각주/미주 정의는
+/// 참조 문단에 귀속된다. 머리말/꼬리말은 기본 제외(`opts.text`로 포함).
+pub fn to_markdown_with_segments(
+    doc: &Document,
+    opts: &MarkdownOptions,
+) -> std::io::Result<(String, Vec<MarkdownSegment>)> {
+    emit_markdown(doc, opts)
+}
+
+/// markdown 방출 코어 — 문자열과 세그먼트 맵을 함께 만든다.
+///
+/// 계측(원시 세그먼트 `Vec` push 몇 번)은 오버헤드가 무시할 수준이라 항상 켠다.
+/// 방출 순서: 섹션/문단 이중 루프에서 문단마다 방출 전후의 `out.len()`을 기록하고,
+/// 문서 끝 각주/미주 정의는 수집 시점의 문단 좌표에 귀속시킨다. 이후 [`cleanup_with_map`]으로
+/// 정리하며 삭제된 바이트만큼 오프셋을 재매핑하고, 마지막에 바이트→문자로 변환한다.
+fn emit_markdown(
+    doc: &Document,
+    opts: &MarkdownOptions,
+) -> std::io::Result<(String, Vec<MarkdownSegment>)> {
     let mut ctx = Ctx {
         media_dir: opts.media_dir,
         dir_name: opts
@@ -70,47 +117,73 @@ pub fn to_markdown_with(doc: &Document, opts: &MarkdownOptions) -> std::io::Resu
         notes: Vec::new(),
         foot_n: 0,
         end_n: 0,
+        cur_section: 0,
+        cur_para: 0,
     };
 
     let mut out = String::new();
+    // 원시 세그먼트: (섹션, 문단, byte_start, byte_end) — 방출 순서(= start 오름차순).
+    let mut raw: Vec<(usize, usize, usize, usize)> = Vec::new();
+
     for (section_index, section) in doc.sections.iter().enumerate() {
         if section_index > 0 {
             break_section_list(&mut ctx, &mut out);
         }
         // 목록 번호 카운터는 구역 단위로 리셋한다(렌더러와 같은 규칙).
         let mut list_state = ListState::default();
-        for para in &section.paragraphs {
+        for (para_index, para) in section.paragraphs.iter().enumerate() {
+            // 각주/미주가 수집될 때 귀속시킬 현재 문단 좌표를 갱신한다.
+            ctx.cur_section = section_index;
+            ctx.cur_para = para_index;
+            let start = out.len();
             render_paragraph(doc, para, &mut list_state, &mut ctx, &mut out);
+            if out.len() > start {
+                raw.push((section_index, para_index, start, out.len()));
+            }
         }
     }
-    // 각주/미주 정의는 문서 끝에 모은다.
+    // 각주/미주 정의는 문서 끝에 모은다. 수집 순서(문서 순서)대로 방출되므로 각 정의의
+    // byte 범위는 자연히 본문 세그먼트 뒤에 오름차순으로 쌓인다.
     if !ctx.notes.is_empty() {
         if !out.is_empty() && !out.ends_with("\n\n") {
             out.push('\n');
         }
         for note in &ctx.notes {
-            if note.html {
-                out.push_str(&format!(
-                    "<div class=\"hwp-footnote\" id=\"fn-{}\"><sup>{}</sup> {} <a href=\"#fnref-{}\">&#8617;</a></div>\n",
-                    note.label, note.label, note.text, note.label
-                ));
-            } else {
-                let mut lines = note.text.lines();
-                match lines.next() {
-                    Some(first) => {
-                        out.push_str(&format!("[^{}]: {first}\n", note.label));
-                        // 후속 줄은 4칸 들여쓰기(GFM 풋노트 연속 줄 규칙).
-                        for l in lines {
-                            out.push_str(&format!("    {l}\n"));
-                        }
-                    }
-                    None => out.push_str(&format!("[^{}]:\n", note.label)),
-                }
+            let start = out.len();
+            emit_note(note, &mut out);
+            if out.len() > start {
+                raw.push((note.src.0, note.src.1, start, out.len()));
             }
         }
     }
     ctx.persist_media()?;
-    Ok(cleanup(&out))
+
+    // cleanup으로 정리하며 삭제된 바이트만큼 세그먼트 오프셋을 재매핑하고 문자 단위로 변환.
+    let (cleaned, deletions) = cleanup_with_map(&out);
+    let segments = build_segments(&cleaned, &deletions, &raw);
+    Ok((cleaned, segments))
+}
+
+/// 각주/미주 정의 한 건을 문서 끝 형식으로 방출한다(GFM 풋노트 또는 HTML 블록).
+fn emit_note(note: &Note, out: &mut String) {
+    if note.html {
+        out.push_str(&format!(
+            "<div class=\"hwp-footnote\" id=\"fn-{}\"><sup>{}</sup> {} <a href=\"#fnref-{}\">&#8617;</a></div>\n",
+            note.label, note.label, note.text, note.label
+        ));
+    } else {
+        let mut lines = note.text.lines();
+        match lines.next() {
+            Some(first) => {
+                out.push_str(&format!("[^{}]: {first}\n", note.label));
+                // 후속 줄은 4칸 들여쓰기(GFM 풋노트 연속 줄 규칙).
+                for l in lines {
+                    out.push_str(&format!("    {l}\n"));
+                }
+            }
+            None => out.push_str(&format!("[^{}]:\n", note.label)),
+        }
+    }
 }
 
 struct PendingMedia {
@@ -122,6 +195,8 @@ struct Note {
     label: String,
     text: String,
     html: bool,
+    /// 이 각주/미주를 참조한 최상위 문단 좌표 (섹션 인덱스, 문단 인덱스).
+    src: (usize, usize),
 }
 
 /// 렌더 중 상태(이미지 추출 진행·텍스트 포함 정책·목록/각주·HTML 표 모드).
@@ -146,6 +221,9 @@ struct Ctx<'a> {
     notes: Vec<Note>,
     foot_n: u32,
     end_n: u32,
+    /// 세그먼트 귀속용 — 현재 방출 중인 최상위 문단 좌표(메인 루프에서 문단마다 갱신).
+    cur_section: usize,
+    cur_para: usize,
 }
 
 impl Ctx<'_> {
@@ -249,23 +327,185 @@ fn rollback_media(paths: &[PathBuf]) {
     }
 }
 
-/// 과도한 빈 줄을 정리한다.
-fn cleanup(out: &str) -> String {
+/// 과도한 빈 줄을 정리하고(연속 빈 줄을 1줄로), 정리된 문자열과 **삭제 구간 목록**(원본
+/// `out` 바이트 기준 `(start, len)`, start 오름차순·비중첩)을 함께 낸다.
+///
+/// cleanup은 연속 빈 줄을 **통째 줄 단위로만** 삭제하므로 각 삭제는 원본의 연속 바이트
+/// 구간이다. 마지막 줄에 개행이 없으면 cleanup이 끝에 `\n`을 붙이는데(순수 삽입) 앞쪽
+/// 오프셋에는 영향이 없어 매핑에서 무시한다. 생성 markdown에는 `\r`이 없으므로
+/// `str::lines()`와 동일하게 `\n` 기준으로만 분할한다.
+fn cleanup_with_map(out: &str) -> (String, Vec<(usize, usize)>) {
     let mut cleaned = String::with_capacity(out.len());
-    let mut blank_run = 0;
-    for line in out.lines() {
-        if line.trim().is_empty() {
+    let mut deletions: Vec<(usize, usize)> = Vec::new();
+    let mut blank_run = 0usize;
+    let bytes = out.as_bytes();
+    let mut i = 0usize;
+    while i < out.len() {
+        // 현재 줄의 내용 범위 [i, line_end)와 개행 포함 다음 줄 시작 next.
+        let (line_end, next) = match bytes[i..].iter().position(|&b| b == b'\n') {
+            Some(p) => (i + p, i + p + 1),  // '\n' 포함해 다음 줄로
+            None => (out.len(), out.len()), // 마지막 줄(개행 없음)
+        };
+        let line = &out[i..line_end];
+        let keep = if line.trim().is_empty() {
             blank_run += 1;
-            if blank_run > 1 {
-                continue;
-            }
+            blank_run <= 1
         } else {
             blank_run = 0;
+            true
+        };
+        if keep {
+            cleaned.push_str(line);
+            cleaned.push('\n');
+        } else {
+            // 이 줄 전체(내용 + 개행)를 삭제 — 원본 [i, next) 구간.
+            deletions.push((i, next - i));
         }
-        cleaned.push_str(line);
-        cleaned.push('\n');
+        i = next;
     }
-    cleaned
+    (cleaned, deletions)
+}
+
+/// 삭제 구간 목록을 원본→정리본 오프셋 재매핑 함수로 감싼다(이진 탐색, O(log D)).
+struct DeletionMap {
+    /// (삭제 시작, 삭제 끝(제외), 이 구간 이전까지의 누적 삭제 바이트).
+    entries: Vec<(usize, usize, usize)>,
+}
+
+impl DeletionMap {
+    fn new(deletions: &[(usize, usize)]) -> Self {
+        let mut entries = Vec::with_capacity(deletions.len());
+        let mut cum = 0usize;
+        for &(start, len) in deletions {
+            entries.push((start, start + len, cum));
+            cum += len;
+        }
+        Self { entries }
+    }
+
+    /// 원본 바이트 오프셋 `old`의 정리본 바이트 오프셋. 삭제 구간 내부의 오프셋은 그 구간
+    /// 시작으로 붕괴한다(삭제된 줄 내부는 자연히 붕괴 지점으로 수렴).
+    fn remap(&self, old: usize) -> usize {
+        // start < old 인 마지막 구간만이 old에 영향을 줄 수 있다(정렬·비중첩).
+        let idx = self.entries.partition_point(|&(start, _, _)| start < old);
+        if idx == 0 {
+            return old;
+        }
+        let (start, end, before) = self.entries[idx - 1];
+        let removed = if end <= old {
+            before + (end - start) // 이 구간 전체가 old 이전
+        } else {
+            before + (old - start) // old가 이 구간 내부 → 시작으로 붕괴
+        };
+        old - removed
+    }
+}
+
+/// 원시 세그먼트(원본 byte 범위)를 정리본 기준 문자 세그먼트로 확정한다.
+///
+/// ① cleanup 삭제맵으로 byte 범위 재매핑 후 정리본 길이로 clamp, ② 후행 공백·개행 트림
+/// (byte 단위, char 경계 안전)으로 빈 것 제거, ③ 남은 경계를 char_indices 단일 패스로
+/// 문자 오프셋으로 변환. 경계는 항상 줄 경계라 char 경계 위반이 없어야 하지만 방어적으로
+/// 앞쪽 char 경계로 내림한다. 결과는 start 오름차순·비중첩·범위 내임을 debug_assert로 확인.
+fn build_segments(
+    cleaned: &str,
+    deletions: &[(usize, usize)],
+    raw: &[(usize, usize, usize, usize)],
+) -> Vec<MarkdownSegment> {
+    let map = DeletionMap::new(deletions);
+    let clen = cleaned.len();
+
+    // 1) 재매핑 + clamp + char 경계 내림 + 후행 트림 → 정리본 byte 세그먼트.
+    let mut byte_segs: Vec<(usize, usize, usize, usize)> = Vec::with_capacity(raw.len());
+    for &(section, para, s, e) in raw {
+        let ns = floor_char_boundary(cleaned, map.remap(s).min(clen));
+        let ne0 = floor_char_boundary(cleaned, map.remap(e).min(clen));
+        if ne0 <= ns {
+            continue;
+        }
+        // 후행 공백·개행만큼 end를 줄인다(인용이 깔끔하도록). 공백뿐이면 버린다.
+        let trimmed = cleaned[ns..ne0].trim_end();
+        let ne = ns + trimmed.len();
+        if ne <= ns {
+            continue;
+        }
+        byte_segs.push((section, para, ns, ne));
+    }
+
+    // 2) 모든 경계 byte 오프셋을 모아 정렬·유일화 후 char 오프셋으로 일괄 변환.
+    let mut bounds: Vec<usize> = Vec::with_capacity(byte_segs.len() * 2);
+    for &(_, _, s, e) in &byte_segs {
+        bounds.push(s);
+        bounds.push(e);
+    }
+    bounds.sort_unstable();
+    bounds.dedup();
+    let char_bounds = bytes_to_chars(cleaned, &bounds);
+    let char_at = |b: usize| -> usize {
+        let idx = bounds
+            .binary_search(&b)
+            .expect("경계는 bounds에 반드시 존재");
+        char_bounds[idx]
+    };
+
+    // 3) 문자 세그먼트 조립.
+    let segments: Vec<MarkdownSegment> = byte_segs
+        .iter()
+        .map(|&(section, para, s, e)| MarkdownSegment {
+            section,
+            para,
+            start: char_at(s),
+            end: char_at(e),
+        })
+        .collect();
+
+    debug_assert!(
+        segments.windows(2).all(|w| w[0].start <= w[1].start),
+        "세그먼트는 start 오름차순이어야 함"
+    );
+    debug_assert!(
+        segments.windows(2).all(|w| w[0].end <= w[1].start),
+        "세그먼트는 비중첩이어야 함"
+    );
+    debug_assert!(
+        segments
+            .iter()
+            .all(|seg| seg.start < seg.end && seg.end <= cleaned.chars().count()),
+        "세그먼트는 범위 내(0 < 폭, end <= 문자수)여야 함"
+    );
+    segments
+}
+
+/// `i` 이하에서 가장 가까운 char 경계(std의 `floor_char_boundary` 대체 — 아직 unstable).
+fn floor_char_boundary(s: &str, mut i: usize) -> usize {
+    if i >= s.len() {
+        return s.len();
+    }
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// 정렬·유일한 byte 경계 목록(모두 char 경계)을 char_indices 단일 패스로 char 오프셋으로
+/// 변환한다. 입력과 같은 순서의 char 오프셋 벡터를 낸다.
+fn bytes_to_chars(s: &str, bounds: &[usize]) -> Vec<usize> {
+    let mut result = vec![0usize; bounds.len()];
+    let mut bi = 0usize;
+    let mut char_idx = 0usize;
+    for (byte_off, _) in s.char_indices() {
+        while bi < bounds.len() && bounds[bi] == byte_off {
+            result[bi] = char_idx;
+            bi += 1;
+        }
+        char_idx += 1;
+    }
+    // 남은 경계(= s.len(), 문자열 끝)는 전체 문자 수로 맺는다.
+    while bi < bounds.len() {
+        result[bi] = char_idx;
+        bi += 1;
+    }
+    result
 }
 
 /// 인라인 문자 효과 상태. 열기 순서 bold→italic→strike→underline→sup/sub, 닫기는 역순.
@@ -814,10 +1054,12 @@ fn render_control(
                 };
                 let text = note_text(doc, g, ctx);
                 let html = ctx.html_mode;
+                let src = (ctx.cur_section, ctx.cur_para);
                 ctx.notes.push(Note {
                     label: label.clone(),
                     text,
                     html,
+                    src,
                 });
                 if html {
                     body.push_str(&format!(
@@ -987,12 +1229,19 @@ fn render_gfm_table(doc: &Document, table: &Table, ctx: &mut Ctx, out: &mut Stri
 
 /// HTML 표 — 병합 셀(colspan/rowspan)·셀 내 블록(중첩 표 포함)을 보존한다.
 /// 블록 HTML 안에선 md가 렌더되지 않으므로 셀 내용은 html_mode로 방출한다.
+///
+/// **표 행 한 줄 불변식**: 각 `<tr>…</tr>`는 항상 한 줄에 담긴다(행 안에 개행 없음). 최상위
+/// 표는 행마다 한 줄(가독성 + 소비자의 행 단위 인용). 셀 안에 든 **중첩 표**(html_mode)는
+/// 개행 없이 통째로 한 줄로 직렬화해 바깥 행의 한 줄을 깨지 않게 한다 — 중첩 표의 모든 행이
+/// 바깥 행과 같은 한 줄에 얹히며, 그래도 `<tr` 수 == `</tr>` 수가 줄마다 성립한다.
 fn render_html_table(doc: &Document, table: &Table, ctx: &mut Ctx, out: &mut String) {
     let rows = table.rows.max(1) as usize;
     let cols = table.cols.max(1) as usize;
+    // 셀 안 중첩 표는 html_mode에서 진입한다 — 이때만 개행 없는 한 줄 형태로 낸다.
+    let nested = ctx.html_mode;
     // 병합 셀이 덮는 칸 표시 격자.
     let mut covered = vec![vec![false; cols]; rows];
-    out.push_str("\n<table>\n");
+    out.push_str(if nested { "<table>" } else { "\n<table>\n" });
     for r in 0..rows {
         out.push_str("<tr>");
         for c in 0..cols {
@@ -1025,9 +1274,10 @@ fn render_html_table(doc: &Document, table: &Table, ctx: &mut Ctx, out: &mut Str
             let content = render_cell_html(doc, cell, ctx);
             out.push_str(&format!("<td{attrs}>{content}</td>"));
         }
-        out.push_str("</tr>\n");
+        // 최상위 표만 행 뒤에 개행 — 중첩 표는 한 줄을 유지한다.
+        out.push_str(if nested { "</tr>" } else { "</tr>\n" });
     }
-    out.push_str("</table>\n\n");
+    out.push_str(if nested { "</table>" } else { "</table>\n\n" });
 }
 
 /// 셀 내용을 html_mode fragment로 렌더해 원래 순서를 보존한다.
@@ -1903,6 +2153,322 @@ mod tests {
         );
         let md = to_markdown(&doc);
         assert!(md.contains("<b>가 </b>나"), "HTML 볼드 공백 유지: {md}");
+    }
+
+    // ── 세그먼트 맵 (기능 A) ──────────────────────────────────────────────
+
+    /// 세그먼트 [start,end)의 문자 슬라이스(문자 단위 — Python str 인덱싱과 동일).
+    fn char_slice(md: &str, seg: &MarkdownSegment) -> String {
+        md.chars()
+            .skip(seg.start)
+            .take(seg.end - seg.start)
+            .collect()
+    }
+
+    /// 텍스트만 있는 최상위 문단.
+    fn text_para(text: &str) -> Paragraph {
+        Paragraph {
+            chars: text.chars().map(HwpChar::Text).collect(),
+            ..Paragraph::default()
+        }
+    }
+
+    /// 병합 셀(colspan)을 가진 2행 표 — HTML 경로로 폴백된다.
+    fn merged_table() -> Table {
+        use hwp_model::{BorderFillId, HwpUnit};
+        let cell = |row: u16, col: u16, cs: u16, rs: u16, txt: &str| Cell {
+            list_attr: 0,
+            col,
+            row,
+            col_span: cs,
+            row_span: rs,
+            width: HwpUnit(0),
+            height: HwpUnit(0),
+            margins: [0; 4],
+            border_fill: BorderFillId(0),
+            header_tail: vec![],
+            paragraphs: vec![text_para(txt)],
+        };
+        Table {
+            common_data: vec![],
+            placement: None,
+            attr: 0,
+            rows: 2,
+            cols: 2,
+            cell_spacing: 0,
+            inner_margins: [0; 4],
+            row_cell_counts: vec![1, 2],
+            border_fill: BorderFillId(0),
+            table_tail: vec![],
+            cells: vec![
+                cell(0, 0, 2, 1, "제목행"),
+                cell(1, 0, 1, 1, "가"),
+                cell(1, 1, 1, 1, "나"),
+            ],
+            extras: vec![],
+        }
+    }
+
+    /// 각주/미주 컨트롤(본문 참조 앵커 없이 컨트롤만).
+    fn note_control(id: &[u8; 4], txt: &str) -> Control {
+        Control::Generic(GenericControl {
+            ctrl_id: *id,
+            data: vec![],
+            paragraph_lists: vec![ParagraphList {
+                header_data: vec![],
+                paragraphs: vec![text_para(txt)],
+            }],
+            extras: vec![],
+            raw_children: vec![],
+            gso_shapes: vec![],
+            equation: None,
+            column_def: None,
+        })
+    }
+
+    /// 첫 문단을 "개요 1" 헤딩으로 만들고 인덱스를 돌려준다.
+    fn make_heading(doc: &mut Document, para_index: usize) {
+        use hwp_model::StyleId;
+        let style_idx = doc.header.styles.len() as u16;
+        doc.header.styles.push(hwp_model::header::Style {
+            name: "개요 1".to_string(),
+            ..Default::default()
+        });
+        doc.sections[0].paragraphs[para_index].style = StyleId(style_idx);
+    }
+
+    /// (1) 한국어 여러 문단(제목 포함)에서 세그먼트가 **문자 오프셋**으로 정확한 원본
+    /// 문단 텍스트를 가리키는지 — 바이트 오프셋이었다면 반드시 어긋나는 한국어 배치.
+    #[test]
+    fn 세그먼트_한국어_문자오프셋_정합() {
+        let mut doc = from_markdown("가나다\n\n라마바\n\n사아자\n");
+        make_heading(&mut doc, 0); // "가나다" → "# 가나다"
+        let (md, segs) = to_markdown_with_segments(&doc, &MarkdownOptions::default()).unwrap();
+
+        // (a) 논-ASCII → 바이트 수 != 문자 수.
+        assert_ne!(
+            md.len(),
+            md.chars().count(),
+            "한국어 포함이면 byte != char: {md:?}"
+        );
+
+        // (b)(c) 각 세그먼트 슬라이스와 (section, para) 인덱스가 기대와 정확히 일치.
+        let expected = [
+            (0usize, 0usize, "# 가나다"),
+            (0, 1, "라마바"),
+            (0, 2, "사아자"),
+        ];
+        assert_eq!(
+            segs.len(),
+            expected.len(),
+            "세그먼트 3개: {segs:?} / {md:?}"
+        );
+        for (seg, (sec, par, text)) in segs.iter().zip(expected) {
+            assert_eq!((seg.section, seg.para), (sec, par), "좌표: {seg:?}");
+            assert_eq!(char_slice(&md, seg), text, "슬라이스: {seg:?} in {md:?}");
+        }
+    }
+
+    /// (2) 불변식(정렬·비중첩·범위·인덱스 유효) + to_markdown_with와 문자열 완전 동일.
+    #[test]
+    fn 세그먼트_불변식과_문자열_동일() {
+        let mut doc = from_markdown("서론 문단\n\n본론 문단\n\n결론 문단\n");
+        make_heading(&mut doc, 0);
+        // 표 문단도 하나 끼운다(블록 포함 경로).
+        insert_table(&mut doc.sections[0].paragraphs[1], merged_table());
+
+        let opts = MarkdownOptions::default();
+        let (md, segs) = to_markdown_with_segments(&doc, &opts).unwrap();
+        let plain = to_markdown_with(&doc, &opts).unwrap();
+        assert_eq!(plain, md, "to_markdown_with와 세그먼트 경로 문자열 동일");
+
+        let n = md.chars().count();
+        for w in segs.windows(2) {
+            assert!(w[0].start <= w[1].start, "정렬: {:?}", segs);
+            assert!(w[0].end <= w[1].start, "비중첩: {:?}", segs);
+        }
+        for seg in &segs {
+            assert!(seg.start < seg.end && seg.end <= n, "범위: {seg:?} (n={n})");
+            assert!(seg.section < doc.sections.len(), "섹션 인덱스: {seg:?}");
+            assert!(
+                seg.para < doc.sections[seg.section].paragraphs.len(),
+                "문단 인덱스: {seg:?}"
+            );
+        }
+    }
+
+    /// (3) 표가 만든 `<tr>` 줄들이 표를 담은 문단의 세그먼트 범위 안에 있다.
+    #[test]
+    fn 세그먼트_표_문단_상속() {
+        let mut doc = from_markdown("표 앞 문단\n\n표 문단\n\n표 뒤 문단\n");
+        insert_table(&mut doc.sections[0].paragraphs[1], merged_table());
+        let (md, segs) = to_markdown_with_segments(&doc, &MarkdownOptions::default()).unwrap();
+        assert!(md.contains("<table>"), "HTML 표 경로: {md}");
+
+        let seg = segs
+            .iter()
+            .find(|s| s.section == 0 && s.para == 1)
+            .expect("표 문단 세그먼트");
+        // md 안 모든 "<tr" 시작 문자 오프셋이 표 문단 세그먼트 범위 안에 있어야 한다.
+        let tr_offsets: Vec<usize> = md
+            .char_indices()
+            .enumerate()
+            .filter(|(_, (b, _))| md[*b..].starts_with("<tr"))
+            .map(|(ci, _)| ci)
+            .collect();
+        assert!(!tr_offsets.is_empty(), "<tr> 존재: {md}");
+        for off in tr_offsets {
+            assert!(
+                seg.start <= off && off < seg.end,
+                "<tr>@{off}가 표 문단 세그먼트 {seg:?} 밖: {md}"
+            );
+        }
+    }
+
+    /// (4) 연속 빈 줄이 삭제(cleanup)된 뒤에도 각 세그먼트 슬라이스가 올바른 문단을 가리킨다.
+    /// 문단 안 강제 줄바꿈 3회가 빈 줄 2개를 만들어 cleanup이 한 줄을 삭제하게 한다.
+    #[test]
+    fn 세그먼트_cleanup_재매핑() {
+        let mut doc = from_markdown("머리 문단\n\n채움 문단\n\n꼬리 문단\n");
+        // 가운데 문단을 "앞[줄바꿈×3]뒤"로 바꿔 연속 빈 줄을 유발.
+        let p1 = &mut doc.sections[0].paragraphs[1];
+        p1.char_shape_runs = vec![];
+        p1.chars = vec![
+            HwpChar::Text('앞'),
+            HwpChar::CharCtrl(ctrl_char::LINE_BREAK),
+            HwpChar::CharCtrl(ctrl_char::LINE_BREAK),
+            HwpChar::CharCtrl(ctrl_char::LINE_BREAK),
+            HwpChar::Text('뒤'),
+        ];
+        let (md, segs) = to_markdown_with_segments(&doc, &MarkdownOptions::default()).unwrap();
+        assert_eq!(
+            to_markdown_with(&doc, &MarkdownOptions::default()).unwrap(),
+            md
+        );
+
+        let slice_of = |sec: usize, par: usize| -> String {
+            let seg = segs
+                .iter()
+                .find(|s| s.section == sec && s.para == par)
+                .unwrap_or_else(|| panic!("세그먼트 ({sec},{par}) 없음: {segs:?}"));
+            char_slice(&md, seg)
+        };
+        // 삭제 앞 문단과 삭제 뒤 문단이 정확한 텍스트를 가리켜야 한다(재매핑 검증).
+        assert_eq!(slice_of(0, 0), "머리 문단", "삭제 앞 문단: {md:?}");
+        assert_eq!(slice_of(0, 2), "꼬리 문단", "삭제 뒤 문단(재매핑): {md:?}");
+        let mid = slice_of(0, 1);
+        assert!(
+            mid.starts_with('앞') && mid.ends_with('뒤'),
+            "가운데 문단이 앞..뒤 범위를 덮어야: {mid:?}"
+        );
+    }
+
+    /// cleanup_with_map/DeletionMap의 오프셋 재매핑 단위 검증.
+    #[test]
+    fn cleanup_삭제맵_오프셋_재매핑() {
+        // 빈 줄 3개 → 2개 삭제. 정리본은 빈 줄 1개.
+        let (cleaned, dels) = cleanup_with_map("a\n\n\n\nb\n");
+        assert_eq!(cleaned, "a\n\nb\n");
+        let map = DeletionMap::new(&dels);
+        assert_eq!(map.remap(0), 0);
+        assert_eq!(map.remap(1), 1);
+        assert_eq!(map.remap(5), 3, "'b'는 원본 byte 5 → 정리본 byte 3");
+        // 삭제 없는 문자열은 항등.
+        let (c2, d2) = cleanup_with_map("한\n글\n");
+        assert_eq!(c2, "한\n글\n");
+        assert!(d2.is_empty());
+    }
+
+    /// (5) 각주 정의 줄의 세그먼트가 참조 문단 좌표를 갖는다.
+    #[test]
+    fn 세그먼트_각주_정의_귀속() {
+        let mut doc = from_markdown("첫째 문단\n\n둘째 문단\n");
+        // 둘째 문단(인덱스 1)에 각주를 단다.
+        let para = &mut doc.sections[0].paragraphs[1];
+        let idx = para.controls.len() as u32;
+        para.controls.push(note_control(b"fn  ", "각주 정의 내용"));
+        para.chars.push(HwpChar::ExtCtrl {
+            code: ctrl_char::FOOTNOTE_ENDNOTE,
+            ctrl_id: *b"fn  ",
+            payload: vec![],
+            ctrl_index: Some(idx),
+        });
+        let (md, segs) = to_markdown_with_segments(&doc, &MarkdownOptions::default()).unwrap();
+        assert!(md.contains("[^1]: 각주 정의 내용"), "각주 정의 방출: {md}");
+
+        // "[^1]:" 로 시작하는 슬라이스를 가진 세그먼트가 참조 문단 (0,1)에 귀속돼야 한다.
+        let def_seg = segs
+            .iter()
+            .find(|s| char_slice(&md, s).starts_with("[^1]:"))
+            .expect("각주 정의 세그먼트");
+        assert_eq!(
+            (def_seg.section, def_seg.para),
+            (0, 1),
+            "각주 정의는 참조 문단에 귀속: {def_seg:?}"
+        );
+    }
+
+    /// (6) 구역 2개 문서에서 section 인덱스가 정확하다.
+    #[test]
+    fn 세그먼트_다중_구역() {
+        let mut doc = from_markdown("첫 구역 내용\n");
+        let mut second = doc.sections[0].clone();
+        second.paragraphs[0].char_shape_runs = vec![];
+        second.paragraphs[0].chars = "둘째 구역 내용".chars().map(HwpChar::Text).collect();
+        doc.sections.push(second);
+
+        let (md, segs) = to_markdown_with_segments(&doc, &MarkdownOptions::default()).unwrap();
+        let first = segs
+            .iter()
+            .find(|s| char_slice(&md, s) == "첫 구역 내용")
+            .expect("첫 구역 세그먼트");
+        let sec2 = segs
+            .iter()
+            .find(|s| char_slice(&md, s) == "둘째 구역 내용")
+            .expect("둘째 구역 세그먼트");
+        assert_eq!(first.section, 0, "첫 구역 section: {first:?}");
+        assert_eq!(sec2.section, 1, "둘째 구역 section: {sec2:?}");
+    }
+
+    /// (7) 표 행 한 줄 불변식(단위): HTML 표는 줄마다 `<tr` 수 == `</tr>` 수(중첩 표가 한
+    /// 줄에 여럿 있어도 성립), GFM 표는 trim 후 '|' 시작 줄이 '|'로 끝난다.
+    #[test]
+    fn 표_행_한줄_불변식_단위() {
+        // 중첩 표: 바깥 셀 안에 1×1 표 → 바깥 행과 같은 한 줄에 인라인 직렬화.
+        let inner = one_cell_table(text_para("속"), 1, 1);
+        let mut cell_para = Paragraph::default();
+        insert_table(&mut cell_para, inner);
+        let outer = one_cell_table(cell_para, 1, 1);
+        let mut doc = from_markdown("표\n");
+        insert_table(&mut doc.sections[0].paragraphs[0], outer);
+        let md = to_markdown(&doc);
+        assert!(
+            md.contains("<table><tr><td>속</td></tr></table>"),
+            "중첩 표가 한 줄로 인라인: {md}"
+        );
+        for line in md.lines() {
+            assert_eq!(
+                line.matches("<tr").count(),
+                line.matches("</tr>").count(),
+                "행 한 줄 불변식 위반: {line:?}"
+            );
+        }
+
+        // GFM 표: 병합 없는 표는 파이프 표로 렌더 — '|' 시작 줄은 '|'로 끝난다.
+        let gfm = from_markdown("| 가 | 나 |\n|----|----|\n| 1 | 2 |\n");
+        let md2 = to_markdown(&gfm);
+        let mut pipe_rows = 0;
+        for line in md2.lines() {
+            let t = line.trim();
+            if t.starts_with('|') {
+                pipe_rows += 1;
+                assert!(
+                    t.ends_with('|'),
+                    "파이프 행이 '|'로 끝나야: {line:?} in {md2}"
+                );
+            }
+        }
+        assert!(pipe_rows >= 2, "파이프 표 행이 있어야: {md2}");
     }
 
     fn equation_control(script: &str, inline: bool) -> Control {

@@ -30,7 +30,9 @@ pub use format::{CharFormat, set_char_format, set_para_align};
 pub use from_markdown::{MarkdownImportOptions, default_header, from_markdown, from_markdown_with};
 pub use html::{to_html, to_html_fragment};
 pub use image::{ImageSize, image_kind, insert_image, insert_seal};
-pub use markdown::{MarkdownOptions, to_markdown, to_markdown_with};
+pub use markdown::{
+    MarkdownOptions, MarkdownSegment, to_markdown, to_markdown_with, to_markdown_with_segments,
+};
 pub use odt::to_odt;
 pub use structure::{delete_paragraph, insert_paragraph};
 

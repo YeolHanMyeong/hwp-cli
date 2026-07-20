@@ -41,6 +41,10 @@ enum Cmd {
         /// 숨은 설명 텍스트도 추출에 포함 (기본: 제외)
         #[arg(long = "with-hidden")]
         with_hidden: bool,
+        /// (markdown 전용) markdown과 함께 각 출력 문자 범위의 원본 좌표(섹션/문단)를
+        /// 한 줄 JSON 봉투로 출력 — {"markdown": ..., "segments": [...]}
+        #[arg(long = "with-segments")]
+        with_segments: bool,
     },
 
     /// 포맷 변환 (M2부터 단계적 구현)
@@ -303,16 +307,19 @@ fn main() -> anyhow::Result<()> {
         } => commands::dump::run(&file, stream.as_deref(), raw, json),
         Cmd::Cat {
             file,
-            preview: true,
-            ..
-        } => commands::cat::preview(&file),
-        Cmd::Cat {
-            file,
             format,
+            preview,
             with_header_footer,
             with_hidden,
-            ..
-        } => commands::cat::run(&file, format, with_header_footer, with_hidden),
+            with_segments,
+        } => commands::cat::run(
+            &file,
+            format,
+            preview,
+            with_header_footer,
+            with_hidden,
+            with_segments,
+        ),
         Cmd::Convert {
             input,
             output,

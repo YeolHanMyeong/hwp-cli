@@ -45,31 +45,68 @@ pub fn load_document(path: &Path) -> anyhow::Result<Document> {
 
 /// 본문 텍스트 추출.
 ///
-/// `with_header_footer`/`with_hidden`은 머리말·꼬리말/숨은 설명 포함 여부(기본 제외).
-/// plain·markdown 경로에 일관되게 적용된다(html/json은 옵션 미대상).
+/// `preview`면 본문 파싱 없이 PrvText 미리보기만 출력한다. `with_header_footer`/`with_hidden`은
+/// 머리말·꼬리말/숨은 설명 포함 여부(기본 제외) — plain·markdown 경로에 일관되게 적용된다
+/// (html/json은 옵션 미대상). `with_segments`는 markdown 전용으로, markdown과 함께 각 출력
+/// 문자 범위의 원본 좌표를 한 줄 JSON 봉투로 낸다.
 pub fn run(
     path: &Path,
     format: TextFormat,
+    preview: bool,
     with_header_footer: bool,
     with_hidden: bool,
+    with_segments: bool,
 ) -> anyhow::Result<()> {
+    if with_segments {
+        if preview {
+            anyhow::bail!(
+                "--with-segments는 --format markdown 전용입니다 (--preview와 함께 쓸 수 없습니다)"
+            );
+        }
+        if !matches!(format, TextFormat::Markdown) {
+            anyhow::bail!("--with-segments는 --format markdown 전용입니다");
+        }
+    }
+    if preview {
+        return self::preview(path);
+    }
+
     let doc = load_document(path)?;
     let opts = hwp_model::TextOptions {
         include_header_footer: with_header_footer,
         include_hidden: with_hidden,
     };
+    let md_opts = || hwp_convert::MarkdownOptions {
+        text: hwp_model::TextOptions {
+            include_header_footer: with_header_footer,
+            include_hidden: with_hidden,
+        },
+        ..Default::default()
+    };
     match format {
         TextFormat::Plain => print!("{}", doc.plain_text_with(&opts)),
-        TextFormat::Markdown => print!(
-            "{}",
-            hwp_convert::to_markdown_with(
-                &doc,
-                &hwp_convert::MarkdownOptions {
-                    text: opts,
-                    ..Default::default()
-                },
-            )?
-        ),
+        TextFormat::Markdown if with_segments => {
+            let (markdown, segments) = hwp_convert::to_markdown_with_segments(&doc, &md_opts())?;
+            // 한 줄 컴팩트 JSON 봉투 + 개행. kind는 현재 항상 "para"(미래 확장용).
+            let segments: Vec<serde_json::Value> = segments
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "kind": "para",
+                        "section": s.section,
+                        "para": s.para,
+                        "start": s.start,
+                        "end": s.end,
+                    })
+                })
+                .collect();
+            let envelope = serde_json::json!({
+                "markdown": markdown,
+                "segments": segments,
+            });
+            println!("{}", serde_json::to_string(&envelope)?);
+        }
+        TextFormat::Markdown => print!("{}", hwp_convert::to_markdown_with(&doc, &md_opts())?),
         TextFormat::Html => print!("{}", hwp_convert::to_html(&doc)),
         TextFormat::Json => println!("{}", hwp_convert::to_json(&doc, true, false)?),
     }

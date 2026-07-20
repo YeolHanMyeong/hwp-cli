@@ -831,6 +831,170 @@ fn convert_md_media_dir_figs() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// (8) `cat --format markdown --with-segments` 봉투 — 커밋 픽스처(report-tables.hwpx)로
+/// skip 없이. (a) markdown 필드가 무옵션 출력과 동일, (b) 세그먼트 정렬·비중첩·end<=문자수,
+/// (c) 모든 (section,para)가 IR sections[].paragraphs[] 범위 내, (d) 논-ASCII로 byte != char.
+#[test]
+fn cat_with_segments_envelope() {
+    let fix = fixture("samples/report-tables.hwpx");
+    let seg = hwp()
+        .arg("cat")
+        .arg(&fix)
+        .args(["--format", "markdown", "--with-segments"])
+        .output()
+        .expect("hwp cat --with-segments");
+    assert!(
+        seg.status.success(),
+        "with-segments 실행: {}",
+        String::from_utf8_lossy(&seg.stderr)
+    );
+    // 봉투는 한 줄 컴팩트 JSON.
+    assert_eq!(
+        seg.stdout.iter().filter(|&&b| b == b'\n').count(),
+        1,
+        "봉투는 개행 1개(한 줄 + 끝 개행)"
+    );
+    let env: serde_json::Value = serde_json::from_slice(&seg.stdout).expect("JSON 봉투 파싱");
+    let md = env["markdown"].as_str().expect("markdown 필드");
+
+    // (a) markdown == 무옵션 markdown 출력.
+    let plain = hwp()
+        .arg("cat")
+        .arg(&fix)
+        .args(["--format", "markdown"])
+        .output()
+        .expect("hwp cat markdown");
+    let plain_md = String::from_utf8(plain.stdout).expect("utf8");
+    assert_eq!(md, plain_md, "markdown 필드가 무옵션 출력과 동일해야");
+
+    // (d) 논-ASCII(한국어) → byte 길이 != 문자 수.
+    assert_ne!(md.len(), md.chars().count(), "한국어 포함이면 byte != char");
+
+    // (b) 정렬·비중첩·end<=문자수, kind=para.
+    let n = md.chars().count();
+    let segs = env["segments"].as_array().expect("segments 배열");
+    assert!(!segs.is_empty(), "세그먼트가 있어야");
+    let mut prev_end = 0usize;
+    for s in segs {
+        let start = s["start"].as_u64().unwrap() as usize;
+        let end = s["end"].as_u64().unwrap() as usize;
+        assert_eq!(s["kind"], "para", "kind=para");
+        assert!(start < end && end <= n, "범위: [{start},{end}) n={n}");
+        assert!(start >= prev_end, "정렬·비중첩: {start} < {prev_end}");
+        prev_end = end;
+    }
+
+    // (c) 모든 (section,para)가 IR 범위 내.
+    let ir_out = hwp()
+        .arg("cat")
+        .arg(&fix)
+        .args(["--format", "json"])
+        .output()
+        .expect("hwp cat json");
+    let ir: serde_json::Value = serde_json::from_slice(&ir_out.stdout).expect("IR JSON");
+    let sections = ir["sections"].as_array().expect("sections");
+    for s in segs {
+        let sec = s["section"].as_u64().unwrap() as usize;
+        let par = s["para"].as_u64().unwrap() as usize;
+        let paras = sections
+            .get(sec)
+            .and_then(|x| x["paragraphs"].as_array())
+            .unwrap_or_else(|| panic!("section {sec} 범위 밖"));
+        assert!(
+            par < paras.len(),
+            "para {par} in sec {sec} 범위 밖(len {})",
+            paras.len()
+        );
+    }
+}
+
+/// (9) 플래그 오용: `--with-segments --format json` 은 비정상 종료 + 에러 메시지.
+#[test]
+fn with_segments_rejects_non_markdown() {
+    let fix = fixture("samples/report-tables.hwpx");
+    let out = hwp()
+        .arg("cat")
+        .arg(&fix)
+        .args(["--format", "json", "--with-segments"])
+        .output()
+        .expect("hwp cat");
+    assert!(!out.status.success(), "json + with-segments는 실패해야");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("with-segments") || err.contains("markdown"),
+        "에러 메시지에 사유: {err}"
+    );
+}
+
+/// (10) 표 행 한 줄 불변식(픽스처 전수): 커밋 픽스처(항상) + 존재 시 로컬 hwp5/hwpx 픽스처.
+/// 각 markdown 출력에서 줄마다 `<tr` 수 == `</tr>` 수, trim 후 '|' 시작 줄은 '|' 종료.
+/// report-tables.hwpx는 `<tr>` 총수 37로 회귀 고정(중첩 표 포함 — 픽스처 갱신 시 함께 갱신).
+#[test]
+fn table_rows_single_line_all_fixtures() {
+    let mut targets = vec![fixture("samples/report-tables.hwpx")];
+    // 로컬 전용 픽스처가 있으면 포함(없으면 조용히 건너뜀 — 기존 skip 관례).
+    for rel in ["hwp5", "hwpx"] {
+        if let Ok(entries) = std::fs::read_dir(fixture(rel)) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|x| x.to_str()).is_some_and(|x| {
+                    x.eq_ignore_ascii_case("hwp") || x.eq_ignore_ascii_case("hwpx")
+                }) {
+                    targets.push(p);
+                }
+            }
+        }
+    }
+
+    for path in &targets {
+        let out = hwp()
+            .arg("cat")
+            .arg(path)
+            .args(["--format", "markdown"])
+            .output()
+            .expect("hwp cat markdown");
+        // 로컬 픽스처는 파싱 실패(DRM 등)할 수 있으므로 실패 시 건너뛴다.
+        // 커밋 픽스처(report-tables)는 아래 회귀 핀이 성공을 강제한다.
+        if !out.status.success() {
+            continue;
+        }
+        let md = String::from_utf8_lossy(&out.stdout);
+        for (i, line) in md.lines().enumerate() {
+            assert_eq!(
+                line.matches("<tr").count(),
+                line.matches("</tr>").count(),
+                "표 행 한 줄 위반 {}:{}: {line:?}",
+                path.display(),
+                i + 1
+            );
+            let t = line.trim();
+            if t.starts_with('|') {
+                assert!(
+                    t.ends_with('|'),
+                    "파이프 행이 '|'로 끝나야 {}:{}: {line:?}",
+                    path.display(),
+                    i + 1
+                );
+            }
+        }
+    }
+
+    // report-tables.hwpx 회귀 핀: `<tr>` 총수 == 37 (중첩 표 포함 — 픽스처 갱신 시 함께 갱신).
+    let rt = hwp()
+        .arg("cat")
+        .arg(fixture("samples/report-tables.hwpx"))
+        .args(["--format", "markdown"])
+        .output()
+        .expect("hwp cat markdown");
+    assert!(rt.status.success(), "report-tables cat 성공");
+    let md = String::from_utf8_lossy(&rt.stdout);
+    assert_eq!(
+        md.matches("<tr").count(),
+        37,
+        "report-tables `<tr>` 총수 회귀 핀"
+    );
+}
+
 /// 최소 유효 PNG(시그니처+IHDR)를 만든다 — image_pixel_size가 치수를 읽고
 /// writer가 바이트를 그대로 임베드한다(디코딩은 하지 않음).
 fn write_min_png(path: &std::path::Path, w: u32, h: u32) {
