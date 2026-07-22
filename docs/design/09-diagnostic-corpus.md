@@ -39,7 +39,7 @@ bookmark(hwp5), minimal(hwpx).
 
 이 하네스로 **못 잡는** 것 = **한글(한컴오피스) 특정 렌더 동작**. 예: annual 6쪽 자리표시자
 글상자 드롭 + 빈 페이지(한글 미문서화 heavy-content 동작 — 조사 종결·수용, [07](07-hangul-compat-rules.md)).
-이런 이슈는 **정품 한글 실기**로만 판정된다 → `~/Downloads/hwp-진단코퍼스/README-한글검토.md`의
+이런 이슈는 **정품 한글 실기**로만 판정된다 → `~/Documents/hwp-진단코퍼스/README-한글검토.md`의
 체크리스트로 사용자가 각 파일을 한글에서 열어 확인.
 
 ## 확장 방법
