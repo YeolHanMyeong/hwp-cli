@@ -2,7 +2,7 @@
 
 > A clean-room Rust toolkit to read, convert, render, write and AI-edit HWP 5.0 / HWPX documents with **no Hancom or COM dependency** — runs on Linux / macOS / CI.
 
-[![CI](https://github.com/YeolHanMyeong/hwp-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/YeolHanMyeong/hwp-cli/actions/workflows/ci.yml)
+[![CI](https://github.com/STAIxBWLB/hwp-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/STAIxBWLB/hwp-cli/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#라이선스)
 [![Rust](https://img.shields.io/badge/rust-edition%202024-orange.svg)](Cargo.toml)
 
@@ -70,7 +70,7 @@
 ### 빌드 / 설치
 
 ```sh
-git clone git@github.com:YeolHanMyeong/hwp-cli.git && cd hwp-cli
+git clone git@github.com:STAIxBWLB/hwp-cli.git && cd hwp-cli
 cargo build --release
 cargo install --path crates/hwp-cli   # `hwp` 바이너리 설치
 ```
@@ -79,7 +79,7 @@ cargo install --path crates/hwp-cli   # `hwp` 바이너리 설치
 
 ### 다운로드 (사전 빌드 바이너리)
 
-각 [릴리스](https://github.com/YeolHanMyeong/hwp-cli/releases)에 플랫폼별 `hwp` 아카이브와 `.sha256` 체크섬이 첨부된다:
+각 [릴리스](https://github.com/STAIxBWLB/hwp-cli/releases)에 플랫폼별 `hwp` 아카이브와 `.sha256` 체크섬이 첨부된다:
 
 | 플랫폼 | 아카이브 |
 |---|---|
