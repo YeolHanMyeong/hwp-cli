@@ -64,6 +64,7 @@
 | `--media-dir` | `<MEDIA_DIR>` |  | (md) 이미지 추출 디렉터리 — 기본 "<출력스템>.media". 상대경로는 출력 파일 기준으로 해석하고 링크는 입력한 경로 그대로 쓴다 (예: figs) |
 | `--with-header-footer` |  |  | (md) 머리말/꼬리말 텍스트도 포함 (기본: 제외) |
 | `--with-hidden` |  |  | (md) 숨은 설명 텍스트도 포함 (기본: 제외) |
+| `--font-dir` | `<FONT_DIR>` |  | (pdf) 추가 폰트 디렉터리 (반복 가능, 기본: HWP_FONT_DIR 또는 fonts/) |
 
 ## `hwp render`
 

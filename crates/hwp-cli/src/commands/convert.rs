@@ -3,7 +3,7 @@
 //! M2 범위: hwp/hwpx → markdown/JSON. hwpx 쓰기(M4)와 hwp 쓰기(M6)는
 //! 이후 마일스톤.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::commands::cat::load_document;
 use hwp_cli::cli::ConvertFormat;
@@ -19,6 +19,7 @@ pub struct MdOpts<'a> {
     pub with_hidden: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     input: &Path,
     output: &Path,
@@ -27,6 +28,7 @@ pub fn run(
     preserve_layout: bool,
     embed_bin: bool,
     md_opts: &MdOpts,
+    font_dirs: Vec<PathBuf>,
 ) -> anyhow::Result<()> {
     // PDF는 문서 포맷 변환이 아니라 렌더 출력 — render 경로에 위임한다
     // (사용자의 "변환" 프레이밍 대응: `hwp convert in.hwp -o out.pdf`).
@@ -42,7 +44,7 @@ pub fn run(
             "all",
             96.0,
             Some(hwp_cli::cli::RenderFormat::Pdf),
-            Vec::new(),
+            font_dirs,
         );
     }
 
@@ -101,7 +103,7 @@ pub fn run(
         }
         ConvertFormat::Pdf => {
             let doc = load_document(input)?;
-            let result = hwp_render::render_document_pdf(&doc, &pdf_render_opts(), None)?;
+            let result = hwp_render::render_document_pdf(&doc, &pdf_render_opts(font_dirs), None)?;
             print_warnings(&result.report);
             std::fs::write(output, &result.data)?;
         }
@@ -209,7 +211,7 @@ pub fn write_by_ext(
             Vec::new()
         }
         Some("pdf") => {
-            let result = hwp_render::render_document_pdf(doc, &pdf_render_opts(), None)?;
+            let result = hwp_render::render_document_pdf(doc, &pdf_render_opts(Vec::new()), None)?;
             std::fs::write(output, &result.data)?;
             result.report
         }
@@ -231,11 +233,12 @@ pub fn resolve_font_dirs(given: Vec<std::path::PathBuf>) -> Vec<std::path::PathB
     )]
 }
 
-/// PDF 렌더 옵션 — 폰트는 `HWP_FONT_DIR`(없으면 `fonts/`)에서 해석.
-fn pdf_render_opts() -> hwp_render::RenderOptions {
+/// PDF 렌더 옵션 — 폰트는 `given`(`--font-dir`)이 비었으면 `HWP_FONT_DIR`
+/// (없으면 `fonts/`)에서 해석.
+fn pdf_render_opts(given: Vec<PathBuf>) -> hwp_render::RenderOptions {
     hwp_render::RenderOptions {
         dpi: 96.0,
-        font_dirs: resolve_font_dirs(Vec::new()),
+        font_dirs: resolve_font_dirs(given),
     }
 }
 

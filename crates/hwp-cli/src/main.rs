@@ -46,6 +46,7 @@ fn main() -> anyhow::Result<()> {
             media_dir,
             with_header_footer,
             with_hidden,
+            font_dir,
         } => commands::convert::run(
             &input,
             &output,
@@ -58,6 +59,7 @@ fn main() -> anyhow::Result<()> {
                 with_header_footer,
                 with_hidden,
             },
+            font_dir,
         ),
         Cmd::Render {
             input,
