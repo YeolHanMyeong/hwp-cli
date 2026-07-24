@@ -164,6 +164,8 @@ hwp mcp --font-dir ./fonts
 
 ## 명령 레퍼런스
 
+전체 자동 생성 레퍼런스는 [docs/manual/cli-reference.md](docs/manual/cli-reference.md) — clap 정의에서 생성되며 코드와의 동기화를 CI 테스트가 강제한다. 아래는 요약이다.
+
 | 명령 | 인자 / 플래그 | 설명 |
 |---|---|---|
 | `info <file>` | `--json` | 포맷/버전/속성/스트림 진단 |
@@ -173,6 +175,10 @@ hwp mcp --font-dir ./fonts
 | `new -o <output>` | `--from <md\|json>`(생략 시 빈 문서) | markdown/JSON IR에서 새 문서 생성. markdown 목록은 진짜 번호(NUMBER)/글머리(BULLET) 머리 문단으로 들여오고(중첩=수준), H1~H3 제목엔 절 번호(`1.`/`1-1.`/`1-1-1.`, 숫자 시작 제목은 생략)를 접두한다 |
 | `edit <input> -o <output>` | `--replace "찾기=>바꾸기"`, `--set-cell "표:행:열=값"`(0-기반), `--set-field "이름=값"`, `--create-field "앵커=>이름"`(또는 `"앵커=>이름=값"`, %clk 누름틀 생성), `--insert-image "앵커=>경로"`(또는 `"앵커=>경로@너비x높이"`mm, png/jpg/bmp/gif 삽입), `--seal "앵커=>경로"`(또는 `"앵커=>경로@크기mm"`, 도장 이미지를 앵커 문구 위에 글 앞 부유 배치 — 기본 20mm), `--set-format "찾기:bold=on,size=16,color=#RRGGBB"`, `--set-align "찾기=left\|right\|center\|justify\|distribute\|divide"`, `--insert-para "앵커=>텍스트"`(앵커 문단 뒤), `--insert-para-before "앵커=>텍스트"`(앞), `--delete-para "텍스트"`, `--add-row "표"`, `--add-col "표"`(또는 `"표:위치"`), `--delete-row "표:행"`, `--delete-col "표:열"`, `--merge-cells "표:r1:c1:r2:c2"`(사각 영역 병합), `--split-cell "표:행:열"`(병합 해제), `--verify` (모두 반복 가능) | 기존 문서 편집. 텍스트·서식·구조(문단/표 행·열·셀 병합/분할) 편집. 삽입 문단·행은 앵커/템플릿 모양을 상속하고 합성 경로로 저장(불변식 적용). 표 인덱스는 **재귀 깊이 우선**(중첩 표 포함, --set-cell과 동일). 열 추가·삭제·셀 병합/분할은 **병합 셀 표도 지원**(정품 1,816개 실측 규칙 — 피병합 셀 생략·행 우선·병합 cellSz). `--add-col`은 전체 표 폭을 유지하며 기존 열을 균등 축소(잔차는 행 마지막 기존 셀); 위치 생략 시 표 끝에 추가. `--add-row`는 병합 없는 템플릿 행이 필요(없으면 거부). `--replace`만 있고 hwpx→hwpx이면 **패키지 보존 고속 경로**(미리보기·호환 블록 바이트 유지, 런 분절 교차 매칭 미지원). `--verify`는 쓰기 후 재읽기로 검증 |
 | `fields <file>` | `--json` | 필드/누름틀 목록(이름·종류·값·명령) |
+| `bookmarks <file>` | `--json` | 책갈피(bokm) 목록(이름) |
+| `slots <file>` | `--json` | `{{name}}` 텍스트 자리표시자(템플릿 슬롯) 목록 |
+| `fill <input> -o <output>` | `--set "이름=값"`(반복), `--data <json>`, `--json` | 충실도 보존 템플릿 채우기 — hwpx의 `{{name}}` 치환(패키지 보존). `--data`는 이름→값 JSON 객체 파일로 일괄 채움 |
+| `validate <file>` | `--json` | 구조 검증(mimetype·필수 엔트리·XML 파싱) — 유효 시 종료코드 0 |
 | `diff <input> --ref <png>` | `--page <n>`(기본 1), `--dpi <f64>`(기본 96), `-o/--out <png>`, `--font-dir <dir>`(반복), `--tolerance <u8>`(기본 16) | 렌더 결과를 한글 기준 PNG와 비교(잉크 적용률·dx/dy 오프셋·픽셀 차이율·MAE) |
 | `mcp` | `--font-dir <dir>`(반복) | MCP stdio 서버 실행 |
 | `dump <file>` | `--stream <name>`, `--raw`, `--json` | [개발자용] 레코드/패키지 구조 덤프 |

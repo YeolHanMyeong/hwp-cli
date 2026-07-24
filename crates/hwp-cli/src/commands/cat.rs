@@ -8,8 +8,8 @@ use std::path::Path;
 
 use hwp_model::Document;
 
-use crate::TextFormat;
 use crate::format::{FileFormat, detect};
+use hwp_cli::cli::TextFormat;
 
 /// 포맷을 감지해 IR로 읽는다 (cat/convert/render 공용).
 ///

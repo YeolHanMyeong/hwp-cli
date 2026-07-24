@@ -5,8 +5,8 @@
 
 use std::path::Path;
 
-use crate::ConvertFormat;
 use crate::commands::cat::load_document;
+use hwp_cli::cli::ConvertFormat;
 
 /// markdown 출력 전용 추가 옵션 (다른 포맷에서는 무시).
 #[derive(Default)]
@@ -41,7 +41,7 @@ pub fn run(
             output,
             "all",
             96.0,
-            Some(crate::RenderFormat::Pdf),
+            Some(hwp_cli::cli::RenderFormat::Pdf),
             Vec::new(),
         );
     }

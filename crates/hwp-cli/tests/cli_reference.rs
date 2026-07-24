@@ -1,0 +1,269 @@
+//! CLI 명령 레퍼런스 자동 생성 + 드리프트 게이트.
+//!
+//! `clap::CommandFactory`로 `Cli`의 명령 트리를 introspect해 `docs/manual/cli-reference.md`
+//! 를 결정적으로 생성한다. 커밋본과 재생성본이 어긋나면 실패한다 — CLI 정의(플래그·help
+//! 텍스트)를 바꾸면 문서도 함께 갱신하도록 강제하는 장치.
+//!
+//! 재생성(bless): `HWP_UPDATE_DOCS=1 cargo test -p hwp-cli --test cli_reference`.
+
+use clap::builder::StyledStr;
+use clap::{Arg, ArgAction, Command, CommandFactory};
+use hwp_cli::cli::Cli;
+
+/// 커밋된 문서 경로 (crate 기준 상대).
+fn doc_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/manual/cli-reference.md")
+}
+
+const HEADER_COMMENT: &str = "<!-- 자동 생성 문서 — 수동 편집 금지. 재생성: HWP_UPDATE_DOCS=1 cargo test -p hwp-cli --test cli_reference -->";
+
+/// StyledStr → 순수 텍스트(ANSI 없음), 앞뒤 공백 제거.
+fn plain(s: &StyledStr) -> String {
+    s.to_string().trim().to_string()
+}
+
+/// 표 셀 안전 이스케이프: 개행→공백(연속 공백 축약), `|`→`\|`.
+fn cell(s: &str) -> String {
+    let joined = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    joined.replace('|', "\\|")
+}
+
+/// GitHub 앵커: `hwp <name>` → `hwp-<name>` (이름은 단일 토큰이라 단순 치환으로 충분).
+fn anchor(name: &str) -> String {
+    format!("hwp-{name}")
+}
+
+/// 값을 갖지 않는 액션(불리언 플래그 등)인지.
+fn is_flag(action: &ArgAction) -> bool {
+    matches!(
+        action,
+        ArgAction::SetTrue
+            | ArgAction::SetFalse
+            | ArgAction::Count
+            | ArgAction::Help
+            | ArgAction::HelpShort
+            | ArgAction::HelpLong
+            | ArgAction::Version
+    )
+}
+
+/// 문서 생성에서 제외할 인자(clap 자동 추가 help/version, 숨김 인자).
+fn skip_arg(arg: &Arg) -> bool {
+    arg.is_hide_set()
+        || matches!(
+            arg.get_action(),
+            ArgAction::Help | ArgAction::HelpShort | ArgAction::HelpLong | ArgAction::Version
+        )
+        || matches!(arg.get_id().as_str(), "help" | "version")
+}
+
+/// 인자의 값 이름 placeholder(예: `<OUTPUT>`). value_name 없으면 id를 대문자화.
+fn value_placeholder(arg: &Arg) -> String {
+    let name = arg
+        .get_value_names()
+        .and_then(|ns| ns.first())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| arg.get_id().as_str().to_uppercase());
+    format!("`<{name}>`")
+}
+
+/// value_enum의 노출 가능한 값 목록(선언 순서). enum이 아니면 빈 Vec.
+fn possible_values(arg: &Arg) -> Vec<String> {
+    arg.get_possible_values()
+        .iter()
+        .filter(|pv| !pv.is_hide_set())
+        .map(|pv| pv.get_name().to_string())
+        .collect()
+}
+
+/// `render_usage()`를 `hwp <name> …` 형태로 정규화한다.
+/// (서브커맨드를 부모에서 꺼내면 프로그램명이 없어 `Usage: <name> …`로 나올 수 있다 —
+/// 첫 `<name>` 토큰 뒤 본문만 취해 `hwp <name> <본문>`으로 재조립한다.)
+fn usage_line(sub: &Command, name: &str) -> String {
+    let raw = sub.clone().render_usage().to_string();
+    let after_label = raw
+        .trim()
+        .strip_prefix("Usage:")
+        .map(str::trim)
+        .unwrap_or_else(|| raw.trim());
+    let body = match after_label.split_once(name) {
+        Some((_, rest)) => rest.trim_start(),
+        None => "",
+    };
+    if body.is_empty() {
+        format!("hwp {name}")
+    } else {
+        format!("hwp {name} {body}")
+    }
+}
+
+/// 한 서브커맨드의 인자/플래그 표 행들. 선언 순서 유지.
+fn arg_rows(sub: &Command) -> Vec<String> {
+    let mut rows = Vec::new();
+    for arg in sub.get_arguments() {
+        if skip_arg(arg) {
+            continue;
+        }
+        // 1열: 인자/플래그 이름.
+        let name_col = if arg.is_positional() {
+            value_placeholder(arg)
+        } else {
+            match (arg.get_short(), arg.get_long()) {
+                (Some(s), Some(l)) => format!("`-{s}, --{l}`"),
+                (None, Some(l)) => format!("`--{l}`"),
+                (Some(s), None) => format!("`-{s}`"),
+                (None, None) => format!("`{}`", arg.get_id().as_str()),
+            }
+        };
+
+        // 2열: 값 (enum 값 목록 또는 placeholder; 불리언 플래그는 빈칸).
+        let value_col = if is_flag(arg.get_action()) {
+            String::new()
+        } else {
+            let pvs = possible_values(arg);
+            if !pvs.is_empty() {
+                pvs.iter()
+                    .map(|v| format!("`{v}`"))
+                    .collect::<Vec<_>>()
+                    .join(" \\| ")
+            } else if arg.is_positional() {
+                // placeholder는 이미 1열에 있으므로 중복 표기하지 않는다.
+                String::new()
+            } else {
+                value_placeholder(arg)
+            }
+        };
+
+        // 3열: 기본값.
+        let default_col = arg
+            .get_default_values()
+            .iter()
+            .map(|v| v.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let default_col = if default_col.is_empty() {
+            String::new()
+        } else {
+            format!("`{default_col}`")
+        };
+
+        // 4열: 설명 (help) + 반복 가능 표기.
+        // help가 이미 "반복 가능"을 담고 있으면(doc comment 관례) 중복을 피한다 —
+        // Append인데 표기가 없는 플래그에만 표준 마커를 덧붙여 일관성을 맞춘다.
+        let mut help = arg.get_help().map(plain).unwrap_or_default();
+        if matches!(arg.get_action(), ArgAction::Append) && !help.contains("반복 가능") {
+            if help.is_empty() {
+                help = "(반복 가능)".to_string();
+            } else {
+                help.push_str(" (반복 가능)");
+            }
+        }
+        let help_col = cell(&help);
+
+        rows.push(format!(
+            "| {name_col} | {value_col} | {default_col} | {help_col} |"
+        ));
+    }
+    rows
+}
+
+/// clap 정의에서 마크다운 레퍼런스 전문을 생성한다.
+fn generate() -> String {
+    let root = Cli::command();
+    // 노출 대상 서브커맨드(숨김 제외), 선언 순서 유지.
+    let subs: Vec<&Command> = root
+        .get_subcommands()
+        .filter(|c| !c.is_hide_set())
+        .collect();
+
+    let mut out = String::new();
+    out.push_str(HEADER_COMMENT);
+    out.push_str("\n\n# hwp CLI 명령 레퍼런스\n\n");
+    out.push_str(
+        "이 문서는 `hwp` CLI의 clap 정의에서 자동 생성된다. 직접 편집하지 말고, 명령·플래그가 \
+         바뀌면 `HWP_UPDATE_DOCS=1 cargo test -p hwp-cli --test cli_reference`로 재생성하라 — \
+         CI 테스트가 코드와 문서의 동기화를 강제한다.\n\n",
+    );
+
+    // 명령 색인.
+    out.push_str("## 명령 색인\n\n");
+    for sub in &subs {
+        let name = sub.get_name();
+        out.push_str(&format!("- [`hwp {name}`](#{})\n", anchor(name)));
+    }
+    out.push('\n');
+
+    // 명령별 섹션.
+    for sub in &subs {
+        let name = sub.get_name();
+        out.push_str(&format!("## `hwp {name}`\n\n"));
+
+        // about / long_about (long_about 우선).
+        let about = sub
+            .get_long_about()
+            .or_else(|| sub.get_about())
+            .map(plain)
+            .unwrap_or_default();
+        if !about.is_empty() {
+            out.push_str(&about);
+            out.push_str("\n\n");
+        }
+
+        // 사용법.
+        out.push_str(&format!("**사용법:** `{}`\n\n", usage_line(sub, name)));
+
+        // 인자/플래그 표.
+        let rows = arg_rows(sub);
+        if rows.is_empty() {
+            out.push_str("_인자·플래그 없음_\n\n");
+        } else {
+            out.push_str("| 인자/플래그 | 값 | 기본값 | 설명 |\n");
+            out.push_str("|---|---|---|---|\n");
+            for r in rows {
+                out.push_str(&r);
+                out.push('\n');
+            }
+            out.push('\n');
+        }
+    }
+
+    // 파일 끝 개행 1개로 정규화.
+    while out.ends_with('\n') {
+        out.pop();
+    }
+    out.push('\n');
+    out
+}
+
+#[test]
+fn cli_reference_up_to_date() {
+    let generated = generate();
+    let path = doc_path();
+
+    // bless 모드: 파일을 새로 쓰고 통과.
+    if std::env::var_os("HWP_UPDATE_DOCS").is_some() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("docs/manual 디렉터리 생성");
+        }
+        std::fs::write(&path, &generated).expect("cli-reference.md 쓰기");
+        eprintln!("cli-reference.md 재생성 완료: {}", path.display());
+        return;
+    }
+
+    // 검증 모드: 커밋본과 비교(Windows CI 대비 CRLF 정규화).
+    let committed = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "cli-reference.md를 읽을 수 없음({e}) — \
+             `HWP_UPDATE_DOCS=1 cargo test -p hwp-cli --test cli_reference`로 최초 생성하라: {}",
+            path.display()
+        )
+    });
+    let committed = committed.replace("\r\n", "\n");
+
+    assert_eq!(
+        committed, generated,
+        "\nCLI 정의가 문서와 어긋남 — \
+         `HWP_UPDATE_DOCS=1 cargo test -p hwp-cli --test cli_reference`로 재생성한 뒤 \
+         diff를 확인해 커밋하라."
+    );
+}

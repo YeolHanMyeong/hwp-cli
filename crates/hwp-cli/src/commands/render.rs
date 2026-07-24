@@ -4,8 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::RenderFormat;
 use crate::commands::cat::load_document;
+use hwp_cli::cli::RenderFormat;
 
 pub fn run(
     input: &Path,
