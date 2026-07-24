@@ -33,25 +33,47 @@ pub fn char_kind(code: u16) -> CharKind {
     }
 }
 
-/// 잘 알려진 컨트롤 문자 코드.
+/// 잘 알려진 컨트롤 문자 코드 (한글문서파일형식 5.0 §3.2.3 표 6 「제어 문자」).
+///
+/// 각 상수의 주석은 표 6 해당 행의 설명·컨트롤 형식을 옮긴 것이다. 0~31 중
+/// 여기 없는 코드는 예약(1·5~7·12·14·19~20·25~29)·unusable(0)·title mark(8,
+/// 코드베이스 미사용)뿐이며, 분류 전수는 [`char_kind`](super::char_kind)가 다룬다.
 pub mod ctrl_char {
+    /// 한 줄 끝(line break) — char (§3.2.3 표 6 코드 10)
     pub const LINE_BREAK: u16 = 10;
+    /// 문단 끝(para break) — char (§3.2.3 표 6 코드 13)
     pub const PARA_BREAK: u16 = 13;
+    /// 하이픈 — char (§3.2.3 표 6 코드 24)
     pub const HYPHEN: u16 = 24;
-    pub const NB_SPACE: u16 = 30; // 묶음 빈칸
-    pub const FW_SPACE: u16 = 31; // 고정폭 빈칸
+    /// 묶음 빈칸 — char (§3.2.3 표 6 코드 30)
+    pub const NB_SPACE: u16 = 30;
+    /// 고정폭 빈칸 — char (§3.2.3 표 6 코드 31)
+    pub const FW_SPACE: u16 = 31;
+    /// 필드 끝 — inline (§3.2.3 표 6 코드 4)
     pub const FIELD_END: u16 = 4;
+    /// 탭 — inline (§3.2.3 표 6 코드 9)
     pub const TAB: u16 = 9;
-    pub const SECTION_COLUMN_DEF: u16 = 2; // 구역/단 정의
+    /// 구역 정의/단 정의 — extended (§3.2.3 표 6 코드 2)
+    pub const SECTION_COLUMN_DEF: u16 = 2;
+    /// 필드 시작(누름틀·하이퍼링크·블록 책갈피·표 계산식·상호 참조·메모 등)
+    /// — extended (§3.2.3 표 6 코드 3)
     pub const FIELD_START: u16 = 3;
-    pub const OBJECT: u16 = 11; // 그리기 개체/표
+    /// 그리기 개체/표 — extended (§3.2.3 표 6 코드 11)
+    pub const OBJECT: u16 = 11;
+    /// 숨은 설명 — extended (§3.2.3 표 6 코드 15)
     pub const HIDDEN_COMMENT: u16 = 15;
+    /// 머리말/꼬리말 — extended (§3.2.3 표 6 코드 16)
     pub const HEADER_FOOTER: u16 = 16;
+    /// 각주/미주 — extended (§3.2.3 표 6 코드 17)
     pub const FOOTNOTE_ENDNOTE: u16 = 17;
+    /// 자동번호(각주, 표 등) — extended (§3.2.3 표 6 코드 18)
     pub const AUTO_NUMBER: u16 = 18;
+    /// 페이지 컨트롤(감추기, 새 번호로 시작 등) — extended (§3.2.3 표 6 코드 21)
     pub const PAGE_CONTROL: u16 = 21;
+    /// 책갈피/찾아보기 표식 — extended (§3.2.3 표 6 코드 22)
     pub const BOOKMARK: u16 = 22;
-    pub const OVERLAP: u16 = 23; // 덧말/글자 겹침
+    /// 덧말/글자 겹침 — extended (§3.2.3 표 6 코드 23)
+    pub const OVERLAP: u16 = 23;
 }
 
 /// 문단을 구성하는 문자 하나.
