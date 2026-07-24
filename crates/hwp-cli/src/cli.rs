@@ -76,6 +76,9 @@ pub enum Cmd {
         /// (md) 숨은 설명 텍스트도 포함 (기본: 제외)
         #[arg(long = "with-hidden")]
         with_hidden: bool,
+        /// (pdf) 추가 폰트 디렉터리 (반복 가능, 기본: HWP_FONT_DIR 또는 fonts/)
+        #[arg(long)]
+        font_dir: Vec<PathBuf>,
     },
 
     /// 페이지 렌더링
